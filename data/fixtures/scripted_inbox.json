@@ -1,0 +1,30 @@
+{
+  "_note": "Dry-run fixture: simulates what read_inbox()/read_thread() would return. Not used in live runs.",
+  "threads": [
+    {
+      "thread_id": "t-001",
+      "buyer_handle": "alex_88",
+      "item_id": "sample-ikea-desk",
+      "messages": [
+        { "msg_id": "m1", "dir": "in", "text": "Hi! Is the cable tray included?", "ts": "2026-06-20T09:02:00+08:00" },
+        { "msg_id": "m2", "dir": "in", "text": "Great. Can I collect this Saturday afternoon?", "ts": "2026-06-20T09:03:00+08:00" }
+      ]
+    },
+    {
+      "thread_id": "t-002",
+      "buyer_handle": "mei_w",
+      "item_id": "sample-ikea-desk",
+      "messages": [
+        { "msg_id": "m1", "dir": "in", "text": "Would you take $60 for it?", "ts": "2026-06-20T09:10:00+08:00" }
+      ]
+    },
+    {
+      "thread_id": "t-003",
+      "buyer_handle": "jay",
+      "item_id": "sample-ikea-desk",
+      "messages": [
+        { "msg_id": "m1", "dir": "in", "text": "Does it fit a monitor-arm clamp? What's the desktop thickness?", "ts": "2026-06-20T09:20:00+08:00" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bazaarskills.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/jerryneo/bazaar-skills/bin/agent_daemon.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jerryneo/bazaar-skills</string>
+
+  <!-- launchd jobs get a minimal PATH; add the dirs where claude / npx / node / curl live.
+       Adjust if `which claude npx node` shows different paths on your machine. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/jerryneo/.nvm/versions/node/v20.11.0/bin:/Users/jerryneo/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Pin the agent runtime so the daemon never autodetects `codex` (which the runner refuses
+         → rc=3, a whole pass lost). Only claude-code is wired today; see harness_run.py. -->
+    <key>BAZAAR_HARNESS</key>
+    <string>claude-code</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jerryneo/bazaar-skills/logs/agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jerryneo/bazaar-skills/logs/agent.err.log</string>
+</dict>
+</plist>

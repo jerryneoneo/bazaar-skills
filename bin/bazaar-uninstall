@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# bazaar-uninstall — remove Bazaar's harness footprint (gstack-style). Stops the always-on daemon
+# and removes the global slash-command launchers from every harness. By default it also clears the
+# ~/.bazaar pointer/config.
+#
+# It NEVER deletes your runtime dir or your data/ (listings, floors, budgets, secrets) — those are
+# yours. It prints the path so you can `rm -rf` it yourself if you truly want everything gone.
+#
+#   bazaar-uninstall                remove launchers + daemon + ~/.bazaar (asks first)
+#   bazaar-uninstall --keep-state   keep ~/.bazaar (config/pointer)
+#   bazaar-uninstall --force        don't ask for confirmation
+set -euo pipefail
+
+KEEP_STATE=0 ; FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep-state) KEEP_STATE=1; shift ;;
+    --force|-f)   FORCE=1; shift ;;
+    -h|--help)    sed -n '2,12p' "$0"; exit 0 ;;
+    *)            echo "unknown flag: $1 (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+say()  { printf '\033[1;36mBazaar:\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
+
+HOME_FILE="$HOME/.bazaar/home"
+RUNTIME="$([ -f "$HOME_FILE" ] && cat "$HOME_FILE" || true)"
+[ -z "$RUNTIME" ] && RUNTIME="$(cd "$(dirname "$0")/.." && pwd)"  # fallback: this checkout
+
+if [ "$FORCE" != 1 ]; then
+  printf '\033[1;36mBazaar:\033[0m Remove launchers + stop the daemon%s? [y/N]: ' \
+    "$([ "$KEEP_STATE" = 1 ] && echo "" || echo " + clear ~/.bazaar")"
+  read -r ans || true
+  case "${ans:-}" in y|Y|yes) ;; *) warn "Aborted."; exit 0 ;; esac
+fi
+
+# 1. Stop + unload the always-on daemon (macOS launchd). Best-effort.
+if [ -x "$RUNTIME/launchd/install_daemon.sh" ]; then
+  say "Stopping the always-on daemon…"
+  "$RUNTIME/launchd/install_daemon.sh" uninstall || warn "daemon uninstall reported an issue (continuing)."
+fi
+
+# 2. Remove the global launchers from EVERY known harness's skills dir.
+if [ -f "$RUNTIME/bin/install.py" ]; then
+  say "Removing global launchers…"
+  python3 "$RUNTIME/bin/install.py" rm-launchers --all || warn "launcher removal reported an issue (continuing)."
+fi
+
+# 3. Clear ~/.bazaar unless asked to keep it.
+if [ "$KEEP_STATE" != 1 ]; then
+  rm -rf "$HOME/.bazaar" && say "Cleared ~/.bazaar."
+else
+  say "Kept ~/.bazaar (config/pointer)."
+fi
+
+say "Done. Your runtime dir + data are untouched at: $RUNTIME"
+say "To remove everything (including listings, floors, budgets, secrets): rm -rf \"$RUNTIME\""

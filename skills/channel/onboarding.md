@@ -1,0 +1,197 @@
+# ONBOARDING flow
+
+**Triggers:** after INTRO `setup`, the `/onboard` command, or a jump from `/bazaar-install` /
+`/bazaar` into one of the named anchors below (re-runnable any time to edit — show the current value
+as the default and accept "keep"). Writes `data/seller_config.json` and seeds availability.
+
+Uses only the `channel.md` verbs. All money/address handling follows the trust rules below. The
+`##`-anchored sections (`CHOOSE_INTERFACE`, `CHOOSE_MARKETPLACES`, `APPROVALS`, `BUYER_PROFILE`) are
+the single source of truth for those steps — full onboarding runs them in order; `/bazaar` jumps
+straight to one. Bazaar is one agent that can **sell and buy**; the seller fields below write
+`data/seller_config.json`, and the optional `BUYER_PROFILE` step writes `data/buyer_config.json`.
+
+```
+say  "Let's get you set up. You can re-run /onboard (or open /bazaar) any time to change these."
+
+run  CHOOSE_INTERFACE                                       # how you talk to me (probe & bind)
+ask  "What currency do you sell in?"                        -> currency        (e.g. SGD)
+ask  "Your region / timezone?"                              -> region, timezone
+run  CHOOSE_MARKETPLACES                                    # region-filtered platform picker
+
+say  "Your full PICKUP address, couriers need it to collect. Buyers NEVER see this; I only
+      use it to calculate delivery distance."
+ask  "Address (block/unit, street, postcode, area)?"       -> origin {line1, postcode, area}
+      # lat/lng optional; if provided, enables distance-band fees, else area-name zones only
+
+say  "Everything ships P2P, no meetups. Let's set delivery zones so buyers get an accurate total."
+ask  "Use the default zone→fee table, or enter your own?" options=[default=Use default, custom=Customize]
+  default -> seed shipping.zones with the standard near/mid/far + unserviceable bands
+  custom  -> ask for each band's fee (and area/distance match) -> shipping.zones[]
+ask  "Default delivery size surcharges OK (small 0 / medium / large / bulky)?" options=[yes, edit]
+
+ask  "Connect a calendar so I can answer 'when will it ship?' accurately?"
+     options=[connect=Connect calendar, manual=Set windows manually, skip=Skip for now]
+  connect -> set availability.source = "calendar_mcp"
+             say "Make sure your Google Calendar MCP is connected in this harness."
+  manual  -> ask weekly windows (days + times) -> write data/availability.json ;
+             set availability.source = "manual"
+  skip    -> set availability.source = "skip" ;
+             say "No problem, I'll keep timing answers vague until you set this."
+
+run  APPROVALS                                              # autonomy level (both layers)
+
+ask  "Want me to BUY for you too? I can search the marketplaces and negotiate on your behalf."
+     options=[yes=Set up buying, skip=Just selling for now]
+  yes  -> run BUYER_PROFILE                                 # writes data/buyer_config.json
+  skip -> say "No problem, enable buying any time via /bazaar -> buying."
+
+write data/seller_config.json   (schema below)
+say  "✅ All set! Send /list with photos to sell, or /search to buy."
+```
+
+## CHOOSE_INTERFACE
+Pick the chat interface and bind it ("probe & bind" — full contract in `skills/channel/adapters.md`).
+```
+for adapter in [console, telegram]:   # supported today; iMessage + WhatsApp adapters land later
+    d = adapter.detect()                                   # cheap, read-only probe
+    record d.available + d.evidence/hint
+say  the detection summary (e.g. "✅ Telegram token + chat found · console always available")
+# DEFAULT-SUGGEST TELEGRAM — it's the recommended channel (reach the agent from your phone, anywhere;
+# the console only works while this terminal session is open).
+ask  "Which interface should I use?"
+     options=[telegram=Telegram (recommended), console=Console (this terminal only)]
+     default=telegram   -> choice
+if the chosen adapter is not already bound:
+    run choice.connect()    # telegram -> the BotFather walkthrough in skills/channel/adapters.md
+                            #             (teaches: create the bot, copy the token, paste it here);
+                            # console  -> no-op
+    (sets the token env var for install.py gen-settings to pick up; verifies one round-trip)
+write seller_config.channel = { adapter: choice, bound_at: <today>, detail: {…non-secret ids…} }
+# If switching while a daemon is loaded: uninstall -> rewrite -> reinstall (see adapters.md).
+```
+
+## CHOOSE_MARKETPLACES
+Offer only the platforms relevant to the seller's region (per `skills/marketplaces.md`).
+```
+registry = load data/marketplaces.json
+offered  = [ m for m in registry if m.status=="active"
+             and (region in m.regions or "*" in m.regions)
+             and fulfillment in m.fulfillment ]
+ask  "Which marketplaces?" options=[<m.id>=<m.display_name> for m in offered]   (multi-select)
+     -> for each chosen id: marketplaces[id] = { enabled:true, auth:"unknown", connector:<type> }
+        for each unchosen offered id: marketplaces[id] = { enabled:false }
+# Connect each enabled chrome_session platform on its REGIONAL site (SG seller → ebay.com.sg,
+# carousell.sg — never the global .com). The regional host is the single source of truth in the
+# registry's `domains` map, resolved by bin/resolve_domain.py (see skills/marketplaces.md).
+for id in enabled where registry[id].connector.auth=="chrome_session":
+    host = python3 bin/resolve_domain.py --market <id> --region <region>   # -> regional host
+    marketplaces[id].site = host                                          # persist for listing/scan
+    navigate("https://<host>/")                                           # open the regional site
+    confirm "Logged in to <display_name> for your region (<host>) in your Chrome?"
+        yes -> marketplaces[id].auth = "confirmed"
+        no  -> marketplaces[id].auth = "needs_login"                      # already navigated there;
+               say "Log in to <host> in the Chrome I just opened. I never sign in for you."
+    # NEVER auto-log-in (account safety; chrome_session = the seller's real Chrome handles auth).
+say  a note that listings are filtered per item by category at publish time
+     (e.g. "I'll only send fashion to Poshmark.").
+```
+
+## APPROVALS
+Set the **autonomy level**, which configures both layers at once (see `skills/bazaar-config.md` →
+"Two layers of autonomy").
+```
+say  "How much should I do on my own? Hands-free lets me list, search, and handle chats without
+      asking each time. I always check with you before accepting an above-list/bidding offer."
+ask  "Autonomy level?" options=[hands_free=Hands-free, balanced=Balanced (recommended),
+                                all_steps=Approve every step]   -> level
+write config.approvals.preset = level ; expand config.approvals.steps from the preset table
+run  python3 bin/install.py gen-settings --harness <harness> --autonomy <level>   # layer 2
+say  a one-line summary of what runs automatically vs what will still ping you.
+     # On hands-free this includes the buyer side: search, offer, and close-within-budget run
+     # without a prompt; only an above-budget buy (like an above-list bid) ever stops to ask.
+     # The `takeover` gate is a hard floor (never auto): I always ask before stepping into a chat
+     # you started on your own (an inbox-sweep takeover), at every autonomy level.
+```
+
+## STYLE
+Set **how I deal**: my voice with buyers/sellers and how firm I am on the sell side. Writes
+`data/style.json` (the persona profile) via `bin/style.py` (single source of truth, validated). The
+default profile reproduces today's behavior, so this step is optional. `skills/style.md` is the
+rulebook; the hard invariants there (no number leak, never claim human, no em-dashes, cheeky not cruel)
+always outrank the persona.
+```
+show current = `python3 bin/style.py show`
+say  "How should I sound, and how hard should I hold the line? I always stay friendly and never leak
+      your floor, no matter the persona."
+ask  "Tone?"            options=[friendly, warm, neutral, terse]            -> voice.tone
+ask  "Humor?"           options=[none, light, playful]                      -> voice.humor
+ask  "With lowballers?" options=[polite, firm, cheeky]                      -> voice.lowball_response
+ask  "Sell firmness?"   options=[soft, balanced=Balanced (recommended), firm, hardline]
+                                                                            -> negotiation.sell_firmness
+ask  "Anything else about your style? (free text, optional)"               -> voice.persona
+ask  "Learn my style over time?" options=[suggest=Suggest, then I apply (recommended),
+                                          auto=Apply confident changes, off=Don't learn] -> learning
+for (field, value) in answers: run `python3 bin/style.py set --field <field> --value "<value>"`
+     # firmness can also use `python3 bin/style.py set-firmness <level>` (sets the sell knobs).
+run  `python3 bin/style.py validate`   # fail-fast; re-ask on any error
+# Pending learning suggestions (from /pause steering + /bazaar-eval), if any:
+pending = `python3 bin/style.py proposals`
+if pending: for each, say {current -> proposed, rationale}; ask apply? -> `python3 bin/style.py apply --id <id>`
+say  "✅ Style saved. I'll deal in your voice. Change it anytime with /bazaar -> style."
+```
+
+## BUYER_PROFILE
+Set up **buying**: where buys arrive, how you pay, and which marketplaces to search. Writes
+`data/buyer_config.json` (the buyer mirror of `seller_config.json`). Reuses `channel` / `currency` /
+`region` / `timezone` from `seller_config.json` when it exists; asks for them (run `CHOOSE_INTERFACE`,
+ask currency/region) if this is a buy-only setup.
+```
+reuse channel, currency, region, timezone from seller_config.json if present, else ask for them.
+say  "Your delivery address — sellers only get it once a deal is agreed; I use it to estimate the
+      delivered total and to set the search location."
+ask  "Delivery address (block/unit, street, postcode, area)?"   -> delivery_area {line1,postcode,area}
+ask  "How do you usually pay?" options=[paynow, bank_transfer, cod]  (multi-select) -> payment_methods
+# which marketplaces to SEARCH — region-filtered, same registry + login model as selling.
+registry = load data/marketplaces.json
+offered  = [ m for m in registry if m.status=="active" and (region in m.regions or "*" in m.regions) ]
+ask  "Which marketplaces should I search?" options=[<m.id>=<m.display_name> for m in offered]  (multi)
+     -> chosen: marketplaces[id] = { enabled:true, auth:"unknown", connector:<type> } ; else enabled:false
+for id in enabled where registry[id].connector.auth=="chrome_session":
+     navigate the regional site (resolve_domain.py) ; confirm "logged in?" -> set marketplaces[id].auth
+     # NEVER auto-log-in (account safety; the buyer's real Chrome handles auth).
+write data/buyer_config.json {
+     channel, currency, region, timezone, marketplaces, delivery_area,
+     fulfillment:"ship_only", payment_methods, availability:{source:"skip"}, onboarded_at:<today> }
+say  "✅ Buying is set up. Send /search (or /buy) and tell me what you're after."
+```
+`config.json` keeps runtime/agent knobs (pacing, quiet hours, `checkout_disclosure`/`handover_disclosure`, `approvals`). This file
+holds seller identity / channel binding / marketplaces / shipping:
+```json
+{
+  "channel":      { "adapter": "telegram", "bound_at": "<today>", "detail": {} },
+  "currency":     "SGD",
+  "region":       "SG",
+  "timezone":     "Asia/Singapore",
+  "marketplaces": {
+    "fb":        { "enabled": true,  "auth": "confirmed", "connector": "browser", "site": "www.facebook.com" },
+    "carousell": { "enabled": true,  "auth": "confirmed", "connector": "browser", "site": "www.carousell.sg" }
+  },
+  "origin":       { "line1": "...", "postcode": "...", "area": "...", "lat": null, "lng": null },
+  "fulfillment":  "ship_only",
+  "shipping":     { "zones": [ /* see seller_config sample */ ], "size_surcharge": {} },
+  "availability": { "source": "calendar_mcp" },
+  "onboarded_at": "<today>"
+}
+```
+(Legacy `marketplaces: ["fb","carousell"]` arrays + a top-level `logins` map are auto-upgraded on
+load via the read-shim in `skills/marketplaces.md`.)
+
+## Trust rules (enforced in this flow)
+- **Exact address is private.** Stored in `origin` and read only by `bin/shipping.py` for the
+  distance/zone calc. It is **never** put into a listing, a buyer reply, or any model prompt.
+- **Buyer delivery address** lives in `buyer_config.delivery_area`, shared with a seller only at deal
+  time (the buyer mirror of the `origin` rule). The **max budget** is never written to `buyer_config`
+  — it lives only in `data/budgets/<want_id>.json`, read only by `bin/budget_gate.py`.
+- **Ship-only.** No meetup fields are collected; there is no offline-transaction path.
+- **No secrets in config.** Channel tokens stay in the harness env (`settings.local.json` /
+  `.codex/.env`), never in `seller_config.json`; `channel.detail` holds only non-secret ids.

@@ -1,0 +1,100 @@
+# =============================================================================================
+# SECRETS — never commit. Bazaar Skills is git-clone'able; a leak here exposes a seller's floor /
+# budget / address / bot token. If you add a new per-deployment or secret file, add it HERE first.
+# (NOTE: git .gitignore does NOT support inline comments — keep every pattern on its own line.)
+# =============================================================================================
+
+# Harness secret stores (bot tokens, permissions) + generated per-deployment harness config
+.claude/settings.local.json
+.mcp.local.json
+.codex/
+.env
+.env.local
+
+# Hidden money + identity (the core invariants — MUST stay local)
+data/seller_config.json
+data/buyer_config.json
+data/floors/*
+data/budgets/*
+!data/floors/.gitkeep
+!data/budgets/.gitkeep
+!data/floors/sample-ikea-desk.json
+
+# Per-deployment runtime state (listings, threads, sessions, learned data) — not source
+data/items/*
+data/wants/*
+data/threads/*
+data/buyer_threads/*
+data/negotiations/*
+data/buyer_negotiations/*
+data/checkouts/*
+data/photos/*
+data/qa_bank.jsonl
+data/channel_state.json
+data/control.json
+data/control.json.tmp
+data/listing_session.json
+data/distribution_session.json
+data/buy_session.json
+data/buyer_peek_state.json
+data/scan_state.json
+data/takeover_seen.json
+data/pacing_state.json
+data/pacing_state.json.lock
+data/pacing_state.json.tmp
+data/channel_outbox.jsonl
+data/channel_outbox.jsonl.lock
+data/channel_outbox.jsonl.tmp
+data/leases/
+data/availability.json
+data/escalations.jsonl
+data/buyer_escalations.jsonl
+data/channel_transcript.jsonl
+data/eval_state.json
+data/eval/*
+data/style_proposals.jsonl
+data/ui_cache/*
+!data/items/.gitkeep
+!data/items/sample-ikea-desk.json
+!data/wants/.gitkeep
+!data/threads/.gitkeep
+!data/buyer_threads/.gitkeep
+!data/negotiations/.gitkeep
+!data/buyer_negotiations/.gitkeep
+!data/checkouts/.gitkeep
+!data/photos/.gitkeep
+!data/eval/.gitkeep
+!data/ui_cache/.gitkeep
+
+# Kept as committed source (NOT ignored): data/marketplaces.json (registry),
+# data/config.json (default business config), data/style.json (default style/persona profile),
+# data/fixtures/ (test data). See data/README.md for what every other path holds.
+
+# Internal docs — kept locally, withheld from the public repo (design / strategy, not for distribution)
+ARCHITECTURE.md
+gtm.md
+gtm.html
+
+# Captured browser snapshots / screenshots at the repo root (contain account + session data)
+/*.yml
+/*.png
+/*.jpeg
+/*.jpg
+carousell-inbox.yml
+
+# Daemon / browser runtime
+logs/
+.daemon.runlock
+.daemon.instancelock
+.browser-profile/
+.playwright-mcp/
+
+# Python / tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS cruft
+.DS_Store

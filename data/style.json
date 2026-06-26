@@ -1,0 +1,12 @@
+{
+  "voice": {
+    "persona": "",
+    "tone": "friendly",
+    "humor": "light",
+    "lowball_response": "polite"
+  },
+  "negotiation": {
+    "sell_firmness": "balanced"
+  },
+  "learning": "suggest"
+}

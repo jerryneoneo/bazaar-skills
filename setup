@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# setup — Bazaar's idempotent, re-runnable installer (gstack-style ergonomics).
+#
+# The one-paste install:
+#   git clone https://github.com/jerryneoneo/bazaar-skills.git ~/bazaar-skills && cd ~/bazaar-skills && ./setup
+#
+# Run it again any time (e.g. after `git pull`) — it's idempotent: it refreshes the global
+# launchers + config and runs any pending migrations, and only walks you through the conversational
+# onboarding on the FIRST run (when no data/seller_config.json exists yet).
+#
+# What it does, in order:
+#   1. prereqs + macOS TCC gate            5. global launchers (so /sell, /bazaar work anywhere)
+#   2. pick the harness (Claude Code)      6. migrations + version stamp
+#   3. sign-in gate                        7. first run -> guided onboarding; re-run -> refresh + exit
+#   4. record home/host in ~/.bazaar
+#
+# Flags (all optional; smart defaults so it never blocks in CI):
+#   --host <claude|claude-code|codex>   pick the harness (default: menu on a TTY, else claude-code)
+#   --autonomy <hands-free|balanced|all-steps>   record the autonomy preset (default: balanced)
+#   --prefix | --no-prefix              prefix global launcher names with 'bazaar-' (default: no)
+#   --team | --no-team                  reserved for shared-repo auto-update (default: off)
+#   --yes                               non-interactive; take defaults, never prompt
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SELF_DIR"
+HANDOFF_PROMPT="follow .claude/commands/bazaar-install.md to set me up"
+
+say()  { printf '\033[1;36mBazaar:\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31mBazaar:\033[0m %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- flags -----------------------------------------------------------------------------------
+HOST="" ; AUTONOMY="balanced" ; PREFIX=0 ; TEAM="" ; ASSUME_YES=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host)       HOST="${2:-}"; shift 2 ;;
+    --autonomy)   AUTONOMY="${2:-balanced}"; shift 2 ;;
+    --prefix)     PREFIX=1; shift ;;
+    --no-prefix)  PREFIX=0; shift ;;
+    --team)       TEAM=1; shift ;;
+    --no-team)    TEAM=0; shift ;;
+    --yes|-y)     ASSUME_YES=1; shift ;;
+    -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
+    *)            die "unknown flag: $1 (try --help)" ;;
+  esac
+done
+[ -n "${BAZAAR_AGENT:-}" ] && [ -z "$HOST" ] && HOST="$BAZAAR_AGENT"  # back-compat env override
+
+# --- 1. OS + prereqs -------------------------------------------------------------------------
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  Linux)  OS=linux ; warn "Linux is unverified — the launchd daemon is macOS-only; interactive mode should work." ;;
+  *)      die "Unsupported OS. On Windows run the PowerShell installer (install.ps1)." ;;
+esac
+have git     || die "git is required. Install it and re-run."
+have python3 || die "python3 is required. Install it and re-run."
+for opt in node npx; do
+  have "$opt" || warn "$opt not found — needed later for the Playwright browser tool (Stage 2 will flag it)."
+done
+if [ "$OS" = macos ] && [ ! -d "/Applications/Google Chrome.app" ]; then
+  warn "Google Chrome not found in /Applications — the agent drives a real Chrome; install it before listing."
+fi
+
+# --- macOS TCC gate: the runtime dir must be readable by launchd ------------------------------
+if [ "$OS" = macos ]; then
+  case "$SELF_DIR" in
+    "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Downloads"/*)
+      die "This checkout is under a macOS privacy-protected folder ($SELF_DIR).
+       Move it somewhere like ~/bazaar-skills (launchd can't read ~/Documents) and re-run ./setup." ;;
+  esac
+fi
+
+# --- 2. pick the harness ---------------------------------------------------------------------
+# AGENT = CLI binary (claude|codex); HARNESS = bin/harnesses name (claude-code|codex).
+normalize_harness() { case "$1" in claude|claude-code) echo claude-code ;; codex) echo codex ;; *) echo "" ;; esac; }
+harness_to_cli()    { [ "$1" = codex ] && echo codex || echo claude; }
+signin_cmd()        { [ "$1" = codex ] && echo "codex login" || echo "claude  (then complete the login, or run /login)"; }
+present_label()     { have "$1" && echo "[installed]" || echo "[not installed]"; }
+
+if [ -n "$HOST" ]; then
+  HARNESS="$(normalize_harness "$HOST")"
+  [ -n "$HARNESS" ] || die "--host must be claude|claude-code|codex (got '$HOST')."
+elif [ "$ASSUME_YES" = 1 ] || [ ! -e /dev/tty ]; then
+  HARNESS="$(python3 bin/bazaar-config get host 2>/dev/null || true)"
+  [ -n "$HARNESS" ] || HARNESS="claude-code"   # only verified runtime → safe non-interactive default
+else
+  while :; do
+    printf '\n'; say "Which agent runtime do you want to use?"
+    printf '  1) Claude Code   %s  (supported today)\n' "$(present_label claude)"
+    printf '  2) Codex         %s  (install/config only — runtime coming later)\n' "$(present_label codex)"
+    printf '\033[1;36mBazaar:\033[0m Enter 1 or 2 [default 1, 10s]: '
+    choice=""; read -r -t 10 choice </dev/tty || true
+    case "${choice:-1}" in
+      1|"") HARNESS=claude-code ;;
+      2)    HARNESS=codex ;;
+      q|Q)  die "Aborted. Re-run ./setup when you're ready." ;;
+      *)    warn "Pick 1 or 2."; continue ;;
+    esac
+    break
+  done
+fi
+AGENT="$(harness_to_cli "$HARNESS")"
+if [ "$HARNESS" = codex ]; then
+  warn "Codex is install/config-only today — the agent loop runs under Claude Code. Continuing config; runtime is a follow-up."
+fi
+have "$AGENT" || die "$AGENT is not installed. Install it and re-run ./setup."
+
+# --- 3. sign-in gate -------------------------------------------------------------------------
+while ! python3 bin/install.py harness --name "$HARNESS" >/dev/null 2>&1; do
+  warn "$AGENT is not signed in yet."
+  if [ -e /dev/tty ] && [ "$ASSUME_YES" != 1 ]; then
+    say "Sign in: run \`$(signin_cmd "$AGENT")\` in another terminal, then press Enter to re-check (q to quit)."
+    read -r ans </dev/tty || die "No input — sign in, then re-run ./setup."
+    case "$ans" in q|Q) die "Aborted. Sign in, then re-run ./setup." ;; esac
+  else
+    die "Sign in with \`$(signin_cmd "$AGENT")\`, then re-run ./setup."
+  fi
+done
+say "$AGENT is signed in."
+
+# --- 4. record home/host -------------------------------------------------------------------
+python3 bin/bazaar-config set home "$SELF_DIR"        >/dev/null
+python3 bin/bazaar-config set host "$HARNESS"         >/dev/null
+python3 bin/bazaar-config set autonomy "$AUTONOMY"    >/dev/null
+[ "$PREFIX" = 1 ] && python3 bin/bazaar-config set prefix true >/dev/null || python3 bin/bazaar-config set prefix false >/dev/null
+[ -n "$TEAM" ] && python3 bin/bazaar-config set team_mode "$([ "$TEAM" = 1 ] && echo true || echo false)" >/dev/null
+
+# --- 5. MCP config (no secrets) + autonomous-run permissions + global launchers --------------
+python3 bin/install.py gen-mcp --harness "$HARNESS" --dest "$SELF_DIR" >/dev/null || warn "gen-mcp failed (continuing)."
+# Ensure the harness permission allow-list for autonomous (unattended) runs is present. This is
+# idempotent and MERGES — it preserves any channel token already in settings.local.json. Without
+# it, an interactive /bazaar-run prompts on every tool. (The daemon's headless passes pass the same
+# tools via --allowedTools; the business-approval layer is set in onboarding / the /bazaar menu.)
+python3 bin/install.py gen-settings --harness "$HARNESS" --autonomy "$AUTONOMY" --dest "$SELF_DIR" >/dev/null \
+  && say "Autonomous-run permissions ensured (autonomy: $AUTONOMY)." \
+  || warn "gen-settings failed (continuing) — set permissions later via /bazaar → autonomy."
+PREFIX_FLAG=""; [ "$PREFIX" = 1 ] && PREFIX_FLAG="--prefix"
+LAUNCH_JSON="$(python3 bin/install.py gen-launchers --harness "$HARNESS" --dest "$SELF_DIR" $PREFIX_FLAG)" \
+  && say "Installed global launchers → $(python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["skills_dir"])' <<<"$LAUNCH_JSON")" \
+  || warn "launcher install failed (continuing)."
+
+# --- 6. migrations + version stamp -----------------------------------------------------------
+VER="$(cat "$SELF_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
+LAST="$(cat "$HOME/.bazaar/.last-setup-version" 2>/dev/null || echo "")"
+version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+if [ -d "$SELF_DIR/migrations" ]; then
+  for f in $(ls "$SELF_DIR"/migrations/v*.sh 2>/dev/null | sort -V); do
+    mver="$(basename "$f" .sh)"; mver="${mver#v}"
+    if [ -z "$LAST" ] || version_gt "$mver" "$LAST"; then
+      say "running migration $mver"; BAZAAR_HOME="$SELF_DIR" bash "$f" || warn "migration $mver failed (continuing)."
+    fi
+  done
+fi
+mkdir -p "$HOME/.bazaar"; printf '%s\n' "$VER" > "$HOME/.bazaar/.last-setup-version"
+
+# --- 7. first run -> onboarding; re-run -> refresh + exit -------------------------------------
+if [ -f "$SELF_DIR/data/seller_config.json" ]; then
+  say "Bazaar v$VER refreshed (launchers + config). Already onboarded."
+  say "  • change settings:  /bazaar      • update later:  /bazaar-upgrade"
+  exit 0
+fi
+export BAZAAR_HARNESS="$HARNESS"
+say "First-time setup — handing off to $AGENT for guided onboarding…"
+exec "$AGENT" "$HANDOFF_PROMPT"

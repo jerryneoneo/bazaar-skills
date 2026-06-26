@@ -1,0 +1,17 @@
+{
+  "item_id": "sample-ikea-desk",
+  "title": "IKEA BEKANT Desk 120x80 - White",
+  "category": "Furniture",
+  "condition": "Used - Good",
+  "list_price": 90,
+  "currency": "SGD",
+  "description": "IKEA BEKANT desk, 120x80cm, white top. Sturdy frame, light scuffs on one corner (pictured). Cable tray included. Shipped P2P — delivery quoted to your area.",
+  "photos": [
+    "data/photos/sample-ikea-desk/01.jpg",
+    "data/photos/sample-ikea-desk/02.jpg"
+  ],
+  "size_bucket": "bulky",
+  "fulfillment": "ship_only",
+  "listing_urls": { "fb": null, "carousell": null },
+  "status": "draft"
+}

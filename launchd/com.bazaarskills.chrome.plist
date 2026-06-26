@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bazaarskills.chrome</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jerryneo/bazaar-skills/bin/chrome_debug.sh</string>
+  </array>
+
+  <!-- start at login, restart if Chrome is closed/crashes (always-on, dedicated profile) -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- give it a moment between restarts so it doesn't hot-loop on a bad launch -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jerryneo/bazaar-skills/logs/chrome.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jerryneo/bazaar-skills/logs/chrome.err.log</string>
+</dict>
+</plist>
