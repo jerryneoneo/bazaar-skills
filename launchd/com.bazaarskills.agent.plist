@@ -8,18 +8,19 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
-    <string>/Users/jerryneo/bazaar-skills/bin/agent_daemon.py</string>
+    <string>__RUNTIME__/bin/agent_daemon.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/jerryneo/bazaar-skills</string>
+  <string>__RUNTIME__</string>
 
-  <!-- launchd jobs get a minimal PATH; add the dirs where claude / npx / node / curl live.
-       Adjust if `which claude npx node` shows different paths on your machine. -->
+  <!-- This is a TEMPLATE. launchd/install_daemon.sh substitutes __RUNTIME__ (this checkout) and
+       __PATH__ (the dirs where your claude / npx / node / curl live, detected at install) before
+       copying the plist into ~/Library/LaunchAgents. launchd jobs otherwise get a minimal PATH. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/jerryneo/.nvm/versions/node/v20.11.0/bin:/Users/jerryneo/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__PATH__</string>
     <!-- Pin the agent runtime so the daemon never autodetects `codex` (which the runner refuses
          → rc=3, a whole pass lost). Only claude-code is wired today; see harness_run.py. -->
     <key>BAZAAR_HARNESS</key>
@@ -34,8 +35,8 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/jerryneo/bazaar-skills/logs/agent.out.log</string>
+  <string>__RUNTIME__/logs/agent.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/jerryneo/bazaar-skills/logs/agent.err.log</string>
+  <string>__RUNTIME__/logs/agent.err.log</string>
 </dict>
 </plist>

@@ -12,8 +12,15 @@ PLISTS=(com.bazaarskills.chrome com.bazaarskills.agent)
 case "${1:-status}" in
   install)
     mkdir -p "$LA" "$HERE/../logs"
+    # The committed plists are TEMPLATES; fill __RUNTIME__ (this checkout) and __PATH__ (the dirs
+    # where node/npx/claude/curl live on THIS machine) before loading — so the daemon works for any
+    # clone, not just the author's. launchd jobs otherwise inherit a minimal PATH.
+    RUNTIME="$(cd "$HERE/.." && pwd)"
+    node_bin=""; command -v node   >/dev/null 2>&1 && node_bin="$(dirname "$(command -v node)")"
+    claude_bin=""; command -v claude >/dev/null 2>&1 && claude_bin="$(dirname "$(command -v claude)")"
+    RESOLVED_PATH="${node_bin:+$node_bin:}${claude_bin:+$claude_bin:}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     for p in "${PLISTS[@]}"; do
-      cp "$HERE/$p.plist" "$LA/$p.plist"
+      sed -e "s#__RUNTIME__#$RUNTIME#g" -e "s#__PATH__#$RESOLVED_PATH#g" "$HERE/$p.plist" > "$LA/$p.plist"
       launchctl unload "$LA/$p.plist" 2>/dev/null || true
       launchctl load -w "$LA/$p.plist"
       echo "loaded $p"

@@ -5,10 +5,11 @@
   <key>Label</key>
   <string>com.bazaarskills.chrome</string>
 
+  <!-- TEMPLATE: launchd/install_daemon.sh substitutes __RUNTIME__ (this checkout) at install. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/jerryneo/bazaar-skills/bin/chrome_debug.sh</string>
+    <string>__RUNTIME__/bin/chrome_debug.sh</string>
   </array>
 
   <!-- start at login, restart if Chrome is closed/crashes (always-on, dedicated profile) -->
@@ -21,8 +22,8 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/jerryneo/bazaar-skills/logs/chrome.out.log</string>
+  <string>__RUNTIME__/logs/chrome.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/jerryneo/bazaar-skills/logs/chrome.err.log</string>
+  <string>__RUNTIME__/logs/chrome.err.log</string>
 </dict>
 </plist>
