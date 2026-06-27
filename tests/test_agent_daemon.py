@@ -104,6 +104,53 @@ def test_channel_peek_parses_success():
     with_run(lambda *a, **k: FakeProc(0, '{"pending": 1, "latest_text": "hi"}'), body)
 
 
+def test_buyer_force_due_count_net():
+    print("buyer_force_due: count-based net fires at/after force_every empty peeks:")
+    check("below threshold → not due", agent_daemon.buyer_force_due(1, 2, 0.0, 0.0)[0] is False)
+    check("at threshold → due", agent_daemon.buyer_force_due(2, 2, 0.0, 0.0)[0] is True)
+    check("force_every=0 disables the count net", agent_daemon.buyer_force_due(99, 0, 0.0, 0.0)[0] is False)
+
+
+def test_buyer_force_due_time_floor():
+    print("buyer_force_due: absolute time floor is the strand backstop when the count net is off:")
+    floor = 2 * 3600.0
+    check("under the floor → not due", agent_daemon.buyer_force_due(0, 0, floor - 1, floor)[0] is False)
+    check("at/over the floor → due", agent_daemon.buyer_force_due(0, 0, floor, floor)[0] is True)
+    check("floor=0 disables it", agent_daemon.buyer_force_due(0, 0, 9_999_999, 0.0)[0] is False)
+    check("reason names the floor", "floor" in agent_daemon.buyer_force_due(0, 0, floor, floor)[1])
+
+
+def test_buyer_recheck_failopen_conservative():
+    print("buyer_recheck helper: parses JSON, and fails open CONSERVATIVELY (unhandled=1) on error:")
+    def ok():
+        check("parsed", agent_daemon.buyer_recheck({}) == {"unhandled": 0, "markets": {}})
+    with_run(lambda *a, **k: FakeProc(0, '{"unhandled": 0, "markets": {}}'), ok)
+
+    def fail():
+        out = agent_daemon.buyer_recheck({})
+        # CONSERVATIVE (opposite of buyer_peek): a recheck that can't run must NOT say "clear".
+        check("fail-open reports unhandled (fires the LLM pass)", out.get("unhandled") == 1)
+    with_run(lambda *a, **k: FakeProc(1, "", "boom"), fail)
+
+
+def test_buyer_action_decision():
+    print("buyer_action: pure decision for a buyer poll (pass | skip | idle):")
+    check("real pending → pass", agent_daemon.buyer_action(2, False, False, None) == "pass")
+    check("not forced, nothing → idle", agent_daemon.buyer_action(0, False, False, None) == "idle")
+    check("floor due → pass even if recheck unrun", agent_daemon.buyer_action(0, True, True, None) == "pass")
+    check("count-net force + recheck unhandled → pass",
+          agent_daemon.buyer_action(0, True, False, 1) == "pass")
+    check("count-net force + recheck clear → skip (~0 tokens)",
+          agent_daemon.buyer_action(0, True, False, 0) == "skip")
+
+
+def test_load_config_sweep_floor():
+    print("load_config exposes force_buyer_sweep_hours (the new absolute floor knob):")
+    cfg = agent_daemon.load_config()
+    val = cfg.get("force_buyer_sweep_hours")
+    check("present and numeric >= 0", isinstance(val, (int, float)) and val >= 0)
+
+
 def test_peek_cmd_dispatch():
     print("_peek_cmd: builds the right non-consuming command per adapter (console → None):")
     tg = agent_daemon._peek_cmd({"adapter": "telegram", "detail": {}}, 25)
@@ -124,6 +171,11 @@ if __name__ == "__main__":
     test_buy_peek_success_and_failopen()
     test_channel_peek_console_skips_subprocess()
     test_channel_peek_parses_success()
+    test_buyer_force_due_count_net()
+    test_buyer_force_due_time_floor()
+    test_buyer_recheck_failopen_conservative()
+    test_buyer_action_decision()
+    test_load_config_sweep_floor()
     test_peek_cmd_dispatch()
     print()
     if _fail:

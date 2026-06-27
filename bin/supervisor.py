@@ -64,6 +64,33 @@ def plan_buyer_launches(peek, enabled, busy, free_slots):
     return ready[:free_slots]
 
 
+def plan_recheck_launches(recheck, enabled, busy, free_slots):
+    """PURE: a count-net forced sweep launches ONLY markets the deterministic recheck (buyer_recheck)
+    flagged as unhandled (unread or unreadable), skipping busy ones, capped at free_slots. This is
+    the supervisor mirror of the daemon's recheck gate: a forced sweep no longer fans out to every
+    market to 'confirm nothing', it spends a ~0-token recheck and launches only real work.
+    Deterministic order = `enabled` order, so the planner is testable."""
+    if free_slots <= 0:
+        return []
+    flagged = (recheck or {}).get("markets", {})
+    ready = [m for m in enabled if m not in busy and (flagged.get(m) or {}).get("unhandled")]
+    return ready[:free_slots]
+
+
+def plan_buyer_sweep(enabled, busy, sweep_idx):
+    """PURE: the forced safety-net sweep launches ONE market, round-robin by `sweep_idx`.
+
+    Adaptive concurrency: genuine fan-out (FB ∥ Carousell) happens only for markets the peek
+    flagged `new` (plan_buyer_launches). A forced sweep fires when nothing is flagged new — there
+    is no signal that two markets are hot, so blanket-launching every free market just doubled idle
+    cost. Launch one instead, rotating across enabled markets so no market is starved across
+    successive forced sweeps. Returns [market] or []."""
+    eligible = [m for m in enabled if m not in busy]
+    if not eligible:
+        return []
+    return [eligible[sweep_idx % len(eligible)]]
+
+
 def _holder(market, seq):
     return f"sup:buyer:{market}:{seq}"
 
@@ -201,8 +228,10 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     workers = {}        # market -> {"proc": Popen, "holder": token}
     seq = 0
     empty_buyer_cycles = 0
+    sweep_idx = 0       # round-robin cursor for the forced one-market safety-net sweep
     enabled = enabled_sell_markets()
     last_buyer = time.monotonic() - cfg["buyer_poll_sec"]
+    last_buyer_pass = time.monotonic()  # when an actual buyer worker last launched (time floor)
     last_buy = time.monotonic() - cfg["buy_poll_sec"]
     last_maint = time.monotonic() - cfg["maint_poll_sec"]
     last_eval = time.monotonic()
@@ -236,23 +265,42 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
             bp = ad.buyer_peek(env)
             free = max_workers - len(workers)
             to_launch = plan_buyer_launches(bp, enabled, set(workers), free)
-            force_every = cfg["force_buyer_pass_every"]
-            if not to_launch:
+            if to_launch:
+                empty_buyer_cycles = 0
+            elif free > 0:
+                # Nothing flagged new. Two safety nets (ad.buyer_force_due): the count net AND the
+                # absolute time floor.
                 empty_buyer_cycles += 1
-                if force_every and empty_buyer_cycles >= force_every:
-                    # safety net: a flaky unread signal can't strand a buyer — sweep free markets.
-                    to_launch = [m for m in enabled if m not in workers][:max(0, free)]
+                floor_sec = cfg.get("force_buyer_sweep_hours", 0) * 3600
+                forced, reason = ad.buyer_force_due(
+                    empty_buyer_cycles, cfg["force_buyer_pass_every"],
+                    time.monotonic() - last_buyer_pass, floor_sec)
+                floor_due = floor_sec > 0 and (time.monotonic() - last_buyer_pass) >= floor_sec
+                if forced and floor_due:
+                    # Ultimate strand backstop: force an ACTUAL pass for ONE market (round-robin),
+                    # even when the cheap signals say clear (covers a strand that left count==0).
+                    to_launch = plan_buyer_sweep(enabled, set(workers), sweep_idx)
+                    sweep_idx += 1
                     empty_buyer_cycles = 0
                     if to_launch:
-                        logging.info("buyer safety-net sweep → %s", to_launch)
-            else:
-                empty_buyer_cycles = 0
+                        logging.info("buyer floor sweep (%s) → %s", reason, to_launch)
+                elif forced:
+                    # Count-net force: spend a ~0-token recheck and launch ONLY markets with real
+                    # unread (adaptive concurrency — no blanket fan-out to 'confirm nothing').
+                    rc = ad.buyer_recheck(env)
+                    to_launch = plan_recheck_launches(rc, enabled, set(workers), free)
+                    empty_buyer_cycles = 0
+                    if to_launch:
+                        logging.info("buyer recheck sweep → %s", to_launch)
+                    else:
+                        logging.info("buyer recheck: all inboxes clear → skip forced sweep (~0 tokens)")
             for market in to_launch:
                 seq += 1
                 holder = _holder(market, seq)
                 proc = _launch_buyer(market, env, bp, holder, ns.dry_run)
                 if proc is not None:
                     workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
+                    last_buyer_pass = time.monotonic()
                     logging.info("launched buyer worker [%s] (%s live)", market, len(workers))
             last_buyer = time.monotonic()
 

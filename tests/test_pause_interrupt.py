@@ -87,8 +87,12 @@ def test_paused_flag_terminates_running_pass():
 
 
 def _run_daemon_once(data_dir):
+    # Pin single-flight (BAZAAR_MAX_WORKERS=1): these boundary checks assert the single-flight
+    # loop's pause/gate log lines, which differ from the concurrent supervisor's. The deployed
+    # config may set max_concurrent_workers>1, so pin the path the assertions below were written
+    # for rather than depending on the live config value.
     env = {**os.environ, "BAZAAR_DATA_DIR": data_dir, "TELEGRAM_BOT_TOKEN": "123:FAKE",
-           "BAZAAR_HARNESS": "claude-code"}
+           "BAZAAR_HARNESS": "claude-code", "BAZAAR_MAX_WORKERS": "1"}
     out = subprocess.run(
         [sys.executable, str(ROOT / "bin" / "agent_daemon.py"), "--once", "--dry-run",
          "--peek-timeout", "0"],
