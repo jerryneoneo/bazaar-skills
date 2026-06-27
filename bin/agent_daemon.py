@@ -43,6 +43,7 @@ SELLER_CONFIG_PATH = SELLER_DIR / "data" / "seller_config.json"
 sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
+import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
 
 # The runtime dir (beside the agent) or one level up (dev tree) — the harness reads its own secret
 # store under whichever holds it, so the daemon never hardcodes settings.local.json.
@@ -54,6 +55,31 @@ _stop = False
 def _handle_sigterm(signum, frame):
     global _stop
     _stop = True
+
+
+def _source_fingerprint() -> int:
+    """Newest mtime (ns) across the daemon's own Python sources (bin/*.py + bin/hooks/*.py).
+
+    These modules are imported into this long-running process, which is NOT hot-reloaded — a code
+    change here only takes effect on restart. The main loop (and the concurrent supervisor) compare
+    this against the value captured at startup and exit cleanly when it changes, so launchd
+    (KeepAlive) respawns the daemon on fresh code. This closes the "stale daemon silently runs old
+    logic across a code change" failure mode (e.g. a pause fix that never took effect). Passes and
+    skills run as fresh subprocesses already, so they need not trigger a restart."""
+    newest = 0
+    for d in (BIN, BIN / "hooks"):
+        try:
+            entries = list(d.glob("*.py"))
+        except OSError:
+            continue
+        for f in entries:
+            try:
+                m = f.stat().st_mtime_ns
+            except OSError:
+                continue
+            if m > newest:
+                newest = m
+    return newest
 
 
 def setup_logging() -> None:
@@ -307,6 +333,19 @@ def buyer_peek(env: dict) -> dict:
         return {"pending": 0, "latest_text": ""}
 
 
+def notify_trigger(env: dict) -> dict:
+    """Notification-path trigger: which notification-path markets (trigger_resolver) have a NEW OS
+    notification right now? Checked every loop iteration (cheap, ~0 tokens) so a push wakes the agent
+    within one channel-poll cycle instead of waiting for the buyer poll. Fail-open: no Full Disk
+    Access / no notifications → {pending:0}. Markets on the POLL path are untouched (buyer_peek owns
+    them). Wraps notify_watch.watch; never raises."""
+    try:
+        return notify_watch.watch()
+    except Exception as exc:  # noqa: BLE001 — never crash the loop on a notification-reader hiccup
+        logging.warning("notify_trigger error: %s", exc)
+        return {"pending": 0, "latest_text": "", "markets": {}}
+
+
 def buyer_recheck(env: dict) -> dict:
     """Deterministic re-probe (bin/buyer_recheck.py): which enabled markets still show unread? Used
     to gate the FORCED buyer sweep so it costs ~0 tokens when inboxes are clear (Tier 2a).
@@ -485,7 +524,13 @@ def main(argv) -> int:
     empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
     empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
     _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
+    src_fp = _source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
     while not _stop:
+        # A code change to the daemon's own sources only takes effect on restart (no hot-reload), so
+        # bounce here at a between-pass boundary (no pass runs at loop top — run_pass is synchronous).
+        if _source_fingerprint() != src_fp:
+            logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
+            break
         # Read the pause flag ONCE per iteration. While paused, the daemon still peeks the channel
         # (so /resume and corrections get received) but takes NO marketplace action: the channel
         # path runs the deterministic, no-LLM drain instead of a seller pass, and the three
@@ -516,6 +561,19 @@ def main(argv) -> int:
                 if not mid_listing:
                     send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)  # ~6s (TG only)
                 run_pass("seller", channel, env, ns.dry_run)            # full pass: work + report
+        # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): a market whose path
+        # resolves to "notification" (e.g. FB web push) wakes the agent the moment its OS
+        # notification lands, instead of waiting for the buyer poll. Poll-path markets (e.g.
+        # Carousell) are untouched and fall through to the buyer gate below. Idempotent: notify_watch
+        # advances its per-market cursor, and the per-thread cursors dedupe within the pass.
+        if not paused:
+            nt = notify_trigger(env)
+            if nt.get("pending"):
+                logging.info("notification trigger → buyer pass: %s", nt.get("latest_text", "")[:70])
+                run_pass("buyer", channel, env, ns.dry_run, extra_env={
+                    "BAZAAR_BUYER_PEEK_TEXT": nt.get("latest_text", "")})
+                last_buyer = time.monotonic()       # we just acted; reset the poll cadence
+                last_buyer_pass = time.monotonic()  # and the strand-floor clock
         if not paused and time.monotonic() - last_buyer >= cfg["buyer_poll_sec"]:
             # GATE the expensive buyer pass behind a cheap, non-LLM unread probe. Only spend a
             # full LLM browser pass when a buyer actually wrote — or, as a safety net, every Nth
@@ -588,8 +646,9 @@ def main(argv) -> int:
 
         # NIGHTLY SELF-EVAL (deterministic, $0): on a slow throttle, check the cadence gate and run
         # the no-LLM eval if due. Pure file reads/writes — no LLM, no browser, no channel send — so
-        # it honors the daemon's "idle cost ≈ zero" contract. The LLM judge stays manual.
-        if time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
+        # it honors the daemon's "idle cost ≈ zero" contract. The LLM judge stays manual. Gated on
+        # `not paused` too so /pause means a literal full stop (no work of any kind until /resume).
+        if not paused and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
             if _eval_due(env):
                 logging.info("self-eval due → running deterministic checks")
                 run_eval(env, ns.dry_run)

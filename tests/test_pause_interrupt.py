@@ -107,6 +107,9 @@ def test_daemon_holds_background_passes_when_paused():
             "paused": True, "since": "2026-06-26T00:00:00Z", "source": "cli",
             "reason": "", "corrections": []}))
         log = _run_daemon_once(tmp)
+        if "already running" in log:  # a live (launchd) daemon holds the singleton lock → skip
+            check("skipped: live daemon holds the instance lock (stop it to run this check)", True)
+            return
         check("startup line shows paused=True", "paused=True" in log)
         check("logs the daemon PAUSED edge", "daemon PAUSED" in log)
         check("buyer gate skipped", "buyer peek" not in log and "buyer pass" not in log)
@@ -118,6 +121,9 @@ def test_daemon_runs_background_passes_when_not_paused():
     print("BOUNDARY: --once --dry-run runs the buyer gate when NOT paused:")
     with tempfile.TemporaryDirectory() as tmp:
         log = _run_daemon_once(tmp)  # no control.json → not paused
+        if "already running" in log:  # a live (launchd) daemon holds the singleton lock → skip
+            check("skipped: live daemon holds the instance lock (stop it to run this check)", True)
+            return
         check("startup line shows paused=False", "paused=False" in log)
         check("does NOT log daemon PAUSED", "daemon PAUSED" not in log)
         check("buyer gate is entered", ("buyer peek" in log) or ("buyer pass" in log))
@@ -159,12 +165,64 @@ def test_hook_denies_only_when_paused():
               not _is_deny(_run_hook(tmp, "mcp__playwright__browser_snapshot")))
 
 
+def test_source_fingerprint_detects_change():
+    print("RELOAD: _source_fingerprint() is stable, and changes when a tracked source mtime advances:")
+    with tempfile.TemporaryDirectory() as tmp:
+        bindir = Path(tmp) / "bin"
+        (bindir / "hooks").mkdir(parents=True)
+        f = bindir / "mod.py"
+        f.write_text("x = 1\n")
+        orig_bin = agent_daemon.BIN
+        agent_daemon.BIN = bindir  # the helper reads the module-global BIN at call time
+        try:
+            fp1 = agent_daemon._source_fingerprint()
+            check("fingerprint is nonzero with a .py present", fp1 > 0)
+            check("fingerprint stable across calls (no change)", fp1 == agent_daemon._source_fingerprint())
+            os.utime(f, ns=(fp1 + 10_000_000_000, fp1 + 10_000_000_000))  # advance mtime +10s, deterministic
+            check("fingerprint changes after a source mtime advances",
+                  agent_daemon._source_fingerprint() != fp1)
+        finally:
+            agent_daemon.BIN = orig_bin
+
+
+def test_supervisor_exits_clean_on_source_change():
+    print("RELOAD: the concurrent supervisor loop exits cleanly (rc=0) when its source changes:")
+    import supervisor  # noqa: E402  (bin/ is on sys.path)
+    calls = {"n": 0}
+
+    def fake_fp():
+        calls["n"] += 1     # every call differs → the first loop-top check trips the reload-exit
+        return calls["n"]
+
+    orig_fp, orig_stop = agent_daemon._source_fingerprint, agent_daemon._stop
+    agent_daemon._source_fingerprint = fake_fp
+    agent_daemon._stop = False
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = {"buyer_poll_sec": 300, "buy_poll_sec": 600, "maint_poll_sec": 600,
+                   "eval_poll_sec": 3600, "force_buyer_pass_every": 3, "force_buyer_sweep_hours": 2}
+            channel = {"adapter": "console", "detail": {}}  # no telegram side-effects
+            env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+
+            class NS:
+                dry_run = True
+                once = False
+
+            rc = supervisor.run(cfg, channel, env, NS(), max_workers=2, peek_timeout=0)
+            check("supervisor.run returned 0 (clean exit)", rc == 0)
+            check("exited via the reload check before any pass (fingerprint called >= 2x)", calls["n"] >= 2)
+    finally:
+        agent_daemon._source_fingerprint, agent_daemon._stop = orig_fp, orig_stop
+
+
 if __name__ == "__main__":
     print("pause interrupt + boundary tests\n")
     test_paused_flag_terminates_running_pass()
     test_daemon_holds_background_passes_when_paused()
     test_daemon_runs_background_passes_when_not_paused()
     test_hook_denies_only_when_paused()
+    test_source_fingerprint_detects_change()
+    test_supervisor_exits_clean_on_source_change()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

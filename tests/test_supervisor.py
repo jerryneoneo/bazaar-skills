@@ -112,6 +112,7 @@ def test_run_once_idle_no_launches():
     patch("channel_peek", lambda *a, **k: {"pending": 0, "latest_text": ""})
     patch("buyer_peek", lambda *a, **k: {"pending": 0, "markets": {}})
     patch("buy_peek", lambda *a, **k: {"pending": 0})
+    patch("notify_trigger", lambda *a, **k: {"pending": 0, "latest_text": "", "markets": {}})
     for n in ("_distribution_active", "_inbox_detect_active"):
         patch(n, lambda *a, **k: False)
     for n in ("_scan_due", "_inbox_sweep_due", "_eval_due"):
