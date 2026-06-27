@@ -356,6 +356,22 @@ def _log_wake_mode() -> None:
                      "(grant it for Instant: /bazaar -> speed). All markets use the cheap poll path")
 
 
+def _register_bot_commands(env: dict) -> None:
+    """Best-effort: register the Telegram "/" autocomplete menu (telegram.py setcommands).
+    Idempotent (the shim hashes the command set and skips when unchanged), so this is cheap on
+    every boot. Non-fatal — the daemon must never fail to start because the menu didn't register."""
+    try:
+        out = subprocess.run([sys.executable, str(BIN / "telegram.py"), "setcommands"],
+                             capture_output=True, text=True, env=env, timeout=15)
+        if out.returncode == 0:
+            logging.info("telegram command menu: %s", out.stdout.strip() or "ok")
+        else:
+            logging.warning("telegram setcommands failed (rc=%s): %s",
+                            out.returncode, out.stderr.strip())
+    except (subprocess.SubprocessError, OSError) as exc:
+        logging.warning("telegram setcommands error: %s", exc)
+
+
 def notify_trigger(env: dict) -> dict:
     """Notification-path trigger: which notification-path markets (trigger_resolver) have a NEW OS
     notification right now? Checked every loop iteration (cheap, ~0 tokens) so a push wakes the agent
@@ -540,6 +556,8 @@ def main(argv) -> int:
                  cfg["buy_poll_sec"], cfg["maint_poll_sec"], peek_timeout, ns.dry_run,
                  control.is_paused())  # a file-based pause survives a daemon restart
     _log_wake_mode()  # explicit Instant/Standard banner so the operator knows if the FDA grant took
+    if channel["adapter"] == "telegram":
+        _register_bot_commands(env)  # populate the "/" autocomplete menu (idempotent, non-fatal)
     last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
     last_buyer_pass = time.monotonic()                     # when an actual buyer PASS last ran (time floor)
     last_buy = time.monotonic() - cfg["buy_poll_sec"]      # and a buy pass

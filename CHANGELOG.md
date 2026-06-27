@@ -6,6 +6,12 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Telegram "/" command menu.** The bot now registers its everyday commands (`/status`, `/list`,
+  `/search`, `/delist`, `/detect`, `/pause`, `/resume`) via the Bot API `setMyCommands`, so typing
+  `/` in the chat shows a tappable menu with descriptions instead of nothing. New
+  `telegram.py setcommands [--force]` subcommand (idempotent via a content hash in
+  `channel_state`); the daemon re-registers it best-effort on each startup and onboarding's
+  Telegram connect step seeds it on first install.
 - **Instant wake mode (push-notification trigger path).** FB/IG can now reply the moment a
   buyer messages, often answering straight from the OS notification, instead of waiting for the
   next poll cycle. Built on a per-platform resolver so each marketplace uses the cheapest trigger

@@ -18,11 +18,16 @@ Subcommands:
           button spinners. Ignores updates from any chat other than the authorized one.
   getfile --file-id F --dest PATH
           -> {"path": PATH}                              (getFile + download)
+  setcommands [--force]
+          -> {"ok": true, "registered": <int>} | {"ok": true, "skipped": "unchanged"}
+          Registers BOT_COMMANDS so Telegram shows them in the "/" autocomplete menu
+          (setMyCommands). Idempotent: a content hash in channel_state skips redundant calls.
 
 Exit: 0 ok · 2 bad input · 3 token/state/API error.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import urllib.error
@@ -40,7 +45,20 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STATE_PATH = DATA_DIR / "channel_state.json"
 API_BASE = "https://api.telegram.org"
 DEFAULT_STATE = {"adapter": "telegram", "chat_id": None, "update_offset": 0,
-                 "pending": [], "last_seen_ts": None}
+                 "pending": [], "last_seen_ts": None, "commands_hash": None}
+
+# The curated command set Telegram shows in the "/" autocomplete menu. Names are the bot
+# commands routed by harness_run.py / channel_control.py (slash stripped, lowercase). One-time
+# commands (/onboard, /start) are intentionally omitted to keep the menu clean.
+BOT_COMMANDS = [
+    {"command": "status", "description": "What's live, open threads, and anything waiting on you"},
+    {"command": "list",   "description": "List a new item for sale"},
+    {"command": "search", "description": "Find something to buy across your marketplaces"},
+    {"command": "delist", "description": "Take down a live listing"},
+    {"command": "detect", "description": "Find and manage your existing listings"},
+    {"command": "pause",  "description": "Pause the agent (it stops acting; queue corrections)"},
+    {"command": "resume", "description": "Resume the agent and apply queued corrections"},
+]
 
 
 class ShimError(Exception):
@@ -242,6 +260,29 @@ def cmd_getfile(ns):
     return 0
 
 
+def _commands_hash():
+    """Stable short hash of BOT_COMMANDS — changes only when the command set changes, so the
+    daemon can skip the setMyCommands call on every boot when nothing has moved."""
+    blob = json.dumps(BOT_COMMANDS, sort_keys=True).encode()
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def cmd_setcommands(ns):
+    """Register BOT_COMMANDS with Telegram (setMyCommands) so they appear in the "/" menu.
+    Idempotent via a content hash in channel_state; --force always re-registers."""
+    state = load_state()
+    digest = _commands_hash()
+    if state.get("commands_hash") == digest and not ns.force:
+        print(json.dumps({"ok": True, "skipped": "unchanged"}))
+        return 0
+    token = get_token()
+    api("setMyCommands", {"commands": BOT_COMMANDS}, token)  # bot-global: no chat_id needed
+    state["commands_hash"] = digest
+    save_state(state)
+    print(json.dumps({"ok": True, "registered": len(BOT_COMMANDS)}))
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="telegram.py", add_help=True)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -269,6 +310,10 @@ def build_parser():
     g.add_argument("--file-id", required=True, dest="file_id")
     g.add_argument("--dest", required=True)
     g.set_defaults(func=cmd_getfile)
+    sc = sub.add_parser("setcommands")
+    sc.add_argument("--force", action="store_true", dest="force",
+                    help="re-register even if the command set is unchanged")
+    sc.set_defaults(func=cmd_setcommands)
     return p
 
 
