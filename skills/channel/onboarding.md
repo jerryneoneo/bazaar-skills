@@ -67,7 +67,18 @@ if the chosen adapter is not already bound:
                             # console  -> no-op
     (sets the token env var for install.py gen-settings to pick up; verifies one round-trip)
 write seller_config.channel = { adapter: choice, bound_at: <today>, detail: {…non-secret ids…} }
-# If switching while a daemon is loaded: uninstall -> rewrite -> reinstall (see adapters.md).
+
+# SWITCHING IS EASY — never lock the user in, and make sure they KNOW it:
+#  • Right after binding, TELL them: "You can change your interface anytime — just say 'switch to
+#    Telegram' or open /bazaar -> interface."
+#  • If they chose console, also nudge: "Want messages on your phone instead? Switch to Telegram
+#    anytime (~2 min with a BotFather token) — say the word."
+#  • MID-ONBOARDING: if at ANY later step the user says "use Telegram" / "switch to Telegram" (or
+#    BotFather feels fiddly and they'd rather start on console), jump straight back to this anchor,
+#    bind the new adapter via connect(), then resume where they left off. No restart, no penalty.
+#  • If switching while a daemon is loaded: uninstall -> rewrite seller_config.channel -> reinstall
+#    (see adapters.md).
+say  "Bound <choice>. You can switch anytime — say 'switch to Telegram' or use /bazaar -> interface."
 ```
 
 ## CHOOSE_MARKETPLACES
