@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@playwright/mcp@latest",
+        "@playwright/mcp@0.0.76",
         "--cdp-endpoint",
         "http://127.0.0.1:9222"
       ]

@@ -19,8 +19,21 @@ case "${1:-status}" in
     node_bin=""; command -v node   >/dev/null 2>&1 && node_bin="$(dirname "$(command -v node)")"
     claude_bin=""; command -v claude >/dev/null 2>&1 && claude_bin="$(dirname "$(command -v claude)")"
     RESOLVED_PATH="${node_bin:+$node_bin:}${claude_bin:+$claude_bin:}$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    # Pick a stable, FDA-grantable interpreter for the daemon. /usr/bin/python3 is the CommandLineTools
+    # SHIM: under launchd it re-execs a versioned framework binary that TCC won't attribute Full Disk
+    # Access to, so granting FDA to it never sticks and Instant (notification) wake mode stays off.
+    # A Homebrew python is launched directly, so its FDA grant holds. Prefer one; fall back to the shim.
+    DAEMON_PY=""
+    for cand in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3 \
+                /usr/local/bin/python3.13 /usr/local/bin/python3 \
+                /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12; do
+      [ -x "$cand" ] && { DAEMON_PY="$cand"; break; }
+    done
+    DAEMON_PY="${DAEMON_PY:-/usr/bin/python3}"
+    echo "daemon interpreter: $DAEMON_PY"
+    [ "$DAEMON_PY" = "/usr/bin/python3" ] && echo "  note: no Homebrew python found — Instant mode needs one (brew install python); Standard polling works regardless."
     for p in "${PLISTS[@]}"; do
-      sed -e "s#__RUNTIME__#$RUNTIME#g" -e "s#__PATH__#$RESOLVED_PATH#g" "$HERE/$p.plist" > "$LA/$p.plist"
+      sed -e "s#__RUNTIME__#$RUNTIME#g" -e "s#__PATH__#$RESOLVED_PATH#g" -e "s#__PYTHON__#$DAEMON_PY#g" "$HERE/$p.plist" > "$LA/$p.plist"
       launchctl unload "$LA/$p.plist" 2>/dev/null || true
       launchctl load -w "$LA/$p.plist"
       echo "loaded $p"

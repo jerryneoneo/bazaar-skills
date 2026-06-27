@@ -7,7 +7,11 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <!-- __PYTHON__ is resolved by install_daemon.sh to a stable, FDA-grantable interpreter
+         (a Homebrew python if present, else /usr/bin/python3). NOT the bare /usr/bin/python3 shim:
+         it re-execs a framework binary that launchd can't attribute Full Disk Access to, which
+         silently blocks Instant (notification) wake mode. See skills/bazaar-config.md "Wake speed". -->
+    <string>__PYTHON__</string>
     <string>__RUNTIME__/bin/agent_daemon.py</string>
   </array>
 

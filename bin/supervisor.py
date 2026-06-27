@@ -64,6 +64,33 @@ def plan_buyer_launches(peek, enabled, busy, free_slots):
     return ready[:free_slots]
 
 
+def plan_recheck_launches(recheck, enabled, busy, free_slots):
+    """PURE: a count-net forced sweep launches ONLY markets the deterministic recheck (buyer_recheck)
+    flagged as unhandled (unread or unreadable), skipping busy ones, capped at free_slots. This is
+    the supervisor mirror of the daemon's recheck gate: a forced sweep no longer fans out to every
+    market to 'confirm nothing', it spends a ~0-token recheck and launches only real work.
+    Deterministic order = `enabled` order, so the planner is testable."""
+    if free_slots <= 0:
+        return []
+    flagged = (recheck or {}).get("markets", {})
+    ready = [m for m in enabled if m not in busy and (flagged.get(m) or {}).get("unhandled")]
+    return ready[:free_slots]
+
+
+def plan_buyer_sweep(enabled, busy, sweep_idx):
+    """PURE: the forced safety-net sweep launches ONE market, round-robin by `sweep_idx`.
+
+    Adaptive concurrency: genuine fan-out (FB ∥ Carousell) happens only for markets the peek
+    flagged `new` (plan_buyer_launches). A forced sweep fires when nothing is flagged new — there
+    is no signal that two markets are hot, so blanket-launching every free market just doubled idle
+    cost. Launch one instead, rotating across enabled markets so no market is starved across
+    successive forced sweeps. Returns [market] or []."""
+    eligible = [m for m in enabled if m not in busy]
+    if not eligible:
+        return []
+    return [eligible[sweep_idx % len(eligible)]]
+
+
 def _holder(market, seq):
     return f"sup:buyer:{market}:{seq}"
 
@@ -177,8 +204,10 @@ def _drain_outbox(channel, env, dry_run):
             logging.warning("outbox ack errored for %s (%s) — may re-send next tick", rec.get("id"), exc)
 
 
-def _launch_buyer(market, env, peek, holder, dry_run):
-    """Acquire market:<id> then Popen a scoped buyer pass. Returns the Popen, or None (dry-run/race)."""
+def _launch_buyer(market, env, peek, holder, dry_run, hint=None):
+    """Acquire market:<id> then Popen a scoped buyer pass. Returns the Popen, or None (dry-run/race).
+    `hint` overrides the peek-derived snippet (used by the notification-path trigger, which already
+    carries the buyer's message text)."""
     acq = lease.acquire(_data(), f"market:{market}", holder, "buyer", LEASE_TTL_SEC)
     if not acq["acquired"]:
         logging.info("buyer worker [%s]: lease busy — skip", market)
@@ -187,8 +216,12 @@ def _launch_buyer(market, env, peek, holder, dry_run):
         logging.info("[dry-run] would launch buyer worker for %s", market)
         lease.release(_data(), f"market:{market}", holder)
         return None
-    snippet = ((peek.get("markets") or {}).get(market) or {}).get("snippet", "")
-    worker_env = {**env, "BAZAAR_BUYER_PEEK_TEXT": f"[{market}] {snippet}".strip()}
+    if hint is not None:
+        text = hint
+    else:
+        snippet = ((peek.get("markets") or {}).get(market) or {}).get("snippet", "")
+        text = f"[{market}] {snippet}".strip()
+    worker_env = {**env, "BAZAAR_BUYER_PEEK_TEXT": text}
     # start_new_session=True → the worker leads its own process group, so _kill_tree can signal the
     # whole tree (wrapper + claude grandchild) on preempt. Without it, preempt would orphan claude.
     proc = subprocess.Popen([str(ad.BIN / "run_pass.sh"), "buyer", "--resource", market],
@@ -201,19 +234,33 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     workers = {}        # market -> {"proc": Popen, "holder": token}
     seq = 0
     empty_buyer_cycles = 0
+    sweep_idx = 0       # round-robin cursor for the forced one-market safety-net sweep
     enabled = enabled_sell_markets()
     last_buyer = time.monotonic() - cfg["buyer_poll_sec"]
+    last_buyer_pass = time.monotonic()  # when an actual buyer worker last launched (time floor)
     last_buy = time.monotonic() - cfg["buy_poll_sec"]
     last_maint = time.monotonic() - cfg["maint_poll_sec"]
     last_eval = time.monotonic()
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
+    ad._log_wake_mode()  # explicit Instant/Standard banner (did the FDA grant take?)
+    src_fp = ad._source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
 
     while not ad._stop:
+        # A code change to the daemon's own sources only takes effect on restart (no hot-reload).
+        # Bounce at loop top, then _preempt_all (below) tears down live workers cleanly before exit.
+        if ad._source_fingerprint() != src_fp:
+            logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
+            break
         _reap(workers)
         _heartbeat(workers)
         _drain_outbox(channel, env, ns.dry_run)   # flush queued background notices, in order
         paused = ad.control.is_paused()
+
+        # Keep notification-path (Meta) tabs hidden between passes so their OS push keeps firing
+        # (a focused Meta tab delivers in-app instead). Dedicated warm Chrome → never the user's own.
+        if not paused:
+            ad.tab_park.park()
 
         # CONTROL CHANNEL (privileged + exclusive): a user message preempts all market workers.
         peek = ad.channel_peek(channel, env, peek_timeout)
@@ -231,28 +278,67 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                     ad.send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)
                 ad.run_pass("seller", channel, env, ns.dry_run)
 
+        # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): launch a scoped buyer
+        # worker for any notification-path market (trigger_resolver) with new OS-notification mail,
+        # within free slots. Instant wake; poll-path markets fall through to the buyer gate below.
+        if not paused:
+            nt = ad.notify_trigger(env)
+            for market, info in (nt.get("markets") or {}).items():
+                if market in workers or (max_workers - len(workers)) <= 0:
+                    continue
+                seq += 1
+                holder = _holder(market, seq)
+                proc = _launch_buyer(market, env, {}, holder, ns.dry_run,
+                                     hint=info.get("latest_text", ""))
+                if proc is not None:
+                    workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
+                    # Do NOT reset last_buyer_pass here: it is the AGGREGATE strand-floor clock for
+                    # the poll path; a per-market notification (FB) must not delay the floor sweep
+                    # that backstops the other markets. The poll gate runs independently as fallback.
+                    logging.info("notification trigger → buyer worker [%s]: %s",
+                                 market, info.get("latest_text", "")[:60])
+
         # SELL INBOX (the parallel part): one scoped buyer worker per market with new activity.
         if not paused and time.monotonic() - last_buyer >= cfg["buyer_poll_sec"]:
             bp = ad.buyer_peek(env)
             free = max_workers - len(workers)
             to_launch = plan_buyer_launches(bp, enabled, set(workers), free)
-            force_every = cfg["force_buyer_pass_every"]
-            if not to_launch:
+            if to_launch:
+                empty_buyer_cycles = 0
+            elif free > 0:
+                # Nothing flagged new. Two safety nets (ad.buyer_force_due): the count net AND the
+                # absolute time floor.
                 empty_buyer_cycles += 1
-                if force_every and empty_buyer_cycles >= force_every:
-                    # safety net: a flaky unread signal can't strand a buyer — sweep free markets.
-                    to_launch = [m for m in enabled if m not in workers][:max(0, free)]
+                floor_sec = cfg.get("force_buyer_sweep_hours", 0) * 3600
+                forced, reason = ad.buyer_force_due(
+                    empty_buyer_cycles, cfg["force_buyer_pass_every"],
+                    time.monotonic() - last_buyer_pass, floor_sec)
+                floor_due = floor_sec > 0 and (time.monotonic() - last_buyer_pass) >= floor_sec
+                if forced and floor_due:
+                    # Ultimate strand backstop: force an ACTUAL pass for ONE market (round-robin),
+                    # even when the cheap signals say clear (covers a strand that left count==0).
+                    to_launch = plan_buyer_sweep(enabled, set(workers), sweep_idx)
+                    sweep_idx += 1
                     empty_buyer_cycles = 0
                     if to_launch:
-                        logging.info("buyer safety-net sweep → %s", to_launch)
-            else:
-                empty_buyer_cycles = 0
+                        logging.info("buyer floor sweep (%s) → %s", reason, to_launch)
+                elif forced:
+                    # Count-net force: spend a ~0-token recheck and launch ONLY markets with real
+                    # unread (adaptive concurrency — no blanket fan-out to 'confirm nothing').
+                    rc = ad.buyer_recheck(env)
+                    to_launch = plan_recheck_launches(rc, enabled, set(workers), free)
+                    empty_buyer_cycles = 0
+                    if to_launch:
+                        logging.info("buyer recheck sweep → %s", to_launch)
+                    else:
+                        logging.info("buyer recheck: all inboxes clear → skip forced sweep (~0 tokens)")
             for market in to_launch:
                 seq += 1
                 holder = _holder(market, seq)
                 proc = _launch_buyer(market, env, bp, holder, ns.dry_run)
                 if proc is not None:
                     workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
+                    last_buyer_pass = time.monotonic()
                     logging.info("launched buyer worker [%s] (%s live)", market, len(workers))
             last_buyer = time.monotonic()
 
@@ -274,7 +360,9 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 })
             last_buy = time.monotonic()
 
-        if not workers and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
+        # eval gated on `not paused` too (like the buyer/maint/buy passes above) so /pause is a
+        # literal full stop — no work of any kind, deterministic or otherwise, until /resume.
+        if not paused and not workers and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
             if ad._eval_due(env):
                 ad.run_eval(env, ns.dry_run)
             last_eval = time.monotonic()

@@ -57,11 +57,19 @@ AUTONOMY_ALLOW = {
     "all-steps":  PLAYWRIGHT_TOOLS + BIN_TOOLS,  # seller is present to approve writes
 }
 
+# Pin the Playwright MCP to an EXACT version (not the floating `@latest` dist-tag). `@latest` makes
+# npx hit the npm registry to resolve the tag on EVERY browser pass cold start (1 to 4s each); an
+# exact version is served straight from the npx cache with no network. Bump this constant
+# deliberately so a bad upstream release can never silently break every pass. Keep .mcp.json (the
+# runtime file the harness actually launches) in lockstep with this value.
+PLAYWRIGHT_MCP_VERSION = "0.0.76"
+
 MCP_CONFIG = {
     "mcpServers": {
         "playwright": {
             "command": "npx",
-            "args": ["-y", "@playwright/mcp@latest", "--cdp-endpoint", "http://127.0.0.1:9222"],
+            "args": ["-y", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}",
+                     "--cdp-endpoint", "http://127.0.0.1:9222"],
         }
     }
 }

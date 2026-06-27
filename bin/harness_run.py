@@ -303,10 +303,14 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
             prompt_cache_1h=True,
         )
     if mode == "maint":
-        # Cross-listing publishes (reads listing URLs) → keep the strong default model + full seller
-        # browser set; it's a background pass, so no fast-step shortcut.
+        # Cross-listing is MECHANICAL (read listing URLs, drain the queue), so right-size it to
+        # sonnet instead of the strong DEFAULT — a large saving on a background pass that does not
+        # need the deepest model. Gated behind BAZAAR_MAINT_MODEL so it reverts instantly if the
+        # publish/verify path regresses: set it to "" (empty) to restore the strong DEFAULT (model
+        # None → no --model flag), or to any model name to pin that. Full seller browser set stays.
+        maint_model = os.environ.get("BAZAAR_MAINT_MODEL", "sonnet") or None
         return PassSpec(
-            prompt=_scope_prefix(resource) + MAINT_PROMPT + PAUSE_LINE, model=None, max_turns=None,
+            prompt=_scope_prefix(resource) + MAINT_PROMPT + PAUSE_LINE, model=maint_model, max_turns=None,
             allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("maint"),
             prompt_cache_1h=True,

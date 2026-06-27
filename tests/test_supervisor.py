@@ -61,6 +61,32 @@ def test_plan_no_markets_section():
     check("empty peek → nothing", supervisor.plan_buyer_launches({}, ["fb"], set(), 3) == [])
 
 
+def test_plan_buyer_sweep_one_market_roundrobin():
+    print("forced safety-net sweep launches ONE market, round-robin (adaptive concurrency):")
+    enabled = ["fb", "carousell", "ebay"]
+    check("idx 0 → first eligible", supervisor.plan_buyer_sweep(enabled, set(), 0) == ["fb"])
+    check("idx 1 → rotates to second", supervisor.plan_buyer_sweep(enabled, set(), 1) == ["carousell"])
+    check("idx wraps", supervisor.plan_buyer_sweep(enabled, set(), 3) == ["fb"])
+    check("skips busy markets", supervisor.plan_buyer_sweep(["fb", "carousell"], {"fb"}, 0) == ["carousell"])
+    check("none eligible → nothing", supervisor.plan_buyer_sweep(["fb"], {"fb"}, 0) == [])
+    check("never fans out past one", len(supervisor.plan_buyer_sweep(enabled, set(), 7)) == 1)
+
+
+def test_plan_recheck_launches():
+    print("count-net forced sweep launches ONLY markets the deterministic recheck flags unhandled:")
+    rc = {"markets": {"fb": {"unhandled": False}, "carousell": {"unhandled": True},
+                      "ebay": {"unhandled": True}}}
+    enabled = ["fb", "carousell", "ebay"]
+    check("only flagged markets, in enabled order",
+          supervisor.plan_recheck_launches(rc, enabled, set(), 5) == ["carousell", "ebay"])
+    check("skips busy", supervisor.plan_recheck_launches(rc, enabled, {"carousell"}, 5) == ["ebay"])
+    check("caps at free slots", len(supervisor.plan_recheck_launches(rc, enabled, set(), 1)) == 1)
+    check("zero free → nothing", supervisor.plan_recheck_launches(rc, enabled, set(), 0) == [])
+    check("all clear → nothing", supervisor.plan_recheck_launches(
+        {"markets": {"fb": {"unhandled": False}}}, ["fb"], set(), 5) == [])
+    check("no markets section → nothing", supervisor.plan_recheck_launches({}, ["fb"], set(), 3) == [])
+
+
 def test_enabled_sell_markets():
     print("enabled_sell_markets parses both config shapes:")
     with tempfile.TemporaryDirectory() as d:
@@ -86,6 +112,7 @@ def test_run_once_idle_no_launches():
     patch("channel_peek", lambda *a, **k: {"pending": 0, "latest_text": ""})
     patch("buyer_peek", lambda *a, **k: {"pending": 0, "markets": {}})
     patch("buy_peek", lambda *a, **k: {"pending": 0})
+    patch("notify_trigger", lambda *a, **k: {"pending": 0, "latest_text": "", "markets": {}})
     for n in ("_distribution_active", "_inbox_detect_active"):
         patch(n, lambda *a, **k: False)
     for n in ("_scan_due", "_inbox_sweep_due", "_eval_due"):
@@ -166,6 +193,8 @@ if __name__ == "__main__":
     test_plan_skips_busy()
     test_plan_caps_at_free_slots()
     test_plan_no_markets_section()
+    test_plan_buyer_sweep_one_market_roundrobin()
+    test_plan_recheck_launches()
     test_enabled_sell_markets()
     test_run_once_idle_no_launches()
     test_confirm_dead_kills_grandchild()

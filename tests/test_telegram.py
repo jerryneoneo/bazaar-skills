@@ -165,6 +165,56 @@ def test_peek_logs_nothing():
             telegram.api, telegram.get_token = orig_api, orig_token
 
 
+def test_setcommands_registers():
+    print("setcommands registers the curated menu (first call hits the API):")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate(tmp)
+        telegram.save_state(dict(telegram.DEFAULT_STATE))
+        calls = []
+        orig_api, orig_token = telegram.api, telegram.get_token
+        telegram.get_token = lambda: "tok"
+        telegram.api = lambda method, params, token: calls.append((method, params)) or {}
+        try:
+            rc = telegram.cmd_setcommands(_NS(force=False))
+        finally:
+            telegram.api, telegram.get_token = orig_api, orig_token
+        check("returns 0", rc == 0)
+        check("called setMyCommands once", len(calls) == 1 and calls[0][0] == "setMyCommands")
+        sent = calls[0][1]["commands"]
+        check("sent the full curated set", sent == telegram.BOT_COMMANDS)
+        check("commands are slash-free + lowercase",
+              all(c["command"] == c["command"].lower() and "/" not in c["command"] for c in sent))
+        check("hash persisted to state",
+              telegram.load_state().get("commands_hash") == telegram._commands_hash())
+
+
+def test_setcommands_idempotent():
+    print("setcommands is idempotent (skips when unchanged; --force re-registers):")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate(tmp)
+        telegram.save_state({**telegram.DEFAULT_STATE, "commands_hash": telegram._commands_hash()})
+        calls = []
+        orig_api, orig_token = telegram.api, telegram.get_token
+        telegram.get_token = lambda: "tok"
+        telegram.api = lambda method, params, token: calls.append(method) or {}
+        try:
+            telegram.cmd_setcommands(_NS(force=False))
+            check("unchanged hash → no API call", calls == [])
+            telegram.cmd_setcommands(_NS(force=True))
+            check("--force re-registers", calls == ["setMyCommands"])
+        finally:
+            telegram.api, telegram.get_token = orig_api, orig_token
+
+
+def test_setcommands_constraints():
+    print("BOT_COMMANDS satisfy Telegram's setMyCommands limits:")
+    import re
+    ok_name = all(re.fullmatch(r"[a-z0-9_]{1,32}", c["command"]) for c in telegram.BOT_COMMANDS)
+    ok_desc = all(1 <= len(c["description"]) <= 256 for c in telegram.BOT_COMMANDS)
+    check("command names match ^[a-z0-9_]{1,32}$", ok_name)
+    check("descriptions are 1-256 chars", ok_desc)
+
+
 if __name__ == "__main__":
     print("telegram.py structural tests\n")
     test_keyboard()
@@ -174,6 +224,9 @@ if __name__ == "__main__":
     test_send_logs_outbound()
     test_poll_logs_each_event_once()
     test_peek_logs_nothing()
+    test_setcommands_registers()
+    test_setcommands_idempotent()
+    test_setcommands_constraints()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

@@ -30,13 +30,16 @@ say  "Here's your current setup:
                       (+ ' · N suggestion(s) pending' if `python3 bin/style.py proposals` is non-empty)
       • Running as:   <always-on daemon | interactive session>
                       <if `python3 bin/control.py is-paused` exits 0: append '  ⏸ PAUSED (since
-                       <control.since>, via <control.source>); N correction(s) queued'>"
+                       <control.since>, via <control.source>); N correction(s) queued'>
+      • Wake speed:   <run `python3 bin/notify_db.py`; if it reports available AND a marketplace is on
+                       the notification path: '⚡ Instant (Facebook/Instagram); Carousell on Standard'
+                       else: '🛡️ Standard (polling)'>"
 
 ask  "What would you like to change?"
      options=[interface=Interface, connectors=Connectors, marketplaces=Selling marketplaces,
               buying=Buying (search + budget), autonomy=Autonomy, style=Style/persona,
-              pause=Pause/Resume the agent, catchup=What needs me, health=Health check,
-              reinstall=Re-run full setup, done=Nothing, close]
+              speed=Wake speed (Instant vs Standard), pause=Pause/Resume the agent,
+              catchup=What needs me, health=Health check, reinstall=Re-run full setup, done=Nothing, close]
   interface    -> goto skills/channel/onboarding.md#CHOOSE_INTERFACE
                   # if a daemon is loaded, do uninstall -> rewrite channel -> reinstall (adapters.md)
   connectors   -> goto skills/channel/onboarding.md#CHOOSE_INTERFACE   # re-run detect()/connect() to
@@ -48,6 +51,7 @@ ask  "What would you like to change?"
                   # also where pending learning suggestions are reviewed/applied (bin/style.py proposals)
   pause        -> if NOT paused: run .claude/commands/pause.md (stop the agent so you can correct it).
                   if paused: run .claude/commands/resume.md (apply queued corrections, then continue).
+  speed        -> goto skills/channel/onboarding.md#WAKE_SPEED   # Instant (notifications) vs Standard (poll)
   catchup      -> run .claude/commands/bazaar-catchup.md (deep sweep of every listing, marketplace, and
                   setup surface; reports what's not attended to and proposes the work).
   health       -> run `python3 bin/healthcheck.py` (read-only: CDP, marketplace logins, daemon); report results.

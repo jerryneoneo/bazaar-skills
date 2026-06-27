@@ -111,10 +111,27 @@ def test_maint_argv():
     print("maint pass (cross-listing §2b):")
     a = claude_argv("maint").argv
     prompt = a[2] if len(a) > 2 else ""
-    check("strong default model (no --model)", "--model" not in a)
+    # Tier 1d: maint is mechanical cross-listing, so it is right-sized to sonnet by default
+    # (was the strong DEFAULT model). Revertible via BAZAAR_MAINT_MODEL (see below).
+    check("right-sized to sonnet by default", _flag_value(a, "--model") == "sonnet")
     check("full seller browser set", "mcp__playwright__browser_file_upload" in a)
     check("scan cadence + distribution drain", "inbox_detect.py due" in prompt and "distribution_session" in prompt)
     check("never interrupts a listing", "listing_session.json" in prompt)
+
+
+def test_maint_model_env_override():
+    print("maint model override via BAZAAR_MAINT_MODEL:")
+    prev = os.environ.get("BAZAAR_MAINT_MODEL")
+    try:
+        os.environ["BAZAAR_MAINT_MODEL"] = "opus"
+        check("env overrides the maint model", _flag_value(claude_argv("maint").argv, "--model") == "opus")
+        os.environ["BAZAAR_MAINT_MODEL"] = ""  # empty reverts to the strong DEFAULT (no --model flag)
+        check("empty value reverts to strong default", "--model" not in claude_argv("maint").argv)
+    finally:
+        if prev is None:
+            os.environ.pop("BAZAAR_MAINT_MODEL", None)
+        else:
+            os.environ["BAZAAR_MAINT_MODEL"] = prev
 
 
 def test_resource_scoping():
@@ -197,6 +214,7 @@ if __name__ == "__main__":
     test_buyer_argv()
     test_buy_argv()
     test_maint_argv()
+    test_maint_model_env_override()
     test_intent_argv()
     test_eval_argv()
     test_resource_scoping()

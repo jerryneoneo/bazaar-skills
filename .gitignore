@@ -39,6 +39,7 @@ data/buy_session.json
 data/inbox_detect_session.json
 data/catchup_session.json
 data/buyer_peek_state.json
+data/notify_watch_state.json
 data/scan_state.json
 data/takeover_seen.json
 data/pacing_state.json

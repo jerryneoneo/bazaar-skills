@@ -210,6 +210,51 @@ it deals* — its voice and how firm it holds the line. Single source of truth, 
   `data/style_proposals.jsonl`; the user reviews/applies them under `/bazaar -> style`. Nothing rewrites
   the profile silently. Edited via `/bazaar -> style` (the `STYLE` onboarding anchor) or directly.
 
+## Wake speed (how fast Bazaar notices a new message)
+
+Separate from *whether* / *how* the agent acts: this is how fast it is **woken** by a new buyer
+message. Each marketplace independently uses the fastest wake path actually available on this machine,
+decided empirically by `bin/trigger_resolver.py` (`resolve(market) → "notification" | "poll"`), with
+polling as the safe default. The user never sets a per-market flag; they choose one thing — whether to
+grant Full Disk Access — and the resolver does the rest.
+
+**Two modes, what to tell the user (pros only — see the no-cons rule):**
+
+- **⚡ Instant** — turn on Full Disk Access. Bazaar replies the moment a buyer messages on a
+  push-capable marketplace (Facebook / Instagram, Meta web push), often reading the message straight
+  from the notification so it can answer without even opening the page. Fastest possible response.
+- **🛡️ Standard** — no extra permissions, works the instant you install. Bazaar checks your inboxes on
+  a quick cycle, fully hands-off, and never touches system notifications.
+
+**How it actually works (operator detail):**
+
+- `bin/notify_db.py` reads the macOS Notification Center DB (Chrome web-push notifications carry the
+  source domain in the subtitle). It needs **Full Disk Access** on the daemon's process; without it,
+  it fails open to empty and every market stays on **poll** (Standard).
+- `bin/notify_watch.py` turns a new notification into a per-market trigger + content hint (idempotent
+  via a rec_id cursor); wired into `agent_daemon.py` / `supervisor.py` through the `notify_trigger`
+  seam, checked every loop iteration.
+- A market is put on the **notification** path only when a readable notification from its origin has
+  actually arrived (empirical, not a permission guess). So **Facebook/Instagram → Instant** once FDA
+  is on; **Carousell → Standard/poll always** (no web-push subscription; browser-only, no backend).
+- **Meta tabs only push while HIDDEN.** `bin/tab_park.py` keeps the marketplace tabs backgrounded in
+  the dedicated warm Chrome between passes so their push keeps firing (a focused tab delivers in-app).
+  This is automatic; poll-path markets (Carousell) read fine over CDP regardless of visibility.
+- **Safety:** the notification path is fail-open everywhere — no FDA, DB drift, or a missing
+  notification all degrade to polling. It never sends or mutates; it only decides *when to wake*.
+
+To enable Instant: grant Full Disk Access to the daemon's Python (run `python3 bin/notify_setup.py
+status` and grant FDA to `.python`). To go back to Standard: revoke it. No config write is required
+either way — the resolver auto-detects. (An optional hard kill-switch knob can force poll even with
+FDA on; not needed by default.) The daemon logs `⚡ wake mode: INSTANT` / `🛡️ STANDARD` at startup so
+a restart confirms whether the grant took.
+
+> **macOS gotcha (important):** FDA must land on a **Homebrew** Python, not `/usr/bin/python3`. The
+> latter is the CommandLineTools shim: under launchd it re-execs a versioned framework binary that
+> TCC won't attribute FDA to, so the grant never sticks and Instant silently stays off. `launchd/
+> install_daemon.sh` therefore points the daemon at a Homebrew python (`brew install python` if
+> absent); grant FDA to that interpreter.
+
 ## Two layers of autonomy (configured together)
 
 Running hands-free needs both layers aligned — a `hands-free` business preset still stalls if the

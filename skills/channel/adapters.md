@@ -61,6 +61,9 @@ whatever adapter you're reachable on now, usually the console):
   5. Open your new bot via the `t.me/<username>` link BotFather gives you and tap **Start** (or send
      `/start`). The agent runs `telegram.py poll` until it captures your `chat_id` (single-tenant —
      it then ignores every other chat) and confirms *"connected as @you."*
+  6. The agent runs `python3 bin/telegram.py setcommands` once so your everyday commands (`/status`,
+     `/list`, `/search`, `/delist`, `/detect`, `/pause`, `/resume`) show up in Telegram's `/`
+     autocomplete menu right away (the daemon also re-registers this idempotently on each restart).
 
 ### imessage (macOS only)
 `detect()` priority: (1) an iMessage MCP server registered in the harness → bind that; (2) else
