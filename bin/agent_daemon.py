@@ -44,6 +44,7 @@ sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
 import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
+import notify_db  # noqa: E402  FDA-gated Notification Center reader (startup wake-mode self-check)
 import tab_park  # noqa: E402  keep Meta (notification-path) tabs hidden so their OS push keeps firing
 
 # The runtime dir (beside the agent) or one level up (dev tree) — the harness reads its own secret
@@ -334,6 +335,27 @@ def buyer_peek(env: dict) -> dict:
         return {"pending": 0, "latest_text": ""}
 
 
+def wake_mode() -> str:
+    """'instant' if the macOS Notification Center is READABLE (Full Disk Access granted to this
+    daemon's process), else 'standard'. The gating capability for the notification path; per-market
+    activation is still empirical at runtime (trigger_resolver). Never raises."""
+    try:
+        return "instant" if notify_db.available() else "standard"
+    except Exception:  # noqa: BLE001 — a self-check must never block startup
+        return "standard"
+
+
+def _log_wake_mode() -> None:
+    """Log a clear one-line wake-mode banner at startup — explicit confirmation of whether the Full
+    Disk Access grant took (so a restart tells the operator plainly: Instant vs Standard)."""
+    if wake_mode() == "instant":
+        logging.info("⚡ wake mode: INSTANT — Notification Center readable (FDA granted); "
+                     "push-capable markets (FB/IG) wake on notifications, others poll")
+    else:
+        logging.info("\U0001f6e1️ wake mode: STANDARD polling — Full Disk Access not granted "
+                     "(grant it for Instant: /bazaar -> speed). All markets use the cheap poll path")
+
+
 def notify_trigger(env: dict) -> dict:
     """Notification-path trigger: which notification-path markets (trigger_resolver) have a NEW OS
     notification right now? Checked every loop iteration (cheap, ~0 tokens) so a push wakes the agent
@@ -517,6 +539,7 @@ def main(argv) -> int:
                  "peek_timeout=%ss · dry_run=%s · paused=%s", channel["adapter"], cfg["buyer_poll_sec"],
                  cfg["buy_poll_sec"], cfg["maint_poll_sec"], peek_timeout, ns.dry_run,
                  control.is_paused())  # a file-based pause survives a daemon restart
+    _log_wake_mode()  # explicit Instant/Standard banner so the operator knows if the FDA grant took
     last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
     last_buyer_pass = time.monotonic()                     # when an actual buyer PASS last ran (time floor)
     last_buy = time.monotonic() - cfg["buy_poll_sec"]      # and a buy pass

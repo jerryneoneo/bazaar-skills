@@ -151,6 +151,20 @@ def test_load_config_sweep_floor():
     check("present and numeric >= 0", isinstance(val, (int, float)) and val >= 0)
 
 
+def test_wake_mode_reflects_fda():
+    print("wake_mode: 'instant' when the Notification Center is readable, else 'standard' (fail-open):")
+    saved = agent_daemon.notify_db.available
+    try:
+        agent_daemon.notify_db.available = lambda: True
+        check("FDA readable → instant", agent_daemon.wake_mode() == "instant")
+        agent_daemon.notify_db.available = lambda: False
+        check("FDA not granted → standard", agent_daemon.wake_mode() == "standard")
+        agent_daemon.notify_db.available = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        check("error → standard (fail-open, no raise)", agent_daemon.wake_mode() == "standard")
+    finally:
+        agent_daemon.notify_db.available = saved
+
+
 def test_peek_cmd_dispatch():
     print("_peek_cmd: builds the right non-consuming command per adapter (console → None):")
     tg = agent_daemon._peek_cmd({"adapter": "telegram", "detail": {}}, 25)
@@ -176,6 +190,7 @@ if __name__ == "__main__":
     test_buyer_recheck_failopen_conservative()
     test_buyer_action_decision()
     test_load_config_sweep_floor()
+    test_wake_mode_reflects_fda()
     test_peek_cmd_dispatch()
     print()
     if _fail:

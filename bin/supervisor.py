@@ -243,6 +243,7 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     last_eval = time.monotonic()
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
+    ad._log_wake_mode()  # explicit Instant/Standard banner (did the FDA grant take?)
     src_fp = ad._source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
 
     while not ad._stop:
