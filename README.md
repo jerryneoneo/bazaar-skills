@@ -57,6 +57,8 @@ Onboarding then walks you through: pick your **interface** (Telegram or console)
 | **Google Chrome** | the real, logged-in browser the agent drives over CDP |
 | A Telegram bot token | optional — the console interface needs none |
 
+On macOS, `./setup` offers to install missing **Node** and **Google Chrome** for you via Homebrew (installing Homebrew first if needed); pass `--no-install` to skip. You install + sign in to the Claude Code CLI once yourself.
+
 ---
 
 ## How it works
@@ -78,7 +80,6 @@ You choose how hands-off it is. Onboarding sets an autonomy preset — `hands-fr
 3. **Publish.** The agent posts to your enabled marketplaces and works buyers from there — auto-answering from a learned Q&A bank and negotiating within your floor at the autonomy level you chose. An above-list or bidding offer always checks with you first.
 4. **Close.** When a deal is agreed, the agent issues a checkout link, coordinates delivery, and marks the item sold across every marketplace it was listed on.
 
-Two steps in that journey have a **recommended path** and a manual fallback. Both are optional — but skipping them costs you reach and convenience.
 
 ### Listing to carousell.ai — distribution
 
@@ -174,6 +175,12 @@ Full manual runbook — every prerequisite, secret, and gotcha — is in **[SETU
 python3 tests/test_floor_gate.py   # floor never leaks; a counter is always >= floor
 python3 tests/test_shipping.py     # buyer_total = price + fee; unserviceable -> decline; no address leak
 python3 tests/test_telegram.py     # keyboard/normalize/single-tenant; token safety
+```
+
+Check the install is actually runnable any time — Chrome/CDP, marketplace logins, daemon (read-only, no secrets):
+
+```bash
+python3 bin/healthcheck.py
 ```
 
 ---

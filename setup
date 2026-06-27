@@ -17,6 +17,7 @@
 # Flags (all optional; smart defaults so it never blocks in CI):
 #   --host <claude|claude-code|codex>   pick the harness (default: menu on a TTY, else claude-code)
 #   --autonomy <hands-free|balanced|all-steps>   record the autonomy preset (default: balanced)
+#   --no-install                        don't auto-install missing deps (Node/Chrome) via Homebrew
 #   --prefix | --no-prefix              prefix global launcher names with 'bazaar-' (default: no)
 #   --team | --no-team                  reserved for shared-repo auto-update (default: off)
 #   --yes                               non-interactive; take defaults, never prompt
@@ -31,8 +32,33 @@ warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mBazaar:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# --- dependency auto-install helpers (macOS / Homebrew) --------------------------------------
+brew_bin() {
+  command -v brew 2>/dev/null && return 0
+  [ -x /opt/homebrew/bin/brew ] && { echo /opt/homebrew/bin/brew; return 0; }
+  [ -x /usr/local/bin/brew ]   && { echo /usr/local/bin/brew;   return 0; }
+  return 1
+}
+confirm_yes() {  # confirm_yes "question" -> 0 yes / 1 no; auto-yes with --yes; no TTY -> no
+  [ "$ASSUME_YES" = 1 ] && return 0
+  [ -e /dev/tty ] || return 1
+  printf '\033[1;36mBazaar:\033[0m %s [Y/n] ' "$1" >/dev/tty
+  local ans=""; read -r ans </dev/tty || return 1
+  case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
+}
+ensure_brew() {  # make `brew` usable this session (macOS); install it if absent. return 0 if available
+  local b
+  if b="$(brew_bin)"; then eval "$("$b" shellenv)" 2>/dev/null || true; return 0; fi
+  [ "$OS" = macos ] || return 1
+  say "Installing Homebrew (needed to install the dependencies)…"
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty \
+    || { warn "Homebrew install failed — install Node/Chrome by hand."; return 1; }
+  if b="$(brew_bin)"; then eval "$("$b" shellenv)" 2>/dev/null || true; fi
+  command -v brew >/dev/null 2>&1
+}
+
 # --- flags -----------------------------------------------------------------------------------
-HOST="" ; AUTONOMY="balanced" ; PREFIX=0 ; TEAM="" ; ASSUME_YES=0
+HOST="" ; AUTONOMY="balanced" ; PREFIX=0 ; TEAM="" ; ASSUME_YES=0 ; INSTALL_DEPS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --host)       HOST="${2:-}"; shift 2 ;;
@@ -42,6 +68,7 @@ while [ $# -gt 0 ]; do
     --team)       TEAM=1; shift ;;
     --no-team)    TEAM=0; shift ;;
     --yes|-y)     ASSUME_YES=1; shift ;;
+    --no-install) INSTALL_DEPS=0; shift ;;
     -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
     *)            die "unknown flag: $1 (try --help)" ;;
   esac
@@ -56,11 +83,21 @@ case "$(uname -s)" in
 esac
 have git     || die "git is required. Install it and re-run."
 have python3 || die "python3 is required. Install it and re-run."
-for opt in node npx; do
-  have "$opt" || warn "$opt not found — needed later for the Playwright browser tool (Stage 2 will flag it)."
-done
+# Node + Chrome power the browser tool. On macOS, offer to auto-install whichever is missing via
+# Homebrew (one consent prompt; --yes auto-accepts, --no-install skips, no TTY skips). Other OSes warn.
+need_node=0;   have npx || need_node=1
+need_chrome=0; [ "$OS" = macos ] && [ ! -d "/Applications/Google Chrome.app" ] && need_chrome=1
+if [ "$OS" = macos ] && [ "$INSTALL_DEPS" = 1 ] && { [ "$need_node" = 1 ] || [ "$need_chrome" = 1 ]; }; then
+  miss=""; [ "$need_node" = 1 ] && miss="Node"
+  [ "$need_chrome" = 1 ] && miss="${miss:+$miss + }Google Chrome"
+  if confirm_yes "Install missing dependencies ($miss) with Homebrew?" && ensure_brew; then
+    [ "$need_node" = 1 ]   && { say "Installing Node…";           brew install node                 && need_node=0   || warn "brew install node failed."; }
+    [ "$need_chrome" = 1 ] && { say "Installing Google Chrome…";  brew install --cask google-chrome && need_chrome=0 || warn "brew install google-chrome failed."; }
+  fi
+fi
+have npx || warn "Node/npx not found — needed for the Playwright browser tool. Install with: brew install node (or via nvm)."
 if [ "$OS" = macos ] && [ ! -d "/Applications/Google Chrome.app" ]; then
-  warn "Google Chrome not found in /Applications — the agent drives a real Chrome; install it before listing."
+  warn "Google Chrome not found — the agent drives a real Chrome. Install with: brew install --cask google-chrome."
 fi
 
 # --- macOS TCC gate: the runtime dir must be readable by launchd ------------------------------
@@ -105,7 +142,11 @@ AGENT="$(harness_to_cli "$HARNESS")"
 if [ "$HARNESS" = codex ]; then
   warn "Codex is install/config-only today — the agent loop runs under Claude Code. Continuing config; runtime is a follow-up."
 fi
-have "$AGENT" || die "$AGENT is not installed. Install it and re-run ./setup."
+if ! have "$AGENT"; then
+  [ "$AGENT" = claude ] \
+    && die "Claude Code CLI not found. Install it from https://claude.com/claude-code, then re-run ./setup." \
+    || die "$AGENT is not installed. Install it, then re-run ./setup."
+fi
 
 # --- 3. sign-in gate -------------------------------------------------------------------------
 while ! python3 bin/install.py harness --name "$HARNESS" >/dev/null 2>&1; do
@@ -158,6 +199,7 @@ mkdir -p "$HOME/.bazaar"; printf '%s\n' "$VER" > "$HOME/.bazaar/.last-setup-vers
 # --- 7. first run -> onboarding; re-run -> refresh + exit -------------------------------------
 if [ -f "$SELF_DIR/data/seller_config.json" ]; then
   say "Bazaar v$VER refreshed (launchers + config). Already onboarded."
+  python3 bin/healthcheck.py 2>/dev/null || true   # report runnable state (read-only, no secrets)
   say "  • change settings:  /bazaar      • update later:  /bazaar-upgrade"
   exit 0
 fi

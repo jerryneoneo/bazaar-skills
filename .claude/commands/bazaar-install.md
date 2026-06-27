@@ -56,6 +56,8 @@ ask  "How should Bazaar run?"
   # Task Scheduler on Windows). interactive = a kept-open /sell-run (or /loop /sell-run) session.
 
 # 2. PREFLIGHT (SETUP.md §2)
+#    On macOS, `./setup` (Stage 1) already offered to `brew install` any missing Node/Chrome;
+#    preflight re-checks and surfaces anything still missing with a fix hint.
 run  python3 bin/preflight.py
      -> show each check; for any ok:false, show fix_hint and let the user fix + re-run.
         platform unsupported (exit 3) -> stop with the message.
@@ -119,6 +121,7 @@ run  python3 bin/install.py supervisor --no-dry-run   # platform module: launchd
 
 # 10. VERIFY (SETUP.md §9)
 run  python3 bin/install.py validate --harness <harness>   # generated config is valid
+run  python3 bin/healthcheck.py                            # runnable state: CDP, logins, daemon (no secrets)
 run  for t in floor_gate shipping telegram negotiate marketplaces approvals budget_gate buyer_negotiate: python3 tests/test_$t.py
 run  a first-message smoke test on the bound adapter (telegram round-trip / imessage chat.db read /
      whatsapp creds check), via the harness's headless pass (`bin/harness_run.py` → `pass_argv` seam).

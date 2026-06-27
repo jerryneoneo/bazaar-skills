@@ -55,6 +55,7 @@ One-liner preflight:
 ```bash
 which claude npx node python3 && ls "/Applications/Google Chrome.app" >/dev/null && echo "prereqs ok"
 ```
+On macOS, `./setup` offers to `brew install` any missing Node/Chrome for you (pass `--no-install` to skip).
 Note where `claude`/`npx`/`node` live — launchd needs them on PATH (§8). On this machine:
 `claude` → `~/.local/bin`, `npx`/`node` → `~/.nvm/versions/node/<ver>/bin`.
 
@@ -145,6 +146,7 @@ launchd/install_daemon.sh install             # loads chrome + agent LaunchAgent
 ```bash
 cd ~/bazaar-skills
 for t in floor_gate shipping telegram negotiate; do python3 tests/test_$t.py | tail -1; done  # ALL PASS x4
+python3 bin/healthcheck.py                           # runnable state: CDP, marketplace logins, daemon
 curl -s http://127.0.0.1:9222/json/version          # CDP up
 launchd/install_daemon.sh status                    # both loaded
 tail -f logs/daemon.log                              # watch

@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""healthcheck.py — is this Bazaar install actually runnable?
+
+Where preflight.py checks that dependencies are *present* (a static, pre-onboarding check),
+this checks that the install is *live*: the browser is reachable, you're onboarded, your
+marketplaces are logged in, and (if you chose always-on) the daemon is loaded. It surfaces the
+"silent" blockers that let an unattended pass start but quietly do nothing.
+
+Read-only. Never installs, never writes, never prints a secret (floor / budget / token / address).
+The data dir is relocatable via BAZAAR_DATA_DIR (tests + isolation), matching the rest of bin/.
+
+Run:
+  healthcheck.py            -> human summary + exit 0 unless a hard FAIL
+  healthcheck.py --json     -> structured JSON
+  healthcheck.py --quiet    -> no output; exit 0 unless a hard FAIL
+
+Levels: fail (blocks runnability) · warn (a silent always-on blocker) · ok.
+Exit: 0 no FAIL · 1 one or more FAIL · 3 platform unsupported.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import preflight  # noqa: E402  (reuse the presence checks)
+from platforms import UnsupportedPlatform  # noqa: E402
+
+CDP_URL = "http://127.0.0.1:9222/json/version"
+DAEMON_LABELS = ("com.bazaarskills.chrome", "com.bazaarskills.agent")
+
+FAIL, WARN, OK = "fail", "warn", "ok"
+
+
+def _data_dir() -> Path:
+    """The data dir — relocatable via BAZAAR_DATA_DIR (used by tests for isolation)."""
+    env = os.environ.get("BAZAAR_DATA_DIR")
+    return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
+
+
+def _check(name: str, level: str, detail: str, fix_hint: str = "") -> dict:
+    return {"name": name, "level": level, "ok": level != FAIL, "detail": detail, "fix_hint": fix_hint}
+
+
+def presence_checks(harness_name: str | None) -> list[dict]:
+    """Reuse preflight's dependency presence/auth checks; a missing dependency is a hard FAIL."""
+    out = []
+    for c in preflight.run_checks(harness_name)["checks"]:
+        out.append(_check(c["name"], OK if c["ok"] else FAIL, c["detail"], c.get("fix_hint", "")))
+    return out
+
+
+def cdp_check(url: str = CDP_URL) -> dict:
+    """Is the warm Chrome reachable over CDP? WARN (not fail): the daemon starts it on its own."""
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:  # nosec B310 — fixed localhost URL
+            reachable = resp.status == 200
+    except Exception:
+        reachable = False
+    if reachable:
+        return _check("chrome-cdp", OK, "Chrome reachable on 127.0.0.1:9222")
+    return _check("chrome-cdp", WARN, "no CDP on 127.0.0.1:9222",
+                  "start the warm browser: bin/chrome_debug.sh (the always-on daemon does this for you)")
+
+
+def onboarded_check(data_dir: Path) -> dict:
+    """seller_config.json is the onboarding gate; without it the agent has nothing to act on."""
+    if (data_dir / "seller_config.json").exists():
+        return _check("onboarded", OK, "seller_config.json present")
+    return _check("onboarded", WARN, "not onboarded yet",
+                  "run onboarding: ./setup (first run) or /bazaar-install")
+
+
+def marketplace_checks(data_dir: Path) -> list[dict]:
+    """For each ENABLED marketplace, WARN if it isn't confirmed-logged-in: a daemon driving an
+    unauthenticated Chrome can't list or reply. Reads only non-secret status fields."""
+    cfg_path = data_dir / "seller_config.json"
+    if not cfg_path.exists():
+        return []
+    try:
+        markets = (json.loads(cfg_path.read_text()).get("marketplaces") or {})
+    except (OSError, ValueError):
+        return [_check("marketplace-logins", WARN, "seller_config.json unreadable")]
+    if not isinstance(markets, dict):
+        return []
+    enabled = {mid: m for mid, m in markets.items()
+               if isinstance(m, dict) and m.get("enabled")}
+    if not enabled:
+        return [_check("marketplace-logins", WARN, "no marketplaces enabled",
+                       "enable one via /bazaar -> marketplaces")]
+    not_ready = sorted(mid for mid, m in enabled.items() if m.get("auth") != "confirmed")
+    if not_ready:
+        return [_check("marketplace-logins", WARN,
+                       f"{len(not_ready)} of {len(enabled)} not logged in: {', '.join(not_ready)}",
+                       "open each in the warm Chrome and sign in (/bazaar -> marketplaces)")]
+    return [_check("marketplace-logins", OK, f"all {len(enabled)} enabled markets logged in")]
+
+
+def _launchctl_loaded(label: str) -> bool | None:
+    """True/False if launchctl can be queried, else None (can't tell)."""
+    if not shutil.which("launchctl"):
+        return None
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return label in out.stdout
+
+
+def daemon_checks() -> list[dict]:
+    """If the always-on daemon was installed (its plists exist in ~/Library/LaunchAgents), WARN when
+    a job isn't actually loaded. No plists -> interactive mode, which is fine (OK)."""
+    la = Path.home() / "Library" / "LaunchAgents"
+    installed = [lbl for lbl in DAEMON_LABELS if (la / f"{lbl}.plist").exists()]
+    if not installed:
+        return [_check("daemon", OK,
+                       "no always-on daemon installed (interactive mode — keep a /bazaar-run session open)")]
+    results = []
+    for lbl in installed:
+        loaded = _launchctl_loaded(lbl)
+        if loaded is None:
+            results.append(_check(f"daemon:{lbl}", OK, "installed (could not query launchctl)"))
+        elif loaded:
+            results.append(_check(f"daemon:{lbl}", OK, "loaded"))
+        else:
+            results.append(_check(f"daemon:{lbl}", WARN, "installed but not loaded",
+                                  "launchd/install_daemon.sh install"))
+    return results
+
+
+def run_checks(harness_name: str | None = None) -> dict:
+    data_dir = _data_dir()
+    checks = [
+        *presence_checks(harness_name),
+        cdp_check(),
+        onboarded_check(data_dir),
+        *marketplace_checks(data_dir),
+        *daemon_checks(),
+    ]
+    return {
+        "ok": all(c["level"] != FAIL for c in checks),
+        "fails": [c["name"] for c in checks if c["level"] == FAIL],
+        "warns": [c["name"] for c in checks if c["level"] == WARN],
+        "checks": checks,
+    }
+
+
+def render(result: dict) -> str:
+    icon = {OK: "✅", WARN: "⚠️ ", FAIL: "❌"}
+    lines = ["Bazaar health check:"]
+    for c in result["checks"]:
+        line = f"  {icon[c['level']]} {c['name']}: {c['detail']}"
+        if c["level"] != OK and c["fix_hint"]:
+            line += f"\n       → {c['fix_hint']}"
+        lines.append(line)
+    if result["fails"]:
+        lines.append(f"\nNOT RUNNABLE — fix: {', '.join(result['fails'])}")
+    elif result["warns"]:
+        lines.append(f"\nRunnable, with {len(result['warns'])} warning(s) to check before unattended use.")
+    else:
+        lines.append("\nAll good — ready to run.")
+    return "\n".join(lines)
+
+
+def main(argv) -> int:
+    p = argparse.ArgumentParser(prog="healthcheck.py")
+    p.add_argument("--json", action="store_true", help="emit JSON instead of a human summary")
+    p.add_argument("--quiet", action="store_true", help="no output; exit code only")
+    p.add_argument("--harness", default="",
+                   help="claude-code | codex (default: $BAZAAR_HARNESS or autodetect)")
+    ns = p.parse_args(argv[1:])
+    harness_name = ns.harness or os.environ.get("BAZAAR_HARNESS") or None
+    try:
+        result = run_checks(harness_name)
+    except UnsupportedPlatform as exc:
+        if not ns.quiet:
+            print(json.dumps({"ok": False, "error": str(exc)}) if ns.json else f"unsupported platform: {exc}")
+        return 3
+    if not ns.quiet:
+        print(json.dumps(result, indent=2) if ns.json else render(result))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

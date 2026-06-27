@@ -36,6 +36,9 @@ The LLM (`claude -p`) runs **only when there's work** — a channel event or a b
   Carousell, eBay, …). The token lives in `../.claude/settings.local.json` (the daemon reads it and
   injects it into each pass).
 
+**Diagnose:** `python3 bin/healthcheck.py` reports whether the daemon can actually run — Chrome/CDP up,
+marketplaces logged in, both LaunchAgents loaded — and flags the silent blockers (read-only, no secrets).
+
 ## Install / control
 ```bash
 cd seller-agent
