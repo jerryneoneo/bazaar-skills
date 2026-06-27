@@ -7,7 +7,7 @@ as the default and accept "keep"). Writes `data/seller_config.json` and seeds av
 Uses only the `channel.md` verbs. All money/address handling follows the trust rules below. The
 `##`-anchored sections (`CHOOSE_INTERFACE`, `CHOOSE_MARKETPLACES`, `APPROVALS`, `BUYER_PROFILE`) are
 the single source of truth for those steps — full onboarding runs them in order; `/bazaar` jumps
-straight to one. Bazaar is one agent that can **sell and buy**; the seller fields below write
+straight to one (incl. `WAKE_SPEED`, the optional Instant-mode speed upgrade). Bazaar is one agent that can **sell and buy**; the seller fields below write
 `data/seller_config.json`, and the optional `BUYER_PROFILE` step writes `data/buyer_config.json`.
 
 ```
@@ -39,6 +39,7 @@ ask  "Connect a calendar so I can answer 'when will it ship?' accurately?"
              say "No problem, I'll keep timing answers vague until you set this."
 
 run  APPROVALS                                              # autonomy level (both layers)
+run  WAKE_SPEED                                             # optional: Instant (notifications) vs Standard (poll)
 
 ask  "Want me to BUY for you too? I can search the marketplaces and negotiate on your behalf."
      options=[yes=Set up buying, skip=Just selling for now]
@@ -149,6 +150,40 @@ run  `python3 bin/style.py validate`   # fail-fast; re-ask on any error
 pending = `python3 bin/style.py proposals`
 if pending: for each, say {current -> proposed, rationale}; ask apply? -> `python3 bin/style.py apply --id <id>`
 say  "✅ Style saved. I'll deal in your voice. Change it anytime with /bazaar -> style."
+```
+
+## WAKE_SPEED
+How fast Bazaar notices a new buyer message. OPTIONAL speed upgrade — Standard works out of the box,
+so never block onboarding on it. Single source of truth for `/bazaar -> speed`; full mechanism in
+`skills/bazaar-config.md` "Wake speed" (resolver + tab_park + fail-open poll fallback). macOS only.
+```
+say  "Two speeds (pick one, change anytime):
+      ⚡ Instant — I reply the moment a buyer messages on Facebook or Instagram, often answering
+         straight from the notification. (Needs Full Disk Access so I can read notifications.)
+      🛡️ Standard — hands-off, I check your inboxes on a quick cycle. No extra permissions."
+ask  "Turn on Instant?" options=[instant=Turn on Instant, standard=Keep Standard (default)]
+  standard -> say "Done — Standard polling is on. Turn on Instant anytime via /bazaar -> speed."
+  instant  ->
+     # macOS only — if not macOS, say so and fall back to Standard.
+     # 1) Full Disk Access (TCC is user-only: open the pane + guide, then detect). Report the exact
+     #    binary to enable from `python3 bin/notify_setup.py status` (.python = the daemon's Python).
+     run `python3 bin/notify_setup.py open-fda`
+     say  "I opened System Settings → Privacy & Security → Full Disk Access. Turn it ON for
+           <status.python>, then say 'done'."
+     # 2) Chrome notification permission for the push-capable markets (Meta: FB/IG). Try the auto
+     #    grant; if it reports anything other than 'granted' (blocked / no tab), GUIDE the manual
+     #    grant: open the site, click the tune/lock icon left of the address bar → Notifications →
+     #    Allow, for facebook.com (and instagram.com).
+     run `python3 bin/notify_setup.py grant-chrome`
+     # 3) verify + report (fail-soft — Instant is additive; Standard polling always backstops it).
+     run `python3 bin/notify_setup.py status`
+     if status.instant_ready -> say "⚡ Instant is on. Facebook/Instagram wake me the moment a buyer
+                                      messages; Carousell stays on Standard polling."
+     else                    -> say "Instant is armed. It switches on automatically the moment a real
+                                      Facebook notification arrives; until then I use Standard polling
+                                      so nothing is missed."
+     # Keeping the FB tab backgrounded so its push keeps firing is automatic (bin/tab_park.py).
+     # Carousell has no web-push, so it always uses Standard polling. Both paths are fail-open.
 ```
 
 ## BUYER_PROFILE

@@ -578,8 +578,11 @@ def main(argv) -> int:
                 logging.info("notification trigger → buyer pass: %s", nt.get("latest_text", "")[:70])
                 run_pass("buyer", channel, env, ns.dry_run, extra_env={
                     "BAZAAR_BUYER_PEEK_TEXT": nt.get("latest_text", "")})
-                last_buyer = time.monotonic()       # we just acted; reset the poll cadence
-                last_buyer_pass = time.monotonic()  # and the strand-floor clock
+                # Deliberately do NOT touch last_buyer / last_buyer_pass here. Those drive the
+                # AGGREGATE poll gate + strand-floor for ALL markets; resetting them on a per-market
+                # notification (FB) would starve the poll path that backstops the OTHER markets
+                # (Carousell) and any FB message a notification misses. The poll runs independently
+                # on its own cadence and remains the fallback. (notify_watch's own cursor dedupes.)
         if not paused and time.monotonic() - last_buyer >= cfg["buyer_poll_sec"]:
             # GATE the expensive buyer pass behind a cheap, non-LLM unread probe. Only spend a
             # full LLM browser pass when a buyer actually wrote — or, as a safety net, every Nth

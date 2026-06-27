@@ -291,7 +291,9 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                                      hint=info.get("latest_text", ""))
                 if proc is not None:
                     workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
-                    last_buyer_pass = time.monotonic()
+                    # Do NOT reset last_buyer_pass here: it is the AGGREGATE strand-floor clock for
+                    # the poll path; a per-market notification (FB) must not delay the floor sweep
+                    # that backstops the other markets. The poll gate runs independently as fallback.
                     logging.info("notification trigger → buyer worker [%s]: %s",
                                  market, info.get("latest_text", "")[:60])
 
