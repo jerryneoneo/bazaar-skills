@@ -35,6 +35,16 @@ def pick_parking(targets: list[dict], notif_origins=NOTIF_ORIGINS) -> dict | Non
                  if t.get("url") and not any(o in t["url"] for o in notif_origins)), None)
 
 
+def needs_park(targets: list[dict], notif_origins=NOTIF_ORIGINS) -> bool:
+    """PURE: True only when a notification-path (Meta) tab is the CURRENTLY FRONTMOST tab and so must
+    be pushed to the background. CDP /json/list returns page targets most-recently-active first, so
+    the first tab with a URL is the active one. Parking only when this is True keeps an idle warm
+    Chrome (e.g. a lone poll-path Carousell tab) from being raised — and its window yanked to the OS
+    foreground — every loop iteration. With no Meta tab in front there is nothing to hide, so no-op."""
+    front = next((t["url"] for t in targets if t.get("url")), None)
+    return front is not None and any(o in front for o in notif_origins)
+
+
 def _cdp_call(ws_url: str, method: str, timeout: int = 5) -> None:
     """Send one CDP method (no params) and wait for its ack. Reuses buyer_peek's minimal WS client."""
     ws = bp._MiniWS(ws_url, timeout)
@@ -54,9 +64,15 @@ def _cdp_call(ws_url: str, method: str, timeout: int = 5) -> None:
 
 def park(notif_origins=NOTIF_ORIGINS) -> bool:
     """Bring a non-notification tab to the front so notification-path tabs go hidden. Returns True if
-    it parked, False on no-op (no suitable tab) or any error. Never raises."""
+    it parked, False on no-op (nothing to hide / no suitable tab) or any error. Never raises.
+
+    No-ops unless a Meta tab is currently frontmost (needs_park): otherwise the warm Chrome window
+    would be raised to the OS foreground every loop iteration even when there is nothing to hide."""
     try:
-        parking = pick_parking(bp.list_page_targets(), notif_origins)
+        targets = bp.list_page_targets()
+        if not needs_park(targets, notif_origins):
+            return False
+        parking = pick_parking(targets, notif_origins)
         if not parking:
             return False
         _cdp_call(parking["webSocketDebuggerUrl"], "Page.bringToFront")

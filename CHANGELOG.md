@@ -3,6 +3,65 @@
 All notable changes to Bazaar Skills are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com); versions track the root `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- **Instant wake mode (push-notification trigger path).** FB/IG can now reply the moment a
+  buyer messages, often answering straight from the OS notification, instead of waiting for the
+  next poll cycle. Built on a per-platform resolver so each marketplace uses the cheapest trigger
+  actually available on this machine, with polling as the safe default.
+- **Per-platform trigger resolver** (`bin/trigger_resolver.py`): `resolve(platform)` returns
+  `"notification"` or `"poll"`, empirically (a platform is on the notification path only if a
+  readable OS notification from its origin actually arrived in a window), poll-default and
+  fail-open.
+- **Notification-path plumbing.** `bin/notify_db.py` (read-only macOS Notification Center reader;
+  Chrome web-push carries the source domain in the subtitle; needs Full Disk Access, fails open
+  to `[]`), `bin/notify_watch.py` (the OS-notification counterpart of `buyer_peek`, idempotent
+  past a per-market cursor), and `bin/tab_park.py` (keeps Meta tabs backgrounded in a dedicated
+  warm Chrome so they keep firing readable push; a focused Meta tab delivers in-app with no push).
+  Wired into `agent_daemon` + `supervisor` as a ~0-token per-loop check.
+- **Instant-mode setup in onboarding + `/bazaar`.** `bin/notify_setup.py` (status / open-fda /
+  grant-chrome; read-only, fail-open, macOS only) plus a new `WAKE_SPEED` onboarding anchor that
+  offers Instant with pros-only copy, guides the Full Disk Access + Chrome notification grants,
+  verifies via status, and falls back to Standard. Standard stays the default and never blocks
+  onboarding.
+- **Startup wake-mode self-check.** Daemon + supervisor log a one-line banner at startup
+  (`⚡ wake mode: INSTANT` when Notification Center is readable, else `🛡️ wake mode: STANDARD
+  polling`), run inside the daemon process so it reflects the daemon's own Full Disk Access after
+  a restart.
+- **Turnkey install on macOS.** `setup` offers to `brew install` missing Node + Chrome (installs
+  Homebrew first if needed); consent-gated, `--yes` auto-accepts, `--no-install` skips, no TTY
+  skips.
+- **Runtime health check** (`bin/healthcheck.py`): read-only check that deps are present,
+  Chrome/CDP is reachable, the install is onboarded, marketplace logins are confirmed, and the
+  daemon is loaded, with fail/warn/ok levels. Never prints a secret; honors `BAZAAR_DATA_DIR`.
+  Wired into `./setup` (returning-user path), onboarding verify, and a new `/bazaar health`
+  option.
+- **Mid-onboarding channel switch to Telegram.** After binding the interface the agent now says
+  it can be changed anytime ("switch to Telegram" or `/bazaar` → interface), nudges console users
+  toward Telegram for phone notifications, and supports a switch on request with no restart.
+
+### Changed
+- **Cut daemon session sprawl (Tier 1 + 2a) for fewer and cheaper passes.** Pinned the Playwright
+  MCP to `@0.0.76` (skips the cold-start dist-tag lookup), stopped forced empty buyer sweeps
+  (`force_buyer_pass_every` 2→0 with a 2h absolute floor as the strand backstop), switched the
+  supervisor's forced sweep to one round-robin market instead of fanning out, right-sized the
+  maint pass via `BAZAAR_MAINT_MODEL`, and added a `BAZAAR_MAX_WORKERS` kill-switch. New
+  `bin/buyer_recheck.py` does a ~0-token CDP re-probe so the forced buyer pass fires only on real
+  unread. Per-thread cursor idempotency, the pacing gate as sole send authority, fail-open probes,
+  and the byte-stable 1h cache prefix are all preserved.
+- **Sanitized config for public distribution.** launchd plists are now templates
+  (`__RUNTIME__`/`__PATH__`) that `install_daemon.sh` substitutes at install time, and
+  `.claude/settings.json` is trimmed to the project hooks plus a generic allow-list (removed
+  accumulated per-session approvals, absolute paths, and the private docs reference).
+
+### Fixed
+- **Notification trigger no longer starves the poll fallback.** The notification trigger used to
+  reset the shared poll timers (`last_buyer` / `last_buyer_pass`), which drive the aggregate poll
+  gate and strand-floor for every market; a per-market FB notification would starve the poll path
+  that backstops Carousell. The poll now runs independently on its own cadence as the fail-open
+  fallback for all markets.
+
 ## [0.1.0] — 2026-06-27
 
 ### Added
