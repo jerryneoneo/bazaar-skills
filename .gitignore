@@ -36,6 +36,8 @@ data/control.json.tmp
 data/listing_session.json
 data/distribution_session.json
 data/buy_session.json
+data/inbox_detect_session.json
+data/catchup_session.json
 data/buyer_peek_state.json
 data/notify_watch_state.json
 data/scan_state.json
