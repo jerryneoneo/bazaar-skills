@@ -42,6 +42,7 @@ Onboarding then walks you through: pick your **interface** (Telegram or console)
 
 - **Sell:** send `/sell-list` with a few photos. Vision IDs the item, pulls comps, drafts the listing; you set a public price and a **private floor**; it publishes to your enabled marketplaces and answers buyers from there.
 - **Buy:** send `/buy-search` and what you want. It searches your marketplaces, shortlists the best matches, then negotiates within your secret budget and coordinates the handover.
+- **Check in anytime:** run **`/bazaar-catchup`** for a full sweep of your listings, marketplaces, and setup — it reports everything waiting on you (unread buyers, decisions, drafts, logged-out marketplaces) and offers to handle each.
 - **Anything later:** open the **`/bazaar`** menu to change your interface, marketplaces, buying, autonomy, or persona.
 
 ---
@@ -111,7 +112,7 @@ Bazaar is a suite of Claude Code slash-command skills. After install they work f
 **Setup & control**
 | Skill | What it does |
 |---|---|
-| `/bazaar` | Settings & capabilities menu — view/change interface, marketplaces, buying, autonomy, persona |
+| `/bazaar` | Settings & capabilities menu — view/change interface, marketplaces, buying, autonomy, persona; check what needs you (`/bazaar-catchup`) or run a health check |
 | `/bazaar-install` | Guided onboarding (Stage 2; the installer hands off here on first run) |
 | `/bazaar-upgrade` | Update to the latest version (git pull → re-run setup → restart daemon) |
 | `/pause` | Pause the agent mid-flight (stop acting; queue corrections) |
@@ -143,6 +144,7 @@ Bazaar is a suite of Claude Code slash-command skills. After install they work f
 **Cross-cutting**
 | Skill | What it does |
 |---|---|
+| `/bazaar-catchup` | Deep sweep of every listing, marketplace, and setup surface — reports what needs you and proposes the work (acts on nothing itself) |
 | `/inbox-detect` | Review every marketplace inbox and offer to take over chats you started on your own |
 | `/bazaar-eval` | Evaluate recent conversations & passes, surface UX/behavior issues to fix |
 
@@ -175,6 +177,7 @@ Full manual runbook — every prerequisite, secret, and gotcha — is in **[SETU
 python3 tests/test_floor_gate.py   # floor never leaks; a counter is always >= floor
 python3 tests/test_shipping.py     # buyer_total = price + fee; unserviceable -> decline; no address leak
 python3 tests/test_telegram.py     # keyboard/normalize/single-tenant; token safety
+python3 tests/test_triage.py       # the /bazaar-catchup sweep aggregates pending tasks; never reads a floor/budget
 ```
 
 Check the install is actually runnable any time — Chrome/CDP, marketplace logins, daemon (read-only, no secrets):
