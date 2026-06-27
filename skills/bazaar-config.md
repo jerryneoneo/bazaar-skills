@@ -243,10 +243,17 @@ grant Full Disk Access — and the resolver does the rest.
 - **Safety:** the notification path is fail-open everywhere — no FDA, DB drift, or a missing
   notification all degrade to polling. It never sends or mutates; it only decides *when to wake*.
 
-To enable Instant: grant Full Disk Access to the daemon's Python (and, for the live test, to the
-terminal/host). To go back to Standard: revoke it. No config write is required either way — the
-resolver auto-detects. (An optional hard kill-switch knob can force poll even with FDA on; not needed
-by default.)
+To enable Instant: grant Full Disk Access to the daemon's Python (run `python3 bin/notify_setup.py
+status` and grant FDA to `.python`). To go back to Standard: revoke it. No config write is required
+either way — the resolver auto-detects. (An optional hard kill-switch knob can force poll even with
+FDA on; not needed by default.) The daemon logs `⚡ wake mode: INSTANT` / `🛡️ STANDARD` at startup so
+a restart confirms whether the grant took.
+
+> **macOS gotcha (important):** FDA must land on a **Homebrew** Python, not `/usr/bin/python3`. The
+> latter is the CommandLineTools shim: under launchd it re-execs a versioned framework binary that
+> TCC won't attribute FDA to, so the grant never sticks and Instant silently stays off. `launchd/
+> install_daemon.sh` therefore points the daemon at a Homebrew python (`brew install python` if
+> absent); grant FDA to that interpreter.
 
 ## Two layers of autonomy (configured together)
 
