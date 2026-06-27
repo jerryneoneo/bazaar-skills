@@ -44,6 +44,7 @@ sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
 import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
+import tab_park  # noqa: E402  keep Meta (notification-path) tabs hidden so their OS push keeps firing
 
 # The runtime dir (beside the agent) or one level up (dev tree) — the harness reads its own secret
 # store under whichever holds it, so the daemon never hardcodes settings.local.json.
@@ -543,6 +544,11 @@ def main(argv) -> int:
                 logging.info("daemon RESUMED — %s correction(s) queued for the next pass",
                              len(control.pending_corrections()))
             _was_paused = paused
+        # Keep notification-path (Meta) tabs hidden during the inter-pass wait so their OS push
+        # keeps firing — a focused Meta tab delivers in-app and suppresses the readable push. The
+        # warm Chrome is a dedicated instance, so this never touches the user's own browser.
+        if not paused:
+            tab_park.park()
         peek = channel_peek(channel, env, peek_timeout)
         if peek["pending"]:
             _send_typing(channel, env)                                  # instant native 'typing…'

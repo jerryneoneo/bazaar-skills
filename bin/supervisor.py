@@ -256,6 +256,11 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         _drain_outbox(channel, env, ns.dry_run)   # flush queued background notices, in order
         paused = ad.control.is_paused()
 
+        # Keep notification-path (Meta) tabs hidden between passes so their OS push keeps firing
+        # (a focused Meta tab delivers in-app instead). Dedicated warm Chrome → never the user's own.
+        if not paused:
+            ad.tab_park.park()
+
         # CONTROL CHANNEL (privileged + exclusive): a user message preempts all market workers.
         peek = ad.channel_peek(channel, env, peek_timeout)
         if peek["pending"]:

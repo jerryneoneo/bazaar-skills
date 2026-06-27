@@ -30,13 +30,16 @@ say  "Here's your current setup:
                       (+ ' · N suggestion(s) pending' if `python3 bin/style.py proposals` is non-empty)
       • Running as:   <always-on daemon | interactive session>
                       <if `python3 bin/control.py is-paused` exits 0: append '  ⏸ PAUSED (since
-                       <control.since>, via <control.source>); N correction(s) queued'>"
+                       <control.since>, via <control.source>); N correction(s) queued'>
+      • Wake speed:   <run `python3 bin/notify_db.py`; if it reports available AND a marketplace is on
+                       the notification path: '⚡ Instant (Facebook/Instagram); Carousell on Standard'
+                       else: '🛡️ Standard (polling)'>"
 
 ask  "What would you like to change?"
      options=[interface=Interface, connectors=Connectors, marketplaces=Selling marketplaces,
               buying=Buying (search + budget), autonomy=Autonomy, style=Style/persona,
-              pause=Pause/Resume the agent, health=Health check, reinstall=Re-run full setup,
-              done=Nothing, close]
+              speed=Wake speed (Instant vs Standard), pause=Pause/Resume the agent,
+              health=Health check, reinstall=Re-run full setup, done=Nothing, close]
   interface    -> goto skills/channel/onboarding.md#CHOOSE_INTERFACE
                   # if a daemon is loaded, do uninstall -> rewrite channel -> reinstall (adapters.md)
   connectors   -> goto skills/channel/onboarding.md#CHOOSE_INTERFACE   # re-run detect()/connect() to
@@ -48,6 +51,18 @@ ask  "What would you like to change?"
                   # also where pending learning suggestions are reviewed/applied (bin/style.py proposals)
   pause        -> if NOT paused: run .claude/commands/pause.md (stop the agent so you can correct it).
                   if paused: run .claude/commands/resume.md (apply queued corrections, then continue).
+  speed        -> read skills/bazaar-config.md "Wake speed". Say the two modes (PROS ONLY, no cons):
+                  "⚡ Instant (Full Disk Access): replies the moment a buyer messages on Facebook or
+                  Instagram, often answering straight from the notification.  🛡️ Standard (no extra
+                  permissions): hands-off, checks your inboxes on a quick cycle, works out of the box."
+                  Then run `python3 bin/notify_db.py` (available?):
+                  - NOT available -> offer Instant: guide Full Disk Access (System Settings → Privacy &
+                    Security → Full Disk Access → add the daemon's python3). It then auto-activates for
+                    push-capable markets; Carousell stays on Standard. Keeping marketplace tabs
+                    backgrounded so push keeps firing is automatic (bin/tab_park.py). Both modes are safe.
+                  - available -> "⚡ Instant is on: Facebook/Instagram wake instantly; Carousell uses
+                    Standard polling." Offer to return to Standard (revoke Full Disk Access).
+                  Read-only: this guides an OS permission and writes no config (the path auto-detects).
   health       -> run `python3 bin/healthcheck.py` (read-only: CDP, marketplace logins, daemon); report results.
   reinstall    -> run .claude/commands/bazaar-install.md
   done/close   -> say "All set."
