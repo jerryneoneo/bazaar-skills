@@ -3,6 +3,28 @@
 All notable changes to Bazaar Skills are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com); versions track the root `VERSION` file.
 
+## [Unreleased]
+
+### Added
+- **`/bazaar-catchup` deep catch-up sweep.** One command that sweeps everything and tells you what
+  needs you: it checks the interface and health (channel bound, browser reachable, each marketplace
+  logged in, daemon loaded, paused or not), reads every local "awaiting you" signal, and does a deep
+  per-marketplace reconciliation (unmanaged or undistributed listings and sold/removed drift via the
+  distribution SCAN read, plus chats you started solo via the inbox SWEEP read). It reports one
+  grouped digest ordered by urgency, then offers to act by handing off to the skill that already owns
+  each fix (`/sell-resolve`, `/sell-run`, `/buy-run`, `/sell-detect`, `/inbox-detect`, `/resume`),
+  each keeping its own approval gate. Acts on nothing during the sweep, never reads a secret,
+  turn-based and resumable (`data/catchup_session.json`), `--dry-run` aware. On-demand only; wrap with
+  `/loop /bazaar-catchup` for a periodic digest. Surfaced from the `/bazaar` menu ("What needs me") and
+  the `/status` summary.
+- **`bin/triage.py` (read-only "awaiting you" aggregator).** The file-state core of `/bazaar-catchup`:
+  consolidates open escalations (both sides), unread managed threads (both sides, using a cursor-walk
+  that correctly ignores threads already replied to), draft/undistributed listings, open checkouts,
+  open wants, and overdue scan/eval cadence into one JSON digest. Standard library only,
+  `BAZAAR_DATA_DIR`-relocatable, never opens `data/floors` or `data/budgets`. Replaces the ad-hoc
+  `find_unread.py` / `find_unhandled.py` prototypes (sell-side unread only), now removed. Tested by
+  `tests/test_triage.py`.
+
 ## [0.1.0] — 2026-06-27
 
 ### Added

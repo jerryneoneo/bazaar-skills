@@ -47,6 +47,8 @@ for e in events (in order):
                                 If `python3 bin/control.py status` shows paused, LEAD with:
                                 "⏸ PAUSED since <since> (via <source>) — <N> correction(s) queued.
                                  Send /resume to continue." then the usual summary.
+                                For the full deep sweep (every listing + marketplace + setup, with
+                                proposed work), point to /bazaar-catchup.
                     /pause   -> `python3 bin/control.py pause --source <adapter>`; ack "⏸ Paused…".
                                 The daemon holds all action passes and interrupts any running pass
                                 within ~one poll cadence; while paused, free-text you send is captured
@@ -181,5 +183,7 @@ channel cmds handled, per-market buyers handled/escalated, per-want sellers hand
 - `/sell-detect` — jump into distribution. `/sell-resolve` — console fallback for sell escalations.
 - `/inbox-detect` — sweep every inbox now, offer to take over chats the user started solo (both sides).
   `/buy-detect` — the same, buy-scoped (purchase chats only).
+- `/bazaar-catchup` — deep read-only sweep of every listing, marketplace, and setup surface; reports
+  one digest of what's not attended to and proposes the work (no acting during the sweep).
 
 Honor `--dry-run`: browser actions and channel sends are **logged**, not executed.
