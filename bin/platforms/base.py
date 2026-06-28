@@ -33,6 +33,11 @@ class Platform(ABC):
         """Actionable hint for granting the file-access permission the daemon needs (or '' if N/A)."""
 
     @abstractmethod
+    def is_tcc_blocked(self, path: Path) -> bool:
+        """True if the OS file-access policy (e.g. macOS TCC) would block the daemon at `path`.
+        Platforms without such a gate return False."""
+
+    @abstractmethod
     def install_supervisor(self, dry_run: bool = True) -> dict:
         """Generate + (optionally) load the always-on supervisor jobs. Returns a status dict.
         With dry_run=True, only reports what it would do (no system changes)."""

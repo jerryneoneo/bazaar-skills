@@ -5,7 +5,14 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-28
+
 ### Added
+- **Public `ROADMAP.md` + `ARCHITECTURE-OVERVIEW.md`.** A directional, tiered roadmap (shipped /
+  next / later / hosted-rail-dependent) and a public system-architecture overview (layers,
+  deterministic engines, trust invariants, a Mermaid diagram, and built-vs-planned), both linked
+  from the README. The internal as-built `ARCHITECTURE.md` stays gitignored; the public overview
+  uses a distinct filename so it actually ships.
 - **`/bazaar-catchup` deep catch-up sweep.** One command that sweeps everything and tells you what
   needs you: it checks the interface and health (channel bound, browser reachable, each marketplace
   logged in, daemon loaded, paused or not), reads every local "awaiting you" signal, and does a deep
@@ -86,7 +93,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   that backstops Carousell. The poll now runs independently on its own cadence as the fail-open
   fallback for all markets.
 
-## [0.1.0] — 2026-06-27
+## [0.1.0] - 2026-06-27
 
 ### Added
 - **Initial public release** — open-sourced under the MIT license; one-paste clone-and-`./setup`

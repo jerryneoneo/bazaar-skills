@@ -105,6 +105,7 @@ def test_cmd_run_no_llm_writes_outputs():
             (eval_run.eval_corpus, "build", lambda **k: eval_corpus.Corpus()),
             (eval_run.eval_checks, "run", lambda corpus: []),
         ])
+        _real_style = sys.modules.get("style")
         fake_style = types.ModuleType("style")
         fake_style.proposals_from_findings = lambda findings: 0
         sys.modules["style"] = fake_style
@@ -120,7 +121,10 @@ def test_cmd_run_no_llm_writes_outputs():
             check("summary reports zero findings", summary["findings"] == 0)
         finally:
             restore()
-            sys.modules.pop("style", None)
+            if _real_style is not None:           # restore the real module — do NOT evict it
+                sys.modules["style"] = _real_style
+            else:
+                sys.modules.pop("style", None)
             _restore_outputs(saved_out)
 
 
@@ -132,6 +136,7 @@ def test_cmd_run_fail_on_gates_exit():
             (eval_run.eval_corpus, "build", lambda **k: eval_corpus.Corpus()),
             (eval_run.eval_checks, "run", lambda corpus: [_finding(severity="high")]),
         ])
+        _real_style = sys.modules.get("style")
         fake_style = types.ModuleType("style")
         fake_style.proposals_from_findings = lambda findings: 0
         sys.modules["style"] = fake_style
@@ -143,7 +148,10 @@ def test_cmd_run_fail_on_gates_exit():
             check("the high finding was persisted", line_count == 1)
         finally:
             restore()
-            sys.modules.pop("style", None)
+            if _real_style is not None:           # restore the real module — do NOT evict it
+                sys.modules["style"] = _real_style
+            else:
+                sys.modules.pop("style", None)
             _restore_outputs(saved_out)
 
 

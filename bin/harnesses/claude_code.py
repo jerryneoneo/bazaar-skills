@@ -71,6 +71,7 @@ class ClaudeCodeHarness(Harness):
         text = json.dumps(settings, indent=2) + "\n"
         json.loads(text)  # validate before write
         path.write_text(text)
+        path.chmod(0o600)  # holds the Telegram bot token — owner-only, never world-readable
         return {"harness": self.name, "path": str(path), "permissions": len(allow)}
 
     def write_mcp(self, dest: Path, servers: dict) -> dict:

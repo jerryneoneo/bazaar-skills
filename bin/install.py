@@ -93,7 +93,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def cmd_runtime_dir(ns, plat) -> int:
     dest = resolve_dest(ns, plat)
-    blocked = getattr(plat, "is_tcc_blocked", lambda p: False)(dest)
+    blocked = plat.is_tcc_blocked(dest)  # part of the Platform ABC contract — no getattr fallback needed
     print(json.dumps({"runtime_dir": str(dest), "tcc_blocked": blocked,
                       "supervisor": plat.supervisor_kind()}))
     return 0 if not blocked else 3

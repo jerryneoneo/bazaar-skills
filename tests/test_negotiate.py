@@ -96,6 +96,15 @@ def test_stale_counter_respects_other_buyer():
     check("any quoted price clears other_best + 1 (>=91)", price >= 91)
 
 
+def test_below_list_accept_reserves():
+    print("below-list haggle-to-accept reserves the item (R1 regression):")
+    # decide() contract: a below-list accept must expose accept_price (one contract with at-list).
+    b = negotiate._blank_buyer("A"); b["last_counter"] = 95; b["rounds_used"] = 1
+    r = negotiate.decide(96, "fb:A", b, led(), FLOOR, LIST, STEP, CFG)
+    check("meeting standing counter → accept_fcfs", r["decision"] == "accept_fcfs")
+    check("accept_fcfs exposes accept_price", r.get("accept_price") == 96)
+
+
 # ---- CLI / state transitions on a temp item ----
 def setup():
     FLOOR_F.write_text(json.dumps({"item_id": ITEM, "list_price": LIST, "floor": FLOOR,
@@ -108,6 +117,8 @@ def setup():
 def teardown():
     for f in (FLOOR_F, ITEM_F, LEDGER_F):
         f.unlink(missing_ok=True)
+    for suffix in (".json.lock", ".json.tmp"):
+        (LEDGER_F.parent / f"{ITEM}{suffix}").unlink(missing_ok=True)
 
 
 def cli(*a):
@@ -145,6 +156,63 @@ def test_cli_flow():
         teardown()
 
 
+def test_cli_below_list_accept():
+    print("CLI below-list haggle reaches accept_fcfs without crashing (R1 regression):")
+    setup()
+    try:
+        rc1, r1, _ = cli("offer", "--item", ITEM, "--thread", "fb:A", "--buyer", "A", "--offer", "90")
+        check("first below-list offer counters (exit 0)", rc1 == 0 and r1.get("decision") == "counter")
+        rc2, r2, raw = cli("offer", "--item", ITEM, "--thread", "fb:A", "--buyer", "A", "--offer", "96")
+        check("meeting the counter accepts (exit 0, no KeyError crash)",
+              rc2 == 0 and r2.get("decision") == "accept_fcfs")
+        check("item moved to reserved_provisional", r2.get("item_state") == "reserved_provisional")
+        _, st, _ = cli("status", "--item", ITEM)
+        fr = st.get("front_runner")
+        check("front_runner locked to fb:A at 96",
+              bool(fr) and fr.get("thread_id") == "fb:A" and fr.get("amount") == 96)
+        check("no 'floor' token leaked", "floor" not in raw.lower())
+    finally:
+        teardown()
+
+
+def test_cli_confirm_bid_wrong_thread():
+    print("confirm-bid for a thread that is NOT the leading bid is rejected (no state change):")
+    setup()
+    try:
+        # A bids above list → leading bid; seller then tries to confirm a DIFFERENT thread.
+        cli("offer", "--item", ITEM, "--thread", "fb:A", "--buyer", "A", "--offer", "200")
+        rc, out, _ = cli("confirm-bid", "--item", ITEM, "--thread", "fb:NOPE")
+        check("wrong-thread confirm returns an error (exit 0, no crash)", rc == 0 and "error" in out)
+        _, st, _ = cli("status", "--item", ITEM)
+        check("front_runner unchanged (still fb:A)",
+              (st.get("front_runner") or {}).get("thread_id") == "fb:A")
+        check("item still bidding, not reserved", st.get("item_state") == "bidding")
+    finally:
+        teardown()
+
+
+def test_cli_fcfs_concurrent_single_winner():
+    print("two concurrent at-list commits → exactly one winner (R2 race):")
+    import concurrent.futures
+    setup()
+    try:
+        for i in range(8):
+            LEDGER_F.unlink(missing_ok=True)
+            (LEDGER_F.parent / f"{ITEM}.json.lock").unlink(missing_ok=True)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                fa = ex.submit(cli, "offer", "--item", ITEM, "--thread", "fb:A", "--buyer", "A", "--offer", "100")
+                fb = ex.submit(cli, "offer", "--item", ITEM, "--thread", "fb:B", "--buyer", "B", "--offer", "100")
+                (_, ra, _), (_, rb, _) = fa.result(), fb.result()
+            decs = sorted([ra.get("decision"), rb.get("decision")])
+            check(f"round {i}: exactly one accept_fcfs + one fcfs_taken (no double-promise)",
+                  decs == ["accept_fcfs", "fcfs_taken"])
+            _, st, _ = cli("status", "--item", ITEM)
+            fr = st.get("front_runner")
+            check(f"round {i}: ledger holds exactly one front_runner", bool(fr) and fr.get("kind") == "fcfs")
+    finally:
+        teardown()
+
+
 if __name__ == "__main__":
     print("negotiate v2 tests\n")
     test_harry_guard()
@@ -152,7 +220,11 @@ if __name__ == "__main__":
     test_bidding_bar()
     test_below_list_floor()
     test_stale_counter_respects_other_buyer()
+    test_below_list_accept_reserves()
     test_cli_flow()
+    test_cli_below_list_accept()
+    test_cli_confirm_bid_wrong_thread()
+    test_cli_fcfs_concurrent_single_winner()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

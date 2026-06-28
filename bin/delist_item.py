@@ -42,6 +42,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe (tmp + os.replace) JSON writes
+
 REMOVED_STATUS = "removed_by_seller"
 
 
@@ -94,7 +97,7 @@ def remove(item_id: str, removed_at: str, reason: str | None = None) -> dict:
     new record. The write is the only side effect."""
     path, record = load_record(item_id)
     updated = apply_removal(record, removed_at, reason)
-    path.write_text(json.dumps(updated, indent=2, ensure_ascii=False) + "\n")
+    atomic_io.write_json(path, updated, ensure_ascii=False)
     return updated
 
 

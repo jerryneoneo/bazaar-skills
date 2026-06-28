@@ -16,7 +16,7 @@ _An open-source project by [Carousell](https://carousell.com)._
 
 You chat with it on Telegram or the console. It lists your items on the marketplaces that fit your region, replies to buyers and sellers in a natural voice, and negotiates within limits you set — your lowest sell price and highest buy budget stay secret. Everything ships **P2P**, so every deal has one clear total: price + delivery.
 
-### Supported today (`v0.1.0`)
+### Supported today (`v0.2.0`)
 
 | | Now | On the roadmap |
 |---|---|---|
@@ -24,7 +24,7 @@ You chat with it on Telegram or the console. It lists your items on the marketpl
 | **OS** | macOS | Linux · Windows |
 | **Harness** | Claude Code | Codex · others |
 
-The architecture is channel-, OS-, and harness-agnostic by design (adapter seams throughout), so the roadmap items slot in without reworking the core. They're just not wired for runtime yet.
+The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter seams throughout), so the roadmap items slot in without reworking the core. They're just not wired for runtime yet. See **[ROADMAP.md](ROADMAP.md)** for the full picture.
 
 ---
 
@@ -72,6 +72,8 @@ Three layers, deliberately simple:
 
 You choose how hands-off it is. Onboarding sets an autonomy preset — `hands-free`, `balanced`, or `all-steps` — wiring both the business approval gates *and* the harness permission layer together, so an unattended run isn't blocked by per-tool prompts. An above-list or bidding close **always** asks you first.
 
+For the full system design (the layers, the deterministic engines, the trust invariants, and what's built vs planned), see **[ARCHITECTURE-OVERVIEW.md](ARCHITECTURE-OVERVIEW.md)**.
+
 ---
 
 ## The seller journey
@@ -91,6 +93,8 @@ Alongside the marketplaces you post to by hand, Bazaar can publish your item to 
 
 *Skip it* and you only reach the marketplaces you cross-post to yourself.
 
+> **Status:** carousell.ai publishing runs through the hosted rail (a separate workstream) and is **not yet wired in this build** — today you reach buyers on the marketplaces you cross-post to yourself.
+
 ### Checking out via carousell.ai — vs. manual
 
 At close, the recommended path is a **carousell.ai checkout link** instead of arranging payment and delivery yourself.
@@ -101,7 +105,9 @@ At close, the recommended path is a **carousell.ai checkout link** instead of ar
 
 *Skip it* and you coordinate payment and handover manually (e.g. bank transfer + your own shipping) — more work, less protection.
 
-> You stay in control: carousell.ai listing and checkout are defaults *because they're better*, never mandatory. Where the hosted checkout isn't available yet, the agent falls back to coordinating a manual handover.
+> **Status:** the carousell.ai checkout rail (escrow, tracked label, funds-hold) is a separate hosted workstream and is **not yet wired in this build** — today the checkout link is a stub (`bin/checkout.py`), so the agent closes via **manual handover**. The escrow / tracked-shipping / buyer-protection benefits above describe the rail once it lands, not what runs today.
+>
+> You stay in control regardless: carousell.ai listing and checkout are defaults *because they're better*, never mandatory.
 
 ---
 

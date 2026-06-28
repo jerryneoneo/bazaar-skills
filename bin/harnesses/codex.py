@@ -66,6 +66,7 @@ class CodexHarness(Harness):
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = [f"{k}={v}" for k, v in env.items()]
         path.write_text("\n".join(lines) + ("\n" if lines else ""))
+        path.chmod(0o600)  # dotenv may hold secrets — owner-only, never world-readable
         return {"harness": self.name, "path": str(path),
                 "note": "Codex uses approval modes, not an allow-list — set via headless flags",
                 "approval_modes": APPROVAL_MODE}

@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe writes + cross-process per-item lock (FCFS single-inventory guard)
 import floor_gate  # reuse load_floor_record (floor stays here, never leaves)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -60,8 +61,12 @@ def _cfg():
         return {k: c.get(k, v) for k, v in DEFAULTS.items()}
 
 
+def _ledger_path(item_id):
+    return LEDGER_DIR / f"{item_id}.json"
+
+
 def load_ledger(item_id, list_price, currency):
-    path = LEDGER_DIR / f"{item_id}.json"
+    path = _ledger_path(item_id)
     if path.exists():
         led = json.loads(path.read_text())
         led["list_price"] = list_price
@@ -73,9 +78,10 @@ def load_ledger(item_id, list_price, currency):
 
 
 def save_ledger(led):
-    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    """Atomic write (tmp + os.replace). Callers MUST hold atomic_io.locked(_ledger_path(item_id))
+    across the load->mutate->save so two processes can't both win one physical item (FCFS)."""
     led["updated_at"] = _now()
-    (LEDGER_DIR / f"{led['item_id']}.json").write_text(json.dumps(led, indent=2) + "\n")
+    atomic_io.write_json(_ledger_path(led["item_id"]), led)
 
 
 def _blank_buyer(handle):
@@ -93,7 +99,10 @@ def _other_best(led, thread_id):
 
 def decide_below_list(offer, buyer, effective_min, list_price, step, max_counters,
                       min_offer_ratio, lowball_cap):
-    """< list haggling: counter toward list, never below effective_min, capped + sticky."""
+    """< list haggling: counter toward list, never below effective_min, capped + sticky.
+
+    Prices use int() throughout: the marketplace convention here is whole-dollar offers, so int()
+    is exact (no rounding loss). If sub-dollar offers are ever supported, revisit these casts."""
     last, rounds = buyer["last_counter"], buyer["rounds_used"]
     if last is not None and offer >= last and offer >= effective_min:   # met counter AND beats other buyers
         return "accept_fcfs", int(offer), False, f"accept:{int(offer)}"
@@ -154,97 +163,106 @@ def decide(offer, thread_id, buyer, led, floor, list_price, step, cfg):
         cfg["max_counters"], cfg["min_offer_ratio"], cfg["lowball_cap"])
     if counter is not None and counter < floor:                  # defensive (mirrors floor_gate)
         raise AssertionError("price below floor — refusing to emit")
-    return {"decision": dec, "counter_price": counter, "hold_firm": hold,
-            "needs_seller_confirm": False, "message_intent": intent}
+    res = {"decision": dec, "counter_price": counter, "hold_firm": hold,
+           "needs_seller_confirm": False, "message_intent": intent}
+    if dec == "accept_fcfs":                 # one contract with the at-list branch (line 139):
+        res["accept_price"] = int(counter)   # callers read res["accept_price"] for every accept
+    return res
 
 
 def run_offer(item_id, thread_id, handle, offer):
-    rec = floor_gate.load_floor_record(item_id)
-    floor, list_price, step = rec["floor"], rec["list_price"], rec["step"]
-    item_path = ITEMS_DIR / f"{item_id}.json"
-    currency = json.loads(item_path.read_text()).get("currency", "") if item_path.exists() else ""
-    led = load_ledger(item_id, list_price, currency)
+    # Lock spans the whole read-modify-write so two concurrent buyers (FB + Carousell, or two
+    # market workers) can never both win one physical item — the FCFS single-inventory guarantee.
+    with atomic_io.locked(_ledger_path(item_id)):
+        rec = floor_gate.load_floor_record(item_id)
+        floor, list_price, step = rec["floor"], rec["list_price"], rec["step"]
+        item_path = ITEMS_DIR / f"{item_id}.json"
+        currency = json.loads(item_path.read_text()).get("currency", "") if item_path.exists() else ""
+        led = load_ledger(item_id, list_price, currency)
 
-    buyer = led["buyers"].get(thread_id) or _blank_buyer(handle)
-    buyer["buyer_handle"] = handle
-    buyer["offers"].append({"amount": offer, "ts": _now()})
-    buyer["highest_offer"] = max(buyer["highest_offer"], int(offer))
+        buyer = led["buyers"].get(thread_id) or _blank_buyer(handle)
+        buyer["buyer_handle"] = handle
+        buyer["offers"].append({"amount": offer, "ts": _now()})
+        buyer["highest_offer"] = max(buyer["highest_offer"], int(offer))
 
-    res = decide(offer, thread_id, buyer, led, floor, list_price, step, _cfg())
-    d = res["decision"]
+        res = decide(offer, thread_id, buyer, led, floor, list_price, step, _cfg())
+        d = res["decision"]
 
-    if d == "counter":
-        buyer["rounds_used"] += 1
-        buyer["last_counter"] = res["counter_price"]
-    elif d == "deflect_lowball":
-        buyer["lowball_count"] += 1
-    elif d == "hold_firm" and res["message_intent"] == "disengage":
-        buyer["status"] = "passed"
-    elif d == "accept_fcfs":                       # ≤ list commit → provisional FCFS hold (auto)
-        buyer["status"] = "front_runner"
-        led["front_runner"] = {"thread_id": thread_id, "amount": res["accept_price"],
-                               "kind": "fcfs", "since": _now()}
-        led["state"] = "reserved_provisional"
-    elif d == "bid_lead":                          # > list → leading bid, awaits seller confirm
-        buyer["status"] = "leading_bid"
-        led["is_bidding"] = True
-        led["state"] = "bidding"
-        led["front_runner"] = {"thread_id": thread_id, "amount": res["leading_amount"],
-                               "kind": "bid", "since": _now()}
-    elif d == "bid_outbid":
-        led["is_bidding"] = True
-        led["state"] = "bidding"
+        if d == "counter":
+            buyer["rounds_used"] += 1
+            buyer["last_counter"] = res["counter_price"]
+        elif d == "deflect_lowball":
+            buyer["lowball_count"] += 1
+        elif d == "hold_firm" and res["message_intent"] == "disengage":
+            buyer["status"] = "passed"
+        elif d == "accept_fcfs":                       # ≤ list commit → provisional FCFS hold (auto)
+            buyer["status"] = "front_runner"
+            led["front_runner"] = {"thread_id": thread_id, "amount": res["accept_price"],
+                                   "kind": "fcfs", "since": _now()}
+            led["state"] = "reserved_provisional"
+        elif d == "bid_lead":                          # > list → leading bid, awaits seller confirm
+            buyer["status"] = "leading_bid"
+            led["is_bidding"] = True
+            led["state"] = "bidding"
+            led["front_runner"] = {"thread_id": thread_id, "amount": res["leading_amount"],
+                                   "kind": "bid", "since": _now()}
+        elif d == "bid_outbid":
+            led["is_bidding"] = True
+            led["state"] = "bidding"
 
-    led["buyers"][thread_id] = buyer
-    save_ledger(led)
-    res["item_state"] = led["state"]
-    res["currency"] = currency
-    return res
+        led["buyers"][thread_id] = buyer
+        save_ledger(led)
+        res["item_state"] = led["state"]
+        res["currency"] = currency
+        return res
 
 
 def run_confirm_bid(item_id, thread_id):
     """Seller approved the leading bid → reserve it for that buyer (now closeable)."""
-    rec = floor_gate.load_floor_record(item_id)
-    led = load_ledger(item_id, rec["list_price"], "")
-    fr = led.get("front_runner")
-    if not fr or fr["thread_id"] != thread_id:
-        return {"error": "thread is not the current leading bid", "item_state": led["state"]}
-    led["state"] = "reserved_provisional"
-    led["buyers"][thread_id]["status"] = "won"
-    for tid, b in led["buyers"].items():
-        if tid != thread_id and b.get("status") not in ("passed",):
-            b["status"] = "outbid"
-    save_ledger(led)
-    return {"reserved_for": thread_id, "amount": fr["amount"], "item_state": led["state"],
-            "tell_others": "outbid"}
+    with atomic_io.locked(_ledger_path(item_id)):
+        rec = floor_gate.load_floor_record(item_id)
+        led = load_ledger(item_id, rec["list_price"], "")
+        fr = led.get("front_runner")
+        if not fr or fr["thread_id"] != thread_id:
+            return {"error": "thread is not the current leading bid", "item_state": led["state"]}
+        led["state"] = "reserved_provisional"
+        led["buyers"][thread_id]["status"] = "won"
+        for tid, b in led["buyers"].items():
+            if tid != thread_id and b.get("status") not in ("passed",):
+                b["status"] = "outbid"
+        save_ledger(led)
+        return {"reserved_for": thread_id, "amount": fr["amount"], "item_state": led["state"],
+                "tell_others": "outbid"}
 
 
 def run_confirm_sold(item_id, thread_id):
-    rec = floor_gate.load_floor_record(item_id)
-    led = load_ledger(item_id, rec["list_price"], "")
-    led["state"] = "sold"
-    led["sold_to"] = thread_id
-    item_path = ITEMS_DIR / f"{item_id}.json"
-    urls = json.loads(item_path.read_text()).get("listing_urls", {}) if item_path.exists() else {}
-    won_platform = thread_id.split(":", 1)[0] if ":" in thread_id else None
-    take_down = [{"platform": p, "url": u} for p, u in urls.items() if u and p != won_platform]
-    close = [t for t, b in led["buyers"].items() if t != thread_id and b.get("status") not in ("lost", "passed")]
-    for t in close:
-        led["buyers"][t]["status"] = "lost"
-    save_ledger(led)
-    return {"item_state": "sold", "take_down": take_down, "close_threads": close}
+    with atomic_io.locked(_ledger_path(item_id)):
+        rec = floor_gate.load_floor_record(item_id)
+        led = load_ledger(item_id, rec["list_price"], "")
+        led["state"] = "sold"
+        led["sold_to"] = thread_id
+        item_path = ITEMS_DIR / f"{item_id}.json"
+        urls = json.loads(item_path.read_text()).get("listing_urls", {}) if item_path.exists() else {}
+        won_platform = thread_id.split(":", 1)[0] if ":" in thread_id else None
+        take_down = [{"platform": p, "url": u} for p, u in urls.items() if u and p != won_platform]
+        close = [t for t, b in led["buyers"].items() if t != thread_id and b.get("status") not in ("lost", "passed")]
+        for t in close:
+            led["buyers"][t]["status"] = "lost"
+        save_ledger(led)
+        return {"item_state": "sold", "take_down": take_down, "close_threads": close}
 
 
 def run_release(item_id):
-    rec = floor_gate.load_floor_record(item_id)
-    led = load_ledger(item_id, rec["list_price"], "")
-    led["state"] = "bidding" if led["is_bidding"] else "open"
-    led["front_runner"] = None
-    for b in led["buyers"].values():
-        if b.get("status") in ("front_runner", "won"):
-            b["status"] = "active"
-    save_ledger(led)
-    return {"item_state": led["state"]}
+    with atomic_io.locked(_ledger_path(item_id)):
+        rec = floor_gate.load_floor_record(item_id)
+        led = load_ledger(item_id, rec["list_price"], "")
+        led["state"] = "bidding" if led["is_bidding"] else "open"
+        led["front_runner"] = None
+        for b in led["buyers"].values():
+            if b.get("status") in ("front_runner", "won"):
+                b["status"] = "active"
+        save_ledger(led)
+        return {"item_state": led["state"]}
 
 
 def run_status(item_id):

@@ -23,6 +23,9 @@ import math
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # harden the hidden budget file to owner-only on read (it holds the secret max)
+
 # Path to the budgets dir, resolved relative to this script (bin/ -> ../data/budgets).
 BUDGETS_DIR = Path(__file__).resolve().parent.parent / "data" / "budgets"
 
@@ -34,6 +37,7 @@ def load_budget_record(want_id):
     path = BUDGETS_DIR / f"{want_id}.json"
     if not path.exists():
         raise FileNotFoundError(f"no budget record for want_id={want_id!r} at {path}")
+    atomic_io.harden(path)  # the max budget is confidential — never leave it world-readable
     record = json.loads(path.read_text())
     target = record.get("target_price")
     max_budget = record.get("max_budget")

@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe (tmp + os.replace) JSON writes
 import budget_gate  # reuse load_budget_record (the max stays here, never leaves)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -55,9 +56,8 @@ def load_ledger(want_id, currency):
 
 
 def save_ledger(led):
-    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
     led["updated_at"] = _now()
-    (LEDGER_DIR / f"{led['want_id']}.json").write_text(json.dumps(led, indent=2) + "\n")
+    atomic_io.write_json(LEDGER_DIR / f"{led['want_id']}.json", led)
 
 
 def _blank_seller(handle, listed_price):

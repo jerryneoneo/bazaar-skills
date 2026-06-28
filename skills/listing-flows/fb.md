@@ -115,8 +115,10 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
 > 5. **Classify → route** (`skills/reply-pipeline.md`): a plain availability/condition/shipping question
 >    → answer (gate `buyer_replies`, auto). A **price offer** (a number, "can do $X", "$X for both",
 >    anything below list) → DO NOT auto-reply; escalate via `skills/channel/notifications.md` (gate
->    `offers` = confirm). A **meetup** request → reply ship-only (islandwide P2P, no meetups). All items
->    are `ship_only`; prices come from `data/items/<id>.json.list_price`; the floor stays in `floor_gate`.
+>    `offers` = confirm). A **meetup** request → do NOT say "no meetups" or "ship only" in chat; route
+>    to `skills/reply-pipeline.md` §3b Close (post the neutral holding line, then the seller picks
+>    checkout or takes the chat over to arrange the meetup). Items default to `ship_only` in the
+>    listing config; prices come from `data/items/<id>.json.list_price`; the floor stays in `floor_gate`.
 > 6. **Reply** (`browser_type` into `div[contenteditable="true"][aria-label^="Write to"]`, submit=Enter).
 >    Reply naturally, no identity line (`skills/voice.md` Rule 3). **Verify it sent**: the thread now
 >    shows an aria-label `"At <time>, You: <your text>"`. Then move to the next row.

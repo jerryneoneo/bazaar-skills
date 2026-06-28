@@ -41,6 +41,7 @@ data/catchup_session.json
 data/buyer_peek_state.json
 data/notify_watch_state.json
 data/scan_state.json
+data/scan_state.json.tmp
 data/takeover_seen.json
 data/pacing_state.json
 data/pacing_state.json.lock
@@ -54,6 +55,7 @@ data/escalations.jsonl
 data/buyer_escalations.jsonl
 data/channel_transcript.jsonl
 data/eval_state.json
+data/eval_state.json.tmp
 data/eval/*
 data/style_proposals.jsonl
 data/ui_cache/*
@@ -74,6 +76,8 @@ data/ui_cache/*
 # data/fixtures/ (test data). See data/README.md for what every other path holds.
 
 # Internal docs — kept locally, withheld from the public repo (design / strategy, not for distribution)
+# NOTE: ARCHITECTURE.md is the INTERNAL as-built doc. The PUBLIC system overview ships as
+# ARCHITECTURE-OVERVIEW.md (a distinct basename, deliberately not matched by the pattern below).
 ARCHITECTURE.md
 gtm.md
 gtm.html
@@ -89,6 +93,7 @@ carousell-inbox.yml
 logs/
 .daemon.runlock
 .daemon.instancelock
+.daemon.heartbeat
 .browser-profile/
 .playwright-mcp/
 

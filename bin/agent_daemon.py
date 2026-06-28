@@ -25,6 +25,7 @@ import argparse
 import fcntl
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import subprocess
@@ -37,12 +38,14 @@ BIN = SELLER_DIR / "bin"
 LOG_DIR = SELLER_DIR / "logs"
 RUN_LOCK = SELLER_DIR / ".daemon.runlock"
 INSTANCE_LOCK = SELLER_DIR / ".daemon.instancelock"
+HEARTBEAT = SELLER_DIR / ".daemon.heartbeat"  # wall-clock last-tick so healthcheck spots a wedged loop
 CONFIG_PATH = SELLER_DIR / "data" / "config.json"
 SELLER_CONFIG_PATH = SELLER_DIR / "data" / "seller_config.json"
 
 sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
+import proc_tree  # noqa: E402  kill the whole pass tree on preempt/timeout (shared with supervisor)
 import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
 import notify_db  # noqa: E402  FDA-gated Notification Center reader (startup wake-mode self-check)
 import tab_park  # noqa: E402  keep Meta (notification-path) tabs hidden so their OS push keeps firing
@@ -86,10 +89,13 @@ def _source_fingerprint() -> int:
 
 def setup_logging() -> None:
     LOG_DIR.mkdir(exist_ok=True)
+    # Rotate so an always-on daemon's log can't grow without bound (10MB x 5 = 50MB ceiling).
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "daemon.log", maxBytes=10 * 1024 * 1024, backupCount=5)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(LOG_DIR / "daemon.log"), logging.StreamHandler()],
+        handlers=[file_handler, logging.StreamHandler()],
     )
 
 
@@ -441,6 +447,16 @@ def _send_typing(channel: dict, env: dict) -> None:
         logging.warning("typing send failed: %s", exc)
 
 
+def _touch_heartbeat() -> None:
+    """Record a wall-clock tick so healthcheck can tell a loaded-but-WEDGED daemon from a live one.
+    Written at the loop top and every ~4s while a pass runs, so only a truly stuck loop goes stale.
+    Heartbeat IO must never crash the loop."""
+    try:
+        HEARTBEAT.write_text(json.dumps({"ts": time.time(), "pid": os.getpid()}))
+    except OSError as exc:
+        logging.debug("heartbeat write failed: %s", exc)
+
+
 def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
              extra_env: dict | None = None) -> None:
     """Invoke the LLM pass (run_pass.sh seller|buyer) under the single-flight lock.
@@ -456,18 +472,27 @@ def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
     if RUN_LOCK.exists():
         logging.info("run lock held — skipping %s pass this tick", mode)
         return
+    # Check-then-write is not atomic, but it is never raced: a single daemon instance is guaranteed
+    # by INSTANCE_LOCK (fcntl), and run_pass is only ever called sequentially from that one loop.
     RUN_LOCK.write_text(str(os.getpid()))
     try:
         logging.info("running %s pass…", mode)
-        proc = subprocess.Popen([str(BIN / "run_pass.sh"), mode], env=pass_env, cwd=str(SELLER_DIR))
+        # start_new_session=True → the pass leads its own process group, so proc_tree.confirm_dead
+        # can signal the WHOLE tree (run_pass.sh → harness_run → the `claude` grandchild that drives
+        # the tab). Without it, a preempt/timeout would SIGTERM only the wrapper and orphan claude,
+        # leaving it acting on the live account after RUN_LOCK is released (the supervisor's CRITICAL
+        # bug, now fixed here too). Every forced exit confirms the tree dead BEFORE the finally unlink.
+        proc = subprocess.Popen([str(BIN / "run_pass.sh"), mode], env=pass_env, cwd=str(SELLER_DIR),
+                                start_new_session=True)
         deadline = time.monotonic() + 900
         while proc.poll() is None:
+            _touch_heartbeat()  # keep the heartbeat fresh during a long pass (proves the loop lives)
             # MID-FLIGHT INTERRUPT: a pause set via the CLI/slash command or a prior tick stops the
             # running pass within ~one poll cadence (idempotent — cursors/pacing make the killed step
             # safe to re-run; it won't, until /resume). This covers ALL modes, incl. the seller pass.
             if control.is_paused():
-                logging.info("paused mid-%s pass → terminate (idempotent; resumes after /resume)", mode)
-                proc.terminate()
+                logging.info("paused mid-%s pass → stop tree (idempotent; resumes after /resume)", mode)
+                proc_tree.confirm_dead(proc)
                 break
             if pulse:
                 _send_typing(channel, env)
@@ -476,29 +501,29 @@ def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
                 if peeked["pending"] > 0:
                     if peeked.get("latest_text", "").strip().startswith("/pause"):
                         # Telegram /pause arriving DURING a long background pass → set the flag and
-                        # terminate now (the next loop iteration's drain consumes + acks the command).
-                        logging.info("/pause during %s pass → set flag + terminate", mode)
+                        # stop the tree now (the next loop iteration's drain consumes + acks the command).
+                        logging.info("/pause during %s pass → set flag + stop tree", mode)
                         control.pause(source="telegram")
                         _send_typing(channel, env)
-                        proc.terminate()
+                        proc_tree.confirm_dead(proc)
                         break
                     # seller is waiting → fire typing now and PREEMPT this background pass (idempotent;
                     # it resumes next cycle). The channel pass runs on the next loop iteration.
                     logging.info("seller message during %s pass → typing + preempt", mode)
                     _send_typing(channel, env)
-                    proc.terminate()
+                    proc_tree.confirm_dead(proc)
                     break
             try:
                 proc.wait(timeout=4)          # ~4s cadence; returns early when the pass finishes
             except subprocess.TimeoutExpired:
                 pass
             if time.monotonic() > deadline:
-                logging.error("%s pass exceeded 900s — killing", mode)
-                proc.kill()
+                logging.error("%s pass exceeded 900s — killing tree", mode)
+                proc_tree.confirm_dead(proc)
                 break
         logging.info("%s pass done rc=%s", mode, proc.returncode)
     finally:
-        RUN_LOCK.unlink(missing_ok=True)
+        RUN_LOCK.unlink(missing_ok=True)  # safe: every forced break above already confirmed the tree dead
 
 
 def _acquire_instance_lock():
@@ -573,6 +598,7 @@ def main(argv) -> int:
         if _source_fingerprint() != src_fp:
             logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
             break
+        _touch_heartbeat()  # one tick per loop iteration; healthcheck WARNs if this goes stale
         # Read the pause flag ONCE per iteration. While paused, the daemon still peeks the channel
         # (so /resume and corrections get received) but takes NO marketplace action: the channel
         # path runs the deterministic, no-LLM drain instead of a seller pass, and the three

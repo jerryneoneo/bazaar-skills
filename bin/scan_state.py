@@ -32,6 +32,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe (tmp + os.replace) JSON writes
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
 SELLER_CONFIG_PATH = DATA_DIR / "seller_config.json"
@@ -148,7 +151,7 @@ def run_mark(market, now):
         raise ValueError("mark requires --market <id>")
     scan_state = _load_json(SCAN_STATE_PATH, "scan_state.json") if SCAN_STATE_PATH.exists() else {}
     updated = mark_scanned(scan_state, market, now)
-    SCAN_STATE_PATH.write_text(json.dumps(updated, indent=2) + "\n")
+    atomic_io.write_json(SCAN_STATE_PATH, updated)
     return updated
 
 

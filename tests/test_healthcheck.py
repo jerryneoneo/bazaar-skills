@@ -112,6 +112,20 @@ def test_render_and_secret_safety():
     check("no secret-ish tokens in output", not any(t in text for t in ("floor", "budget", "TELEGRAM_BOT_TOKEN")))
 
 
+def test_heartbeat_status():
+    print("heartbeat_status classifies a wedged daemon vs a live one:")
+    now = 1_000_000.0
+    fresh = json.dumps({"ts": now - 10, "pid": 5})
+    stale = json.dumps({"ts": now - 9999, "pid": 5})
+    check("fresh tick -> ok", healthcheck.heartbeat_status(fresh, now)[0] == "ok")
+    check("old tick -> stale", healthcheck.heartbeat_status(stale, now)[0] == "stale")
+    check("no file -> missing", healthcheck.heartbeat_status(None, now)[0] == "missing")
+    check("garbage -> missing", healthcheck.heartbeat_status("{not json", now)[0] == "missing")
+    check("no ts key -> missing", healthcheck.heartbeat_status(json.dumps({"pid": 5}), now)[0] == "missing")
+    level, age = healthcheck.heartbeat_status(fresh, now)
+    check("reports the age in seconds", abs(age - 10) < 0.01)
+
+
 if __name__ == "__main__":
     print("healthcheck tests\n")
     test_onboarded()
@@ -119,6 +133,7 @@ if __name__ == "__main__":
     test_cdp_unreachable_degrades_to_warn()
     test_daemon_checks_no_crash()
     test_render_and_secret_safety()
+    test_heartbeat_status()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")
