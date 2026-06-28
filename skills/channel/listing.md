@@ -139,6 +139,8 @@ if published is empty:
     items.status="draft" ; say "⚠️ Couldn't confirm a live listing on any platform — left as draft,
         nothing was posted. I'll retry / flag for you."  ; session.active=false ; return
 items.status="live"
+if items.published_at is unset: items.published_at = <now ISO-8601>   # stale-listing clock (listing_health.py);
+     # idempotent — set once, never reset on re-publish/cross-list, so the silence window stays honest
 say "🎉 Live!\n  <per-published market: <platform>: <url>>\nI'll watch for buyers and ping you
      for any offer or question."   # only markets in `published` (real, verified URLs) are listed
 # DISTRIBUTE (gated by approvals.steps.distribution): after the item is live, see if it can reach

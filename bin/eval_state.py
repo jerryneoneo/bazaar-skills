@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""eval_state.py — cadence gate for the nightly deterministic self-eval.
+"""eval_state.py — cadence gate for the nightly self-eval.
 
 Mirrors scan_state.py's shape: the daemon asks "is a self-eval due?" and stamps it after running.
-The eval the daemon runs is the $0 deterministic pass (`bin/eval_run.py run --no-llm`); the LLM
-judge stays on-demand (`/bazaar-eval`). Setting `config.eval_interval_hours` to 0 disables it.
+The nightly run always does the $0 deterministic pass; when `config.eval_judge_nightly` is set
+(default on) the same run also invokes the billed LLM judge (`/bazaar-eval` always runs it). Setting
+`config.eval_interval_hours` to 0 disables the nightly eval entirely.
 
     config.json          -> eval_interval_hours   (cadence; default 24, 0 = disabled)
+    config.json          -> eval_judge_nightly    (run the billed judge nightly; default true)
     data/eval_state.json -> last_eval_at          (cursor; created on first mark)
 
 Usage:

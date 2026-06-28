@@ -38,6 +38,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scan_state import due_market  # noqa: E402  (reuse the pure cadence core)
 from eval_state import is_due as eval_is_due  # noqa: E402
+import followup_state  # noqa: E402  (stale-chat follow-up detection — reuse its scan_due)
+import listing_health  # noqa: E402  (stale-listing detection — reuse its stale_listings)
 
 # Thread statuses that are NOT "awaiting you": terminal, or already surfaced elsewhere.
 # `escalated` shows up under escalations; `held` means the user said stop. Excluding them
@@ -57,8 +59,10 @@ CATEGORY_KEYS = (
     "escalations",
     "buyers_waiting",
     "sellers_waiting",
+    "followups",
     "wants_open",
     "listings",
+    "listings_stale",
     "checkouts",
     "cadence",
 )
@@ -200,6 +204,42 @@ def _listing_rows(items: list[dict], enabled: list[str]) -> list[dict]:
     return out
 
 
+def _followup_rows(base: Path, now: datetime) -> list[dict]:
+    """Stale chats due for a nudge or a 'not interested' drop. Reuses followup_state.scan_due (the
+    single source of the tail-walk + schedule); fail-open so a bad followup config never breaks the
+    digest. Empty when followup_enabled is false."""
+    try:
+        result = followup_state.scan_due(base, now)
+    except (ValueError, OSError, KeyError):
+        return []
+    rows: list[dict] = []
+    for action_key in ("due_nudges", "due_drops"):
+        for d in result.get(action_key, []):
+            rows.append({"thread_id": d.get("thread_id"), "side": d.get("side"),
+                         "action": d.get("action"), "nudges_sent": d.get("nudges_sent"),
+                         "id_value": d.get("id_value")})
+    return rows
+
+
+def _stale_listing_rows(base: Path, config: dict, items: list[dict], threads: list[dict],
+                        now: datetime) -> list[dict]:
+    """Live, published listings that have had no buyer interest for stale_days+. Reuses
+    listing_health.stale_listings over the already-loaded items/threads. Gated by the same master
+    toggle as the proactive ping, but NOT by the warn ledger (the digest is state-of-the-world).
+    Fail-open so a bad config never breaks the digest."""
+    if not listing_health._enabled_from_config(config):
+        return []
+    try:
+        stale_days = _interval(config, "stale_days", listing_health.DEFAULT_STALE_DAYS)
+        item_paths = {it.get("item_id"): base / "items" / f"{it.get('item_id')}.json"
+                      for it in items if it.get("item_id")}
+        rows = listing_health.stale_listings(items, threads, item_paths, stale_days, now)
+    except (ValueError, OSError, KeyError):
+        return []
+    return [{"item_id": r.get("item_id"), "title": r.get("title", ""),
+             "silent_days": r.get("silent_days"), "basis": r.get("basis")} for r in rows]
+
+
 def _checkout_rows(checkouts: list[dict]) -> list[dict]:
     return [{"sale_id": c.get("sale_id") or c.get("id"), "item_id": c.get("item_id"),
              "thread_id": c.get("thread_id"), "status": c.get("status")}
@@ -246,12 +286,16 @@ def build_digest(base: Path, now: datetime) -> dict:
     config = _load_json(base / "config.json")
     enabled = _enabled_markets(seller_config)
 
+    sell_threads = _load_dir(base / "threads")
+    items = _load_dir(base / "items")
     escalations = (_escalation_rows(_load_jsonl(base / "escalations.jsonl"), "sell")
                    + _escalation_rows(_load_jsonl(base / "buyer_escalations.jsonl"), "buy"))
-    buyers_waiting = _unread_rows(_load_dir(base / "threads"), "item_id")
+    buyers_waiting = _unread_rows(sell_threads, "item_id")
     sellers_waiting = _unread_rows(_load_dir(base / "buyer_threads"), "want_id")
+    followups = _followup_rows(base, now)
     wants_open = _want_rows(_load_dir(base / "wants"))
-    listings = _listing_rows(_load_dir(base / "items"), enabled)
+    listings = _listing_rows(items, enabled)
+    listings_stale = _stale_listing_rows(base, config, items, sell_threads, now)
     checkouts = _checkout_rows(_load_dir(base / "checkouts"))
     cadence = _cadence_rows(config, seller_config, _load_json(base / "scan_state.json"),
                             _load_json(base / "eval_state.json"), now)
@@ -260,8 +304,10 @@ def build_digest(base: Path, now: datetime) -> dict:
         "escalations": escalations,
         "buyers_waiting": buyers_waiting,
         "sellers_waiting": sellers_waiting,
+        "followups": followups,
         "wants_open": wants_open,
         "listings": listings,
+        "listings_stale": listings_stale,
         "checkouts": checkouts,
         "cadence": cadence,
     }
@@ -276,8 +322,10 @@ _LABELS = {
     "escalations": "Needs a decision",
     "buyers_waiting": "Buyers waiting",
     "sellers_waiting": "Sellers waiting",
+    "followups": "Follow-ups due",
     "wants_open": "Open wants",
     "listings": "Listings",
+    "listings_stale": "Stale listings",
     "checkouts": "Open checkouts",
     "cadence": "Maintenance",
 }

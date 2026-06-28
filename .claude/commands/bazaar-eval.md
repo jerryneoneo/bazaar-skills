@@ -14,13 +14,16 @@ Two layers:
   a market never replied to (the missed-enquiry bug), a follow-up like "do all tasks" answered with a
   re-check (context loss), failed/silent passes, repeated re-checks, floor/budget leaks, and an inbox
   takeover marked managed with no thread seeded behind it (an orphaned takeover from the inbox sweep).
-- **LLM judge** (default, on-demand) adds nuance: misroutes, hallucinated state, tone/voice, low-UX.
+- **LLM judge** (billed) adds nuance: misroutes, hallucinated state, tone/voice, low-UX. It is a
+  headless `claude -p` sonnet subprocess, so it is the only part that costs tokens. It runs on every
+  `/bazaar-eval` (opt out with `--no-llm`) and on the nightly daemon run by default
+  (`config.eval_judge_nightly`; set false for a $0 nightly).
 
 ## Run it
 
 ```
-python3 bin/eval_run.py run                 # deterministic + LLM judge over the last 24h
-python3 bin/eval_run.py run --no-llm        # zero-cost deterministic only (what the nightly check runs)
+python3 bin/eval_run.py run                 # deterministic + billed LLM judge over the last 24h
+python3 bin/eval_run.py run --no-llm        # zero-cost deterministic only (= the nightly when eval_judge_nightly:false)
 python3 bin/eval_run.py run --last 50       # last 50 passes regardless of age
 python3 bin/eval_run.py run --fail-on high  # exit 1 if any HIGH+ finding (CI gate)
 python3 bin/eval_run.py report              # re-render the report from saved findings

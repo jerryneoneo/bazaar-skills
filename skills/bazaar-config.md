@@ -280,3 +280,40 @@ choice:
   truly unattended.
 - The `/bazaar` menu can still fine-tune individual business steps after picking a level; the
   harness layer only needs regenerating if the level changes.
+
+## Follow-ups & listing health (proactive cadences)
+
+Two background cadences that act on quiet threads and quiet listings. Both are deterministic at the
+core (no LLM to *detect*; an LLM pass only *composes/sends*), default ON, and respect pacing caps,
+quiet hours, and `/pause`. They surface in `/status` and `/bazaar-catchup` as **Follow-ups due** and
+**Stale listings**.
+
+**Stale-chat follow-ups** (`bin/followup_state.py`, ledger `data/followup_state.json`). When OUR last
+message in a thread goes unanswered, nudge up to `followup_max_nudges` times on a gentle-escalation
+cadence, then mark the counterpart "not interested". Applies to both buyers (sell) and sellers (buy).
+
+| key | default | meaning |
+|---|---|---|
+| `followup_enabled` | `true` | master switch; `false` disables both nudges and drops |
+| `followup_nudge_intervals_days` | `[1, 3]` | days of silence before nudge #1, then before nudge #2 |
+| `followup_drop_after_days` | `3` | days after the last nudge before marking not interested |
+| `followup_max_nudges` | `2` | how many nudges before giving up |
+| `followup_poll_sec` | `3600` | how often the daemon CHECKS for due nudges/drops (cheap, file-only) |
+
+The not-interested mark lives only in the follow-up ledger, never in the thread `status`, so a
+counterpart who later messages back is still answered normally. Terminal threads (`lost`, `handover`,
+`closed`, `agreed`, `held`) and threads with an open escalation are never nudged.
+
+**Listing health** (`bin/listing_health.py`, ledger `data/listing_health_state.json`). A LIVE listing
+with no buyer interest for `stale_days`+ gets concrete improvement suggestions on your channel (one
+item per pass, deduped so you are not nagged).
+
+| key | default | meaning |
+|---|---|---|
+| `listing_health_enabled` | `true` | master switch (suggestions go only to you, no outbound messages) |
+| `stale_days` | `7` | days of no buyer inbound before a listing is "stale" |
+| `listing_health_interval_hours` | `24` | min gap before starting a new stale-listing episode (rate-limit) |
+| `rewarn_days` | `14` | min gap before re-warning the same listing |
+
+All keys are read with these defaults, so an install with no entries behaves as above; set a key to
+`0` (or `followup_enabled`/`listing_health_enabled` to `false`) to disable that behavior.

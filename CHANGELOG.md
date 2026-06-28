@@ -5,6 +5,31 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- **Stale-chat follow-ups, then "not interested".** When OUR last message in a thread goes
+  unanswered, the agent now sends up to 2 gentle nudges on a gentle-escalation cadence (~1d, then
+  ~3d) and marks the counterpart **not interested** ~3d after the last nudge, on **both** sides
+  (quiet buyers and quiet sellers). New deterministic engine `bin/followup_state.py` derives the
+  nudge count from the transcript tail (never a stored counter, so it is crash-safe and needs no
+  migration); the ledger `data/followup_state.json` (gitignored) holds only the disposition + a
+  cache. Nudges are auto-sent through the normal `journal_send` bracket (a `$BAZAAR_FOLLOWUP=1`
+  branch on the buyer/buy passes), respecting pacing caps, quiet hours, and `/pause`; the drop is
+  $0 deterministic and posts ONE batched channel notice. Open-escalation and terminal threads are
+  excluded. Config: `followup_enabled` (default on), `followup_nudge_intervals_days [1,3]`,
+  `followup_drop_after_days 3`, `followup_max_nudges 2`, `followup_poll_sec`. Tests:
+  `tests/test_followup_state.py`.
+- **Stale-listing health suggestions.** A LIVE listing with no buyer interest for 7+ days now gets
+  CONCRETE improvement suggestions (price vs comps, photos, title/description, reach, bump/relist)
+  on your channel. New deterministic detector `bin/listing_health.py` (clock = last buyer inbound,
+  with a `published_at`/`imported_at`/mtime fallback chain so it works on existing inventory with no
+  migration); the MAINT pass composes + sends the suggestions one item per pass via the
+  `data/listing_health_session.json` baton, deduped by `data/listing_health_state.json` so you are
+  not nagged. New skill `skills/channel/listing-health.md`; `published_at` is now stamped at first
+  publish/cross-list. Config: `listing_health_enabled` (default on), `stale_days 7`,
+  `listing_health_interval_hours 24`, `rewarn_days 14`. Tests: `tests/test_listing_health.py`.
+- **Catch-up surfaces both.** `bin/triage.py` (so `/status` + `/bazaar-catchup`) now reports
+  `Follow-ups due` and `Stale listings` alongside the existing "awaiting you" signals.
+
 ### Changed
 - **Precise, per-thread inbox peeks (cut wasted LLM passes).** The cheap non-LLM gates now read the
   Carousell inbox **per conversation row** (`bin/inbox_scan.py`, reusing `buyer_peek`'s stdlib CDP
