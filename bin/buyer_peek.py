@@ -335,7 +335,14 @@ def is_new(market: str, cur: dict, memo: dict) -> bool:
 
 
 def peek(update_memo: bool = True) -> dict:
-    """Probe all enabled markets; return the peek contract. Fail-open-safe throughout."""
+    """Probe all enabled markets; return the peek contract. Fail-open-safe throughout.
+
+    For markets whose inbox rows are per-thread enumerable (Carousell), `new` comes from the PRECISE
+    classifier (inbox_scan): a market is sell-new only when a tracked sell thread has a fresh reply or
+    an unknown non-system buyer enquiry arrives — buy-thread rows and promos no longer trip a sell
+    pass. Non-enumerable markets (FB/eBay) and any scan failure fall back to the aggregate is_new
+    below, so the revenue path can never be made LESS sensitive than today (and the daemon's forced
+    sweep backstops a missed precise signal)."""
     targets = list_page_targets()
     memo = load_memo()
     markets_out: dict[str, dict] = {}
@@ -343,9 +350,18 @@ def peek(update_memo: bool = True) -> dict:
     latest_text = ""
     next_memo = dict(memo)  # immutable update — build a new memo, don't mutate the loaded one
 
+    try:
+        import inbox_scan  # lazy: breaks the inbox_scan -> buyer_peek import cycle
+        precise = inbox_scan.sell_markets_new()  # {market: bool} for enumerable markets only
+    except Exception:
+        precise = {}  # fail-open: fall back to the aggregate signal for every market
+
     for market in enabled_markets():
         cur = probe_market(market, MARKET_PROBES[market], targets)
-        new = cur["found"] and is_new(market, cur, memo)
+        if market in precise:
+            new = precise[market]  # precise per-thread signal wins for enumerable markets
+        else:
+            new = cur["found"] and is_new(market, cur, memo)  # aggregate fallback (FB/eBay, or scan down)
         markets_out[market] = {"count": cur["count"], "snippet": cur["snippet"],
                                "found": cur["found"], "new": new}
         if new:

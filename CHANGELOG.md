@@ -5,6 +5,18 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+- **Precise, per-thread inbox peeks (cut wasted LLM passes).** The cheap non-LLM gates now read the
+  Carousell inbox **per conversation row** (`bin/inbox_scan.py`, reusing `buyer_peek`'s stdlib CDP
+  transport) and classify each by counterparty handle into buy / sell / promo, instead of gating on
+  the aggregate unread badge. `buy_peek` fires a `liaising`/`agreed` want's pass **only on a fresh
+  seller reply** (was: every cycle for any open want); `buyer_peek` and the forced-sweep
+  `buyer_recheck` no longer fire a sell pass on promos or buy-side rows (FB/eBay keep the aggregate
+  fallback; everything fail-open, with the 2h floor sweep as the backstop). New per-row memos
+  `data/inbox_buy_state.json` / `data/inbox_sell_state.json` (gitignored). Tests:
+  `tests/test_inbox_scan.py`, `tests/test_buy_peek.py`, `tests/test_buyer_peek.py`, plus precision
+  cases in `tests/test_buyer_recheck.py`.
+
 ## [0.2.0] - 2026-06-28
 
 ### Added
