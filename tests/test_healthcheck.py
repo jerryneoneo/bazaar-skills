@@ -77,6 +77,41 @@ def test_marketplace_logins():
         check("all confirmed -> ok", c["level"] == healthcheck.OK)
 
 
+def test_login_liveness():
+    print("login-liveness advisory probe (additive, fail-open):")
+    check("pure: only logged_out is flagged",
+          healthcheck.login_liveness_status(
+              {"fb": "logged_in", "carousell": "logged_out", "ebay": "unknown"}) == ["carousell"])
+    check("pure: all healthy -> empty", healthcheck.login_liveness_status(
+        {"fb": "logged_in", "carousell": "unknown"}) == [])
+
+    confirmed = {"marketplaces": {"fb": {"enabled": True, "auth": "confirmed"},
+                                  "carousell": {"enabled": True, "auth": "confirmed"}}}
+    with tempfile.TemporaryDirectory() as tmp:
+        data = _seller_config(tmp, confirmed)
+        # CDP down -> silent (no false alarm), even though markets are confirmed.
+        check("cdp down -> no checks", healthcheck.login_liveness_checks(data, False) == [])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # No confirmed markets -> nothing to probe.
+        data = _seller_config(tmp, {"marketplaces": {"fb": {"enabled": True, "auth": "needs_login"}}})
+        check("nothing confirmed -> no checks", healthcheck.login_liveness_checks(data, True) == [])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = _seller_config(tmp, confirmed)
+        import login_check  # patch its probe so we don't need a live Chrome
+        orig = login_check.check_market
+        login_check.check_market = lambda m: {"market": m,
+                                              "status": "logged_out" if m == "carousell" else "logged_in"}
+        try:
+            out = healthcheck.login_liveness_checks(data, True)
+        finally:
+            login_check.check_market = orig
+        check("a live logout -> one WARN", len(out) == 1 and out[0]["level"] == healthcheck.WARN)
+        check("WARN names the logged-out market", "carousell" in out[0]["detail"])
+        check("WARN does not name the healthy one", "fb" not in out[0]["detail"])
+
+
 def test_cdp_unreachable_degrades_to_warn():
     print("CDP check degrades gracefully when unreachable:")
     # A port nothing listens on -> warn, never an exception.
@@ -91,6 +126,16 @@ def test_daemon_checks_no_crash():
     ok = isinstance(results, list) and len(results) >= 1
     ok = ok and all(r["level"] in (healthcheck.OK, healthcheck.WARN, healthcheck.FAIL) for r in results)
     check("returns >=1 check with a valid level", ok)
+
+
+def test_permissions_check_no_crash():
+    print("permissions check returns valid levels without raising (claude-code):")
+    results = healthcheck.permissions_check("claude-code")
+    ok = isinstance(results, list)
+    ok = ok and all(r["level"] in (healthcheck.OK, healthcheck.WARN) for r in results)
+    check("returns a list of ok/warn checks", ok)
+    # An unknown harness fails open to [] rather than raising.
+    check("unknown harness -> [] (fail-open)", healthcheck.permissions_check("nope") == [])
 
 
 def test_render_and_secret_safety():
@@ -130,8 +175,10 @@ if __name__ == "__main__":
     print("healthcheck tests\n")
     test_onboarded()
     test_marketplace_logins()
+    test_login_liveness()
     test_cdp_unreachable_degrades_to_warn()
     test_daemon_checks_no_crash()
+    test_permissions_check_no_crash()
     test_render_and_secret_safety()
     test_heartbeat_status()
     print()

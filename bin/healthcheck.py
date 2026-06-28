@@ -109,6 +109,74 @@ def marketplace_checks(data_dir: Path) -> list[dict]:
     return [_check("marketplace-logins", OK, f"all {len(enabled)} enabled markets logged in")]
 
 
+def _confirmed_enabled_markets(data_dir: Path) -> list[str]:
+    """Markets marked enabled + auth:'confirmed' in seller_config (the set worth live-probing)."""
+    try:
+        markets = (json.loads((data_dir / "seller_config.json").read_text()).get("marketplaces") or {})
+    except (OSError, ValueError):
+        return []
+    if not isinstance(markets, dict):
+        return []
+    return sorted(mid for mid, m in markets.items()
+                  if isinstance(m, dict) and m.get("enabled") and m.get("auth") == "confirmed")
+
+
+def login_liveness_status(probe_results: dict) -> list[str]:
+    """PURE: markets a live probe reports as logged_out. logged_in/unknown are NOT flagged, so an
+    ambiguous page or a market with no open tab never raises a false alarm."""
+    return sorted(m for m, st in probe_results.items() if st == "logged_out")
+
+
+def login_liveness_checks(data_dir: Path, cdp_reachable: bool) -> list[dict]:
+    """Additive advisory probe over the warm Chrome: WARN only when a CONFIRMED market is *now*
+    positively logged out (e.g. the session expired since onboarding). Stays silent (returns []) when
+    CDP is down, nothing is confirmed, or the probe can't tell — so it only ever adds a true signal.
+    Fail-open on any error (a broken probe must never make a healthy install look unrunnable)."""
+    markets = _confirmed_enabled_markets(data_dir)
+    if not markets or not cdp_reachable:
+        return []
+    try:
+        import login_check  # local bin/ module — reuses buyer_peek's CDP transport
+        results = {m: login_check.check_market(m).get("status", "unknown") for m in markets}
+    except Exception:  # noqa: BLE001 — advisory only; never break the health check
+        return []
+    logged_out = login_liveness_status(results)
+    if not logged_out:
+        return []
+    return [_check("marketplace-live-login", WARN,
+                   f"{', '.join(logged_out)} look logged out now (was confirmed at setup)",
+                   "re-log in in the warm Chrome (/bazaar -> marketplaces)")]
+
+
+def permissions_check(harness_name: str | None) -> list[dict]:
+    """WARN if the autonomous-run allow-list is incomplete or the PreToolUse safety hooks are
+    missing — both are silent always-on blockers (the daemon's tools would prompt/deny mid-pass, or
+    the pause/scope guards wouldn't fire). Reads only config (no secret values). Fail-open: any error
+    -> no check, so a probe problem never makes a healthy install look broken."""
+    try:
+        from harnesses import get_harness
+        import install  # REQUIRED_ALLOW is the single source of truth for the floor
+        dest = Path(__file__).resolve().parent.parent
+        res = get_harness(harness_name).verify_settings(dest, install.REQUIRED_ALLOW)
+    except Exception:  # noqa: BLE001 — advisory; never break the health summary
+        return []
+    if not res.get("applicable", False):
+        return []  # harness has no allow-list to audit (e.g. approval-mode runtime)
+    out = []
+    if res.get("missing"):
+        out.append(_check("permissions", WARN,
+                          f"{len(res['missing'])} autonomous-run tool rule(s) missing",
+                          "re-run: python3 bin/install.py gen-settings --autonomy <level>"))
+    if res.get("hooks_present") is False:
+        out.append(_check("permission-hooks", WARN,
+                          "PreToolUse safety hooks (pause/scope guard) not configured",
+                          "restore .claude/settings.json from the repo"))
+    if not out:
+        out.append(_check("permissions", OK,
+                          f"autonomous-run allow-list complete ({res['allow_count']} rules)"))
+    return out
+
+
 def _launchctl_loaded(label: str) -> bool | None:
     """True/False if launchctl can be queried, else None (can't tell)."""
     if not shutil.which("launchctl"):
@@ -180,11 +248,14 @@ def heartbeat_check() -> list[dict]:
 
 def run_checks(harness_name: str | None = None) -> dict:
     data_dir = _data_dir()
+    cdp = cdp_check()
     checks = [
         *presence_checks(harness_name),
-        cdp_check(),
+        cdp,
         onboarded_check(data_dir),
         *marketplace_checks(data_dir),
+        *login_liveness_checks(data_dir, cdp["level"] == OK),
+        *permissions_check(harness_name),
         *daemon_checks(),
         *heartbeat_check(),
     ]

@@ -83,6 +83,14 @@ class Harness(ABC):
         """Read back the secret env this harness persisted (so the daemon can find the token
         without knowing the harness's storage format). Returns {} if nothing is stored yet."""
 
+    def verify_settings(self, dest: Path, required_allow: list[str]) -> dict:
+        """Read-only audit: are the autonomous-run essentials actually granted in this harness's
+        config? Default: not applicable (e.g. an approval-mode runtime has no allow-list to check) ->
+        ok. Claude Code overrides this with a real allow-list + safety-hook check. Never reads a
+        secret value. Returns {harness, ok, applicable, missing, hooks_present, allow_count}."""
+        return {"harness": self.name, "ok": True, "applicable": False,
+                "missing": [], "hooks_present": None, "allow_count": None}
+
     @abstractmethod
     def skills_dir(self) -> Path:
         """The harness's GLOBAL dir where slash-command launchers are installed, so the commands

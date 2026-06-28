@@ -151,6 +151,12 @@ def test_resource_scoping():
           scoped.system_prompt_append == unscoped.system_prompt_append)
 
 
+def test_daemon_pass_env_marker():
+    print("daemon-pass env marker (so the SessionStart update hook no-ops in headless passes):")
+    _argv, env = harness_run._invocation(get_harness("claude-code"), harness_run.build_spec("seller"))
+    check("BAZAAR_DAEMON_PASS=1 set on every headless pass", env.get("BAZAAR_DAEMON_PASS") == "1")
+
+
 def test_no_secret_in_argv():
     print("secrecy — token never in argv/env:")
     token = get_harness("claude-code").load_env(ROOT).get("TELEGRAM_BOT_TOKEN")
@@ -218,6 +224,7 @@ if __name__ == "__main__":
     test_intent_argv()
     test_eval_argv()
     test_resource_scoping()
+    test_daemon_pass_env_marker()
     test_no_secret_in_argv()
     test_codex_stub()
     test_runner_refuses_unverified_harness()

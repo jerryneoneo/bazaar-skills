@@ -76,6 +76,10 @@ rsync -a --exclude 'logs/' --exclude '.daemon.runlock' "<dev>/seller-agent/" "$H
 1. In Telegram, message **@BotFather** → `/newbot` → pick a name/username → copy the **token**.
 2. Open your bot and tap **Start** (`/start`). The agent captures your `chat_id` automatically on
    its first poll (stored in `data/channel_state.json`) — single-tenant: it ignores all other chats.
+3. Verify the bind: `python3 bin/telegram.py verify` → `token_valid:true` + `chat_bound:true`
+   (exit 0). Exit 3 = token missing/malformed/rejected (re-copy it); exit 1 = token good but no
+   `/start` yet (tap Start, then re-run). Onboarding runs this gate for you and never binds a bad
+   token or a null `chat_id`.
 
 ---
 
@@ -99,8 +103,12 @@ Create **`~/bazaar-skills/.claude/settings.local.json`** (gitignored):
 ```
 - `permissions.allow` is for **interactive** sessions; the daemon's headless passes pass the same
   tools via `run_pass.sh --allowedTools` + `--permission-mode acceptEdits` (not `--dangerously-skip-permissions`).
-- ⚠️ GOTCHA: it must be **valid JSON** — we broke it with a missing comma/brace; verify:
-  `python3 -c "import json;json.load(open('.claude/settings.local.json'));print('ok')"`
+- **Don't hand-maintain this** — `python3 bin/install.py gen-settings --harness claude-code --autonomy <level>`
+  writes it for you (merges, preserves the token, sets the right allow-list). `./setup` does this automatically.
+- ⚠️ GOTCHA: it must be **valid JSON** — we broke it with a missing comma/brace. Verify the file AND
+  that the autonomous-run essentials are actually granted: `python3 bin/install.py validate --harness
+  claude-code` (checks JSON **and** that the effective allow-list — committed `settings.json` ∪ this
+  file — covers the required browser + `bin/` tools). `healthcheck.py` reports the same as a warning.
 - The token is read by `bin/telegram.py` from `$TELEGRAM_BOT_TOKEN`; never printed or committed.
 
 ---
@@ -118,7 +126,12 @@ Create **`~/bazaar-skills/.claude/settings.local.json`** (gitignored):
 - **🔧 MANUAL — log in once:** with that Chrome open, sign into **each marketplace you enabled**
   (e.g. FB Marketplace, Carousell, eBay). Logins persist in `.browser-profile`, so the agent acts
   as you (account-safety thesis).
-  Verify CDP: `curl -s http://127.0.0.1:9222/json/version`.
+- Verify Chrome/CDP is actually serving (not just launched): `python3 bin/wait_cdp.py` → `ready:true`
+  (polls `/json/version` until up or times out — replaces the one-shot `curl` that could race a
+  slow-starting Chrome).
+- Verify each marketplace login is **real**, not just assumed: `python3 bin/login_check.py market <id>`
+  → `logged_in` (exit 0) / `logged_out` (exit 1) / `unknown` (exit 3 — no tab open / can't tell).
+  Onboarding runs this so a confirmed marketplace is one it actually saw you signed into.
 
 ---
 
@@ -151,8 +164,10 @@ launchd/install_daemon.sh install             # loads chrome + agent LaunchAgent
 ```bash
 cd ~/bazaar-skills
 for t in floor_gate shipping telegram negotiate; do python3 tests/test_$t.py | tail -1; done  # ALL PASS x4
-python3 bin/healthcheck.py                           # runnable state: CDP, marketplace logins, daemon
-curl -s http://127.0.0.1:9222/json/version          # CDP up
+python3 bin/install.py validate --harness claude-code # config JSON valid + permission floor granted
+python3 bin/healthcheck.py                           # runnable state: CDP, logins, permissions, daemon
+python3 bin/wait_cdp.py                              # CDP up (polls, ready:true)
+python3 bin/telegram.py verify                       # token_valid + chat_bound (the channel works)
 launchd/install_daemon.sh status                    # both loaded
 tail -f logs/daemon.log                              # watch
 ```
@@ -168,7 +183,8 @@ line** (~6s, e.g. "Let me check your listings…", from `bin/intent.sh`) → the
 - `launchd/install_daemon.sh status | uninstall`.
 - **Two front-ends, never both at once** (single Telegram consumer + the run-lock): the **Telegram
   daemon** vs the **`/sell` console** (at-desk, native streaming). To use `/sell`: `uninstall` the
-  daemon first, then re-`install`.
+  daemon first, then re-`install`. The interactive loop runs `python3 bin/daemon_conflict.py` at
+  session start and warns you if a loaded daemon would fight it (conflict → exit 1).
 - Push code changes: `rsync` dev → `~/bazaar-skills` (exclude `launchd/`, `.claude/settings.local.json`,
   `.browser-profile/`, `logs/`), then `install_daemon.sh install` to restart.
 
@@ -182,11 +198,11 @@ What the future installer should do for each manual/gotcha step:
 | Select harness + sign in (§2) | autodetect, fail later if not logged in | **menu** to pick Claude Code or Codex → **gate on sign-in** (instruct + wait + re-check via `install.py harness --name`) → pass the choice to Stage 2 as `$BAZAAR_HARNESS` |
 | Prereqs (§2) | check `which` by hand | **preflight** node/python/chrome + verify `claude` is logged in; offer to fix |
 | Location (§3) | know about TCC, copy to `~/bazaar-skills` | pick a **non-TCC dir** automatically; do the copy |
-| Bot token (§4) | BotFather, copy token | **guided** BotFather walkthrough + paste field |
-| chat_id (§4) | `/start`, captured on poll | detect first `/start`, confirm "connected as @you" |
-| Secrets/perms (§5) | hand-edit JSON (we broke it) | **generate** `settings.local.json` + validate JSON |
-| Browser/CDP (§6) | `.mcp.json` + `chrome_debug.sh` | generate `.mcp.json`; launch warm Chrome |
-| Marketplace login (§6) | log into your marketplaces manually | **open Chrome to each enabled marketplace, wait for login**, confirm |
+| Bot token (§4) | BotFather, copy token | **guided** BotFather walkthrough + paste field; `telegram.py verify` gates a bad/malformed token |
+| chat_id (§4) | `/start`, captured on poll | detect first `/start`, confirm via `telegram.py verify` (`chat_bound`) — never bind a null chat_id |
+| Secrets/perms (§5) | hand-edit JSON (we broke it) | **generate** `settings.local.json` + `install.py validate` (JSON **and** permission floor) |
+| Browser/CDP (§6) | `.mcp.json` + `chrome_debug.sh` | generate `.mcp.json`; launch warm Chrome; `wait_cdp.py` blocks until it's serving |
+| Marketplace login (§6) | log into your marketplaces manually | open Chrome to each enabled marketplace; `login_check.py` **probes** the live DOM (earned, not assumed) |
 | Onboarding (§7) | conversational | in-app **wizard** (currency/address/zones/availability) |
 | Daemon + PATH (§8) | edit plist PATH to match `which` | **generate plists with detected paths**; one-click load |
 | Verify (§9) | run tests/curl/tail | built-in **health check** + first-message smoke test |
@@ -194,6 +210,16 @@ What the future installer should do for each manual/gotcha step:
 ---
 
 ## 12. Known gotchas / operational notes
+- **Auto update-check**: Bazaar checks for a newer version on its own and OFFERS to update — it never
+  auto-applies (you run `/bazaar-upgrade`). Three surfaces, all sharing one throttle + per-version
+  dedupe (`bin/update_check.py`): the global launchers check when you run `/bazaar` / `/sell` / `/buy`;
+  a SessionStart hook checks when you open a session in the runtime dir; and the always-on daemon
+  sends a one-line Telegram heads-up. Cadence + behavior: `config.json` →
+  `update_check_interval_hours` (default 24, 0 disables), `update_snooze_days`, `update_poll_sec`.
+  The check is a read-only `git fetch` and fail-open (no network → no nag).
+  - The SessionStart hook lives in `bin/hooks/update_notice.py`; wire it once in
+    `.claude/settings.json` under `hooks.SessionStart` (matcher `startup|resume`). It NO-OPs for the
+    daemon's headless `-p` passes (they set `BAZAAR_DAEMON_PASS=1`).
 - **TCC**: runtime must be outside `~/Documents`/`Desktop`/`Downloads` (§3).
 - **Single Telegram consumer**: don't run the daemon and a manual poll / `/sell` session at the
   same time — they fight over the `getUpdates` offset + browser.
