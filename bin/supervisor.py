@@ -24,12 +24,23 @@ import sys
 import time
 
 import agent_daemon as ad   # imported lazily by ad.main() → fully-initialized module, no cycle
+import channel_outbox       # single-writer control-channel queue (the cap-hit escalation enqueues here)
+import harness_run          # CAP_HIT_SIGNAL lives here (run_pass returns it on a turn-cap kill)
+import inbox_scan           # SELL peek probes (fail-open wrappers below) for the priority-hint thread
 import lease
 import proc_tree   # shared kill-the-whole-tree teardown (also used by agent_daemon's default loop)
 
-LEASE_TTL_SEC = 600    # crash-recovery TTL — generously above any single loop iteration's blocking
-                       # subprocess timeouts, so a live worker's lease is never wrongly reclaimed.
+LEASE_TTL_SEC = lease.AGENT_MARKET_TTL_SEC  # canonical 600s liveness window — sourced from lease.py so
+                       # journal_reconcile's in-flight-intent guard uses the IDENTICAL TTL (they can never
+                       # drift; a mismatch was the J1 bug that re-opened the in-flight-intent steal).
 MAX_WORKER_SEC = 900   # hard wall-clock cap per worker (a stuck/runaway pass is killed by the watchdog)
+
+# Fix C — a buyer worker killed at the turn cap exits with this DISTINCT code (harness_run.run_pass
+# maps "rc!=0 + 'Reached max turns'" to it). The supervisor schedules ONE bounded continuation per
+# cap-hit, up to CONTINUATION_RETRY_CAP times for a given market, then ESCALATES (never silently
+# drops the backlog). The cap stops a perpetually-capping market from hot-looping continuations.
+CAP_HIT_SIGNAL = harness_run.CAP_HIT_SIGNAL
+CONTINUATION_RETRY_CAP = 2
 
 
 def _data():
@@ -90,6 +101,92 @@ def plan_buyer_sweep(enabled, busy, sweep_idx):
     return [eligible[sweep_idx % len(eligible)]]
 
 
+def plan_continuations(capped, busy, free_slots, attempts):
+    """The SOLE continuation-budget gate (Bug C3): decide AND record, in one place.
+
+    For each capped market (not already busy):
+      • within the retry budget (`attempts[market] < CONTINUATION_RETRY_CAP`) → schedule ONE
+        continuation and INCREMENT the counter (so the next cap-hit advances toward the cap).
+      • at/over the budget → DROP it for ESCALATION and reset its counter (next cap-hit starts fresh).
+    Launches are capped at `free_slots`; markets that don't fit this tick are left UNTOUCHED (not
+    counted, not escalated) so they are retried next tick. Deterministic order (sorted) so the planner
+    is testable.
+
+    Returns {"launch": [market, ...], "escalate": [market, ...]}. This is the ONLY place the budget
+    counter is advanced/spent — _reap merely reports capped markets — so the budget is gated EXACTLY
+    once (the old double-gate delivered 1 continuation instead of CONTINUATION_RETRY_CAP).
+
+    IN-PLACE MUTATOR: increments/resets `attempts` (the durable cross-tick counter the run loop
+    carries), mirroring the existing _reap/`workers` mutation convention."""
+    launch: list = []
+    escalate: list = []
+    for market in sorted(m for m in capped if m not in busy):
+        if attempts.get(market, 0) < CONTINUATION_RETRY_CAP:
+            if len(launch) >= max(0, free_slots):
+                continue  # no free slot this tick → retry next tick (don't spend the budget)
+            attempts[market] = attempts.get(market, 0) + 1
+            launch.append(market)
+        else:
+            escalate.append(market)
+            attempts.pop(market, None)  # budget spent → reset (next cap-hit starts fresh)
+    return {"launch": launch, "escalate": escalate}
+
+
+def _escalate_cap_hit(market, env, dry_run):
+    """ESCALATE a market that keeps hitting the turn cap over the SAME control-channel mechanism the
+    ESCALATE path uses — enqueue a `notify` on channel_outbox (the supervisor's single writer drains
+    it in order). Never silently drop a stranded backlog. Fail-open: an enqueue error is logged, not
+    raised, so it can't crash the reaper."""
+    text = (f"⚠️ buyer:{market} keeps hitting the turn cap after "
+            f"{CONTINUATION_RETRY_CAP} continuations; its backlog may be stranded. "
+            f"Open {market} and check for unread buyer messages.")
+    if dry_run:
+        logging.info("[dry-run] would escalate cap-hit for %s", market)
+        return
+    try:
+        path = channel_outbox.data_dir() / "channel_outbox.jsonl"
+        from datetime import datetime, timezone
+        channel_outbox.run_enqueue("notify", text, datetime.now(timezone.utc), path,
+                                   source="cap-hit")
+        logging.warning("buyer:%s exhausted continuation budget → escalated over channel", market)
+    except (OSError, ValueError) as exc:
+        logging.error("cap-hit escalation enqueue failed for %s: %s", market, exc)
+
+
+def peek_thread_for(market, sell_threads):
+    """PURE: the conservative per-market priority-hint thread, or None.
+
+    Returns the single fresh tracked-sell thread for `market` ONLY when there is EXACTLY one — with 0
+    fresh threads (a brand-new enquiry, or none) or >1 (ambiguous), return None so the worker keeps
+    today's market-scoped behavior. Scoping to one of several threads risks the pass fixating on it
+    and missing the others; mis-routing a reply is the worst outcome, so we under-hint."""
+    threads = (sell_threads or {}).get(market) or []
+    return threads[0] if len(threads) == 1 else None
+
+
+def sell_threads_from_peek(bp):
+    """PURE (C-followup): rebuild {market: [thread_id, ...]} from a buyer_peek RESULT's per-market
+    sell_threads. buyer_peek.peek already advanced the SELL memo once and now surfaces the matched
+    thread ids per market, so the supervisor's poll path reads the hint from THAT result instead of
+    calling _sell_threads_new() (a SECOND advancing probe that would see the advanced memo and null
+    the hint). Fail-open to {} on a malformed/old-shape peek."""
+    try:
+        markets = (bp or {}).get("markets") or {}
+        return {m: list((info or {}).get("sell_threads") or []) for m, info in markets.items()}
+    except Exception:  # noqa: BLE001 — a pure derivation must never crash the loop
+        return {}
+
+
+def _sell_threads_new():
+    """Wrap inbox_scan.sell_threads_new() fail-open so a probe hiccup never crashes the loop —
+    a missing hint just means an unscoped (market-only) pass, today's conservative default."""
+    try:
+        return inbox_scan.sell_threads_new()
+    except Exception as exc:  # noqa: BLE001 — a hint probe must never break the loop
+        logging.warning("sell_threads_new probe error: %s", exc)
+        return {}
+
+
 def _holder(market, seq):
     return f"sup:buyer:{market}:{seq}"
 
@@ -104,21 +201,48 @@ def _confirm_dead(proc, grace=proc_tree.GRACE_SEC):
     proc_tree.confirm_dead(proc, grace)
 
 
-def _reap(workers):
+def _reap(workers, cont_attempts=None, dry_run=False):
     """Release leases of exited workers; watchdog-kill any past MAX_WORKER_SEC. A NATURAL exit means
     the claude grandchild already finished (harness_run.run_pass blocks on it) — no orphan; only
-    forced kills must target the process group."""
+    forced kills must target the process group.
+
+    Bug C3 (single-gate): a worker that exited with CAP_HIT_SIGNAL was killed at the turn cap with
+    work still pending. `_reap` ONLY reports it as `capped` here — it does NOT increment the budget or
+    escalate. plan_continuations is the SOLE gate (it increments on launch and escalates a market it
+    drops at the cap), so the budget is gated EXACTLY ONCE. (Previously _reap incremented AND appended,
+    then run() re-filtered the list through plan_continuations against the now-incremented counter, so
+    the budget was gated twice — only 1 continuation fired and the escalation was skipped.)
+
+    A watchdog-killed worker is NOT treated as a cap-hit (it's a stuck/runaway pass, a different
+    failure). A clean (non-cap) exit clears any retry history. Returns {"capped": [market, ...]} for
+    the caller (run) to feed into plan_continuations.
+
+    IN-PLACE MUTATOR (by design, like the existing `workers` handling): mutates BOTH `workers`
+    (removes reaped entries) and `cont_attempts` (clears the counter for a CLEAN exit so a later
+    cap-hit starts fresh — the only counter write left in _reap; the increment now lives in
+    plan_continuations)."""
+    cont_attempts = cont_attempts if cont_attempts is not None else {}
+    capped: list = []
     now = time.monotonic()
     for market, w in list(workers.items()):
         if w["proc"].poll() is not None:
-            logging.info("buyer worker [%s] done rc=%s", market, w["proc"].returncode)
+            rc = w["proc"].returncode
+            logging.info("buyer worker [%s] done rc=%s", market, rc)
             lease.release(_data(), f"market:{market}", w["holder"])
             del workers[market]
+            if rc == CAP_HIT_SIGNAL:
+                capped.append(market)  # plan_continuations is the SOLE budget gate (no double-gate)
+            else:
+                cont_attempts.pop(market, None)  # a clean (non-cap) exit clears any retry history
         elif now - w["started"] > MAX_WORKER_SEC:
             logging.error("buyer worker [%s] exceeded %ss — killing process group", market, MAX_WORKER_SEC)
             _confirm_dead(w["proc"])
             lease.release(_data(), f"market:{market}", w["holder"])
             del workers[market]
+            # A watchdog kill is a TIMEOUT failure, not a cap-hit — clear any prior cap-hit retry
+            # history so a stale counter can't make the NEXT genuine cap-hit escalate a cycle early.
+            cont_attempts.pop(market, None)
+    return {"capped": capped}
 
 
 def _heartbeat(workers):
@@ -187,10 +311,11 @@ def _drain_outbox(channel, env, dry_run):
             logging.warning("outbox ack errored for %s (%s) — may re-send next tick", rec.get("id"), exc)
 
 
-def _launch_buyer(market, env, peek, holder, dry_run, hint=None):
+def _launch_buyer(market, env, peek, holder, dry_run, hint=None, peek_thread=None):
     """Acquire market:<id> then Popen a scoped buyer pass. Returns the Popen, or None (dry-run/race).
     `hint` overrides the peek-derived snippet (used by the notification-path trigger, which already
-    carries the buyer's message text)."""
+    carries the buyer's message text). `peek_thread` (Fix C) seeds $BAZAAR_BUYER_PEEK_THREAD — a
+    PRIORITY hint to handle that one thread first; the pass still tours the rest within its budget."""
     acq = lease.acquire(_data(), f"market:{market}", holder, "buyer", LEASE_TTL_SEC)
     if not acq["acquired"]:
         logging.info("buyer worker [%s]: lease busy — skip", market)
@@ -205,6 +330,8 @@ def _launch_buyer(market, env, peek, holder, dry_run, hint=None):
         snippet = ((peek.get("markets") or {}).get(market) or {}).get("snippet", "")
         text = f"[{market}] {snippet}".strip()
     worker_env = {**env, "BAZAAR_BUYER_PEEK_TEXT": text}
+    if peek_thread:
+        worker_env["BAZAAR_BUYER_PEEK_THREAD"] = peek_thread
     # start_new_session=True → the worker leads its own process group, so _kill_tree can signal the
     # whole tree (wrapper + claude grandchild) on preempt. Without it, preempt would orphan claude.
     try:
@@ -222,6 +349,7 @@ def _launch_buyer(market, env, peek, holder, dry_run, hint=None):
 
 def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     workers = {}        # market -> {"proc": Popen, "holder": token}
+    cont_attempts = {}  # market -> continuation count for Fix C (turn-cap retry budget; resets on success)
     seq = 0
     empty_buyer_cycles = 0
     sweep_idx = 0       # round-robin cursor for the forced one-market safety-net sweep
@@ -232,20 +360,28 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     last_maint = time.monotonic() - cfg["maint_poll_sec"]
     last_eval = time.monotonic()
     last_update = time.monotonic()   # upstream update-check throttle (not immediate)
+    last_followup = time.monotonic()  # stale-chat follow-up check throttle (not immediate)
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
+    # Bug C6: sweep per-pass logs leaked by forced kills (preempt/deadline/watchdog skip run_pass's
+    # finally). A startup glob-and-unlink of stale pass-*.log is the deterministic backstop.
+    swept = harness_run.sweep_stale_pass_logs()
+    if swept:
+        logging.info("swept %s stale per-pass log(s) leaked by forced kills", len(swept))
     ad._log_wake_mode()  # explicit Instant/Standard banner (did the FDA grant take?)
     src_fp = ad._source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
 
     while not ad._stop:
+        iter_start = time.monotonic()  # Fix D: time each iteration so a wedged one is VISIBLE (WARN)
         # A code change to the daemon's own sources only takes effect on restart (no hot-reload).
         # Bounce at loop top, then _preempt_all (below) tears down live workers cleanly before exit.
         if ad._source_fingerprint() != src_fp:
             logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
+            ad.relaunch_self()  # clean single atomic restart on fresh code (shared with the default loop)
             break
         ad._touch_heartbeat()  # same .daemon.heartbeat the single-flight loop writes — so healthcheck's
                                # staleness check works in concurrent mode too (else it WARNs falsely)
-        _reap(workers)
+        reaped = _reap(workers, cont_attempts, ns.dry_run)  # cap-hits reported as `capped` (Bug C3)
         _heartbeat(workers)  # lease heartbeats for live workers (distinct from the daemon heartbeat above)
         _drain_outbox(channel, env, ns.dry_run)   # flush queued background notices, in order
         paused = ad.control.is_paused()
@@ -254,6 +390,42 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         # (a focused Meta tab delivers in-app instead). Dedicated warm Chrome → never the user's own.
         if not paused:
             ad.tab_park.park()
+
+        # CONTINUATIONS (Bug C3): a buyer worker killed at the turn cap left work pending.
+        # plan_continuations is the SOLE budget gate — it decides which capped markets get ONE more
+        # bounded continuation (within the retry budget + free slots, incrementing the counter) and
+        # which have exhausted the budget and must ESCALATE. The escalation is emitted HERE (not in
+        # _reap), so the budget is gated exactly once. Each continuation re-runs the SAME market that
+        # capped, market-scoped (no per-thread hint) so it never advances the SELL memo (Bug C8).
+        if not paused and reaped["capped"]:
+            free = max_workers - len(workers)
+            plan = plan_continuations(set(reaped["capped"]), set(workers), free, cont_attempts)
+            for market in plan["escalate"]:
+                _escalate_cap_hit(market, None, ns.dry_run)
+            # Bug C8: do NOT advance the SELL memo here. The previous code called _sell_threads_new()
+            # (a memo-ADVANCING peek) for the per-thread hint, but the poll path below already owns the
+            # single memo-advancing peek this iteration (sell_threads_from_peek). A second advance would
+            # see the already-advanced memo and null the poll path's sell_peek, so an enumerable market
+            # could be skipped that round. A continuation re-runs the SAME market that capped, so it is
+            # safe + conservative to under-hint to a market-scoped (no specific thread) continuation —
+            # exactly peek_thread_for's own behavior when the fresh-thread set is ambiguous. (The only
+            # read-only sell probe, inbox_scan.sell_actionable_now(), yields a per-market boolean, not
+            # thread ids, so it cannot pin a single-thread hint anyway; we under-hint instead.)
+            for market in plan["launch"]:
+                seq += 1
+                holder = _holder(market, seq)
+                proc = _launch_buyer(market, env, {}, holder, ns.dry_run, peek_thread=None)
+                if proc is not None:
+                    workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
+                    last_buyer_pass = time.monotonic()
+                    logging.info("buyer continuation launched [%s] (attempt %s)",
+                                 market, cont_attempts.get(market))
+                else:
+                    # Bug C7: the launch FAILED (lease race / Popen OSError → None). plan_continuations
+                    # already spent a budget slot at decision time, but no continuation actually ran —
+                    # roll it back so a later genuine cap-hit still gets the full CONTINUATION_RETRY_CAP
+                    # continuations (mirror single-flight, which counts only a continuation that runs).
+                    cont_attempts[market] = max(0, cont_attempts.get(market, 0) - 1)
 
         # CONTROL CHANNEL (privileged + exclusive): a user message preempts all market workers.
         peek = ad.channel_peek(channel, env, peek_timeout)
@@ -325,10 +497,18 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                         logging.info("buyer recheck sweep → %s", to_launch)
                     else:
                         logging.info("buyer recheck: all inboxes clear → skip forced sweep (~0 tokens)")
+            # Conservative per-market priority hint (Fix C / C-followup): scope a worker to its single
+            # fresh thread when the inbox shows exactly one; 0 or >1 → unset (market-scoped pass).
+            # Derive the hint from THIS peek's per-market sell_threads (bp already advanced the SELL
+            # memo); a second _sell_threads_new() probe here would advance it again and null the hint.
+            # A forced/recheck sweep carries no precise sell_threads in bp, so the hint falls back to
+            # None (unscoped) — today's behavior for those branches.
+            sell_threads = sell_threads_from_peek(bp) if to_launch else {}
             for market in to_launch:
                 seq += 1
                 holder = _holder(market, seq)
-                proc = _launch_buyer(market, env, bp, holder, ns.dry_run)
+                proc = _launch_buyer(market, env, bp, holder, ns.dry_run,
+                                     peek_thread=peek_thread_for(market, sell_threads))
                 if proc is not None:
                     workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
                     last_buyer_pass = time.monotonic()
@@ -337,9 +517,22 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
 
         # EXCLUSIVE passes: only when no market worker is live (they'd contend on a shared tab/account).
         if not paused and not workers and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
-            if (ad._distribution_active() or ad._inbox_detect_active()
-                    or ad._scan_due(env) or ad._inbox_sweep_due(env)):
-                logging.info("maint pass (exclusive)")
+            dist_active = ad._distribution_active()
+            idet_active = ad._inbox_detect_active()
+            lh_active = ad._listing_health_session_active()
+            scan_due = ad._scan_due(env)
+            sweep_due = ad._inbox_sweep_due(env)
+            # Stale-listing suggestions are the LOWEST-priority maint step (see agent_daemon.py): only
+            # open a new episode when no higher-priority detect/drain work is pending.
+            if not (dist_active or idet_active or lh_active or scan_due or sweep_due):
+                lh_due_item = ad._listing_health_due(env)
+                if lh_due_item:
+                    ad.run_listing_health_start(env, lh_due_item, ns.dry_run)
+                    lh_active = not ns.dry_run
+            if dist_active or idet_active or lh_active or scan_due or sweep_due:
+                logging.info("maint pass (exclusive)%s",
+                             " → suggest stale-listing fixes" if lh_active and not (
+                                 dist_active or idet_active or scan_due or sweep_due) else "")
                 ad.run_pass("maint", channel, env, ns.dry_run)
             last_maint = time.monotonic()
 
@@ -353,11 +546,32 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 })
             last_buy = time.monotonic()
 
+        # STALE-CHAT FOLLOW-UPS (exclusive, like maint/buy): nudge quiet counterparts then mark them
+        # not interested. Drops are $0 deterministic (the notice rides the outbox _drain_outbox flushes
+        # at loop top); nudges reuse an exclusive buyer/buy pass via BAZAAR_FOLLOWUP=1. Gated on
+        # `not workers` so a nudge pass never contends with a live market worker for the same tab.
+        if not paused and not workers and time.monotonic() - last_followup >= cfg["followup_poll_sec"]:
+            ad.run_followup_reconcile(env)
+            fu = ad._followup_due(env)
+            if fu.get("drops"):
+                ad.run_followup_drops(env, ns.dry_run)
+            if fu.get("nudges"):
+                sides = {d.get("side") for d in fu.get("due_nudges", [])}
+                ad.reconcile_orphans(env, ns.dry_run)
+                if "sell" in sides:
+                    logging.info("followup nudges due (sell) → buyer pass (exclusive)")
+                    ad.run_pass("buyer", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                if "buy" in sides:
+                    logging.info("followup nudges due (buy) → buy pass (exclusive)")
+                    ad.run_pass("buy", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+            last_followup = time.monotonic()
+
         # eval gated on `not paused` too (like the buyer/maint/buy passes above) so /pause is a
-        # literal full stop — no work of any kind, deterministic or otherwise, until /resume.
+        # literal full stop — no work of any kind, deterministic or otherwise, until /resume. The
+        # billed LLM judge rides the same nightly run when config.eval_judge_nightly is set (default on).
         if not paused and not workers and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
             if ad._eval_due(env):
-                ad.run_eval(env, ns.dry_run)
+                ad.run_eval(env, ns.dry_run, cfg.get("eval_judge_nightly", True))
             last_eval = time.monotonic()
 
         # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up if a newer Bazaar is available.
@@ -366,6 +580,14 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
             ad.check_and_notify_update(channel, env, ns.dry_run, via_outbox=True)
             last_update = time.monotonic()
+
+        # Fix D — per-iteration stall guard (observability), shared with the single-flight loop: a
+        # hung worker that froze the loop for minutes (the incident's ~7-min stall) is surfaced as a
+        # WARN here. Not a kill — _reap's MAX_WORKER_SEC watchdog handles a runaway worker, and the
+        # daemon watchdog restarts a truly wedged loop via the stale heartbeat.
+        stall = ad.iteration_stall_warning(time.monotonic() - iter_start)
+        if stall:
+            logging.warning(stall)
 
         if ns.once:
             break

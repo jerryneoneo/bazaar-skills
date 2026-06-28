@@ -133,7 +133,7 @@ def test_precise_flags_real_activity():
 
 
 def test_market_absent_from_precise_uses_count():
-    print("market absent from precise (FB / scan down) → conservative count-based rule kept:")
+    print("market absent from precise (scan down) → conservative count-based rule kept:")
     restore = _patch(["fb"], {"fb": {"found": True, "count": 3, "snippet": "x"}})
     unpatch = _patch_precise({})  # nothing precise → fall back to count
     try:
@@ -141,6 +141,43 @@ def test_market_absent_from_precise_uses_count():
         check("fb flagged unhandled by count", out["markets"]["fb"]["unhandled"] is True)
     finally:
         unpatch(); restore()
+
+
+def test_fb_precise_drives_unhandled_true():
+    print("FB precise True → fb unhandled True even when the aggregate count is FLAT (the Olaf miss):")
+    restore = _patch(["fb"], {"fb": {"found": True, "count": 0, "snippet": ""}})
+    unpatch = _patch_precise({"fb": True})  # precise caught a known-thread reply the badge missed
+    try:
+        out = buyer_recheck.recheck()
+        check("fb unhandled True (precise over flat count)", out["markets"]["fb"]["unhandled"] is True)
+        check("total unhandled 1", out["unhandled"] == 1)
+    finally:
+        unpatch(); restore()
+
+
+def test_fb_precise_drives_unhandled_false():
+    print("FB precise False → fb unhandled False despite a non-zero aggregate count (noise excluded):")
+    restore = _patch(["fb"], {"fb": {"found": True, "count": 7, "snippet": "noise"}})
+    unpatch = _patch_precise({"fb": False})
+    try:
+        out = buyer_recheck.recheck()
+        check("fb unhandled False despite count 7", out["markets"]["fb"]["unhandled"] is False)
+        check("total unhandled 0 (forced sweep skipped)", out["unhandled"] == 0)
+    finally:
+        unpatch(); restore()
+
+
+def test_fb_scan_failure_keeps_count_fallback():
+    print("inbox_scan raises → FB drops out of precise, conservative count>0 fallback kept:")
+    restore = _patch(["fb"], {"fb": {"found": True, "count": 4, "snippet": "x"}})
+    saved = inbox_scan.sell_actionable_now
+    inbox_scan.sell_actionable_now = lambda: (_ for _ in ()).throw(RuntimeError("scan down"))
+    try:
+        out = buyer_recheck.recheck()
+        check("fb flagged unhandled by count fallback", out["markets"]["fb"]["unhandled"] is True)
+    finally:
+        inbox_scan.sell_actionable_now = saved
+        restore()
 
 
 if __name__ == "__main__":
@@ -152,6 +189,9 @@ if __name__ == "__main__":
     test_precise_excludes_promos()
     test_precise_flags_real_activity()
     test_market_absent_from_precise_uses_count()
+    test_fb_precise_drives_unhandled_true()
+    test_fb_precise_drives_unhandled_false()
+    test_fb_scan_failure_keeps_count_fallback()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

@@ -165,6 +165,163 @@ def test_wake_mode_reflects_fda():
         agent_daemon.notify_db.available = saved
 
 
+def test_buyer_continuation_action_pure():
+    print("Fix C: buyer_continuation_action — cap-hit drives one bounded retry then escalation:")
+    cap = agent_daemon.CONTINUATION_RETRY_CAP
+    sig = agent_daemon.CAP_HIT_SIGNAL
+    check("cap-hit with budget left → continue",
+          agent_daemon.buyer_continuation_action(sig, 0, cap) == "continue")
+    check("cap-hit at the retry cap → escalate",
+          agent_daemon.buyer_continuation_action(sig, cap, cap) == "escalate")
+    check("cap-hit over the cap → escalate",
+          agent_daemon.buyer_continuation_action(sig, cap + 5, cap) == "escalate")
+    check("a clean rc=0 → none (no continuation, no escalation)",
+          agent_daemon.buyer_continuation_action(0, 0, cap) == "none")
+    check("a GENERIC failure (rc=1, not the cap signal) → none (not our loop)",
+          agent_daemon.buyer_continuation_action(1, 0, cap) == "none")
+
+
+def test_buyer_pass_caphit_triggers_one_continuation():
+    print("Fix C: a buyer pass exiting with the cap-hit signal triggers exactly ONE continuation:")
+    calls = []
+    saved_run = agent_daemon.run_pass
+
+    # run_pass returns the cap-hit signal on the FIRST buyer call, then 0 on the continuation.
+    def fake_run_pass(mode, channel, env, dry_run, extra_env=None):
+        calls.append((mode, (extra_env or {}).get("BAZAAR_BUYER_PEEK_THREAD")))
+        return agent_daemon.CAP_HIT_SIGNAL if len(calls) == 1 else 0
+    agent_daemon.run_pass = fake_run_pass
+    escalations = []
+    saved_esc = agent_daemon.escalate_cap_hit
+    agent_daemon.escalate_cap_hit = (
+        lambda channel, env, resource, dry_run, **kw: escalations.append(resource))
+    try:
+        agent_daemon.run_buyer_with_continuation(
+            "carousell", {"adapter": "telegram"}, {}, False,
+            extra_env={"BAZAAR_BUYER_PEEK_TEXT": "hi"}, peek_thread="carousell:1")
+        buyer_calls = [c for c in calls if c[0] == "buyer"]
+        check("exactly two buyer passes (initial + ONE continuation)", len(buyer_calls) == 2)
+        check("the continuation carried the peek-thread hint",
+              buyer_calls[1][1] == "carousell:1")
+        check("no escalation (the continuation succeeded)", escalations == [])
+    finally:
+        agent_daemon.run_pass = saved_run
+        agent_daemon.escalate_cap_hit = saved_esc
+
+
+def test_buyer_pass_caphit_retry_guard_stops_hot_loop():
+    print("Fix C: the retry guard stops a hot loop — a perpetually-capping market escalates ONCE:")
+    calls = []
+    saved_run = agent_daemon.run_pass
+
+    def always_cap(mode, channel, env, dry_run, extra_env=None):
+        calls.append(mode)
+        return agent_daemon.CAP_HIT_SIGNAL  # never recovers
+    agent_daemon.run_pass = always_cap
+    escalations = []
+    saved_esc = agent_daemon.escalate_cap_hit
+    agent_daemon.escalate_cap_hit = (
+        lambda channel, env, resource, dry_run, **kw: escalations.append(resource))
+    try:
+        agent_daemon.run_buyer_with_continuation(
+            "fb", {"adapter": "telegram"}, {}, False, extra_env={}, peek_thread=None)
+        buyer_calls = [c for c in calls if c == "buyer"]
+        # initial + exactly CONTINUATION_RETRY_CAP continuations, then it stops (no infinite loop).
+        check("bounded number of buyer passes (no hot loop)",
+              len(buyer_calls) == 1 + agent_daemon.CONTINUATION_RETRY_CAP)
+        check("escalated exactly once after the budget", escalations == ["fb"])
+    finally:
+        agent_daemon.run_pass = saved_run
+        agent_daemon.escalate_cap_hit = saved_esc
+
+
+def test_escalate_cap_hit_enqueues_channel_notify():
+    print("Fix C: escalate_cap_hit via_outbox=True enqueues a channel notify (the concurrent path):")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    tg = {"adapter": "telegram", "detail": {}}
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            agent_daemon.escalate_cap_hit(tg, {}, "fb", False, via_outbox=True)
+            outbox = Path(d) / "channel_outbox.jsonl"
+            check("a notify was enqueued", outbox.exists())
+            if outbox.exists():
+                recs = [_json.loads(line) for line in outbox.read_text().splitlines() if line.strip()]
+                check("text names the market + turn cap",
+                      any("fb" in r.get("text", "") and "turn cap" in r.get("text", "") for r in recs))
+                check("kind notify", any(r.get("kind") == "notify" for r in recs))
+            # dry-run must not enqueue (no side effects).
+            outbox.unlink(missing_ok=True)
+            agent_daemon.escalate_cap_hit(tg, {}, "carousell", True, via_outbox=True)
+            check("dry-run enqueues nothing", not outbox.exists())
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_escalate_cap_hit_direct_send_in_single_flight():
+    print("Bug D1: in single-flight mode escalate_cap_hit(via_outbox=False) DIRECT-sends via"
+          " telegram.py (the single-flight loop has no outbox drainer, so an enqueue would strand):")
+    import os as _os
+    import tempfile as _tf
+    tg = {"adapter": "telegram", "detail": {}}
+    sent = []
+    enqueued = []
+    saved_run = agent_daemon.subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        # Distinguish a direct telegram send from an outbox enqueue.
+        if any("telegram.py" in str(p) for p in cmd) and "send" in cmd:
+            sent.append(cmd)
+        if any("channel_outbox.py" in str(p) for p in cmd):
+            enqueued.append(cmd)
+        return FakeProc(0)
+    agent_daemon.subprocess.run = fake_run
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            agent_daemon.escalate_cap_hit(tg, {}, "fb", False, via_outbox=False)
+            check("a direct telegram.py send fired (not just an enqueue)", len(sent) == 1)
+            check("the direct send is kind=notify (matches the existing notify path)",
+                  sent and "--kind" in sent[0] and sent[0][sent[0].index("--kind") + 1] == "notify")
+            check("the direct send names the capped market + turn cap",
+                  sent and any("fb" in str(p) for p in sent[0])
+                  and any("turn cap" in str(p) for p in sent[0]))
+            check("it did NOT enqueue to the undrained outbox", enqueued == [])
+            # dry-run must neither send nor enqueue.
+            sent.clear(); enqueued.clear()
+            agent_daemon.escalate_cap_hit(tg, {}, "carousell", True, via_outbox=False)
+            check("dry-run direct send sends nothing", sent == [] and enqueued == [])
+            # adapter gating: a non-telegram adapter must not attempt a direct send (no wiring).
+            sent.clear()
+            agent_daemon.escalate_cap_hit({"adapter": "console", "detail": {}}, {}, "ebay",
+                                          False, via_outbox=False)
+            check("non-telegram adapter → no direct send (gated like the notify path)", sent == [])
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            agent_daemon.subprocess.run = saved_run
+
+
+def test_peek_thread_from_pure():
+    print("C-followup: peek_thread_from derives the single-thread hint from the buyer_peek result"
+          " (NO second memo advance) — exactly one tracked thread across markets → that thread:")
+    # Exactly one fresh tracked thread across all markets → return it.
+    bp = {"markets": {"fb": {"sell_threads": ["fb:9988"]}, "carousell": {"sell_threads": []}}}
+    check("exactly one across markets → that thread", agent_daemon.peek_thread_from(bp) == "fb:9988")
+    # Zero fresh tracked threads (a brand-new enquiry flags the market but has no thread) → None.
+    check("zero → None", agent_daemon.peek_thread_from(
+        {"markets": {"fb": {"sell_threads": []}}}) is None)
+    # More than one (ambiguous) → None (under-hint; mis-routing is the worst outcome).
+    check(">1 → None (ambiguous)", agent_daemon.peek_thread_from(
+        {"markets": {"fb": {"sell_threads": ["fb:1"]}, "carousell": {"sell_threads": ["carousell:2"]}}})
+        is None)
+    # Fail-open on a malformed/old-shape peek (no markets / no sell_threads keys) → None.
+    check("no markets section → None", agent_daemon.peek_thread_from({}) is None)
+    check("old-shape markets without sell_threads → None",
+          agent_daemon.peek_thread_from({"markets": {"fb": {"new": True}}}) is None)
+
+
 def test_peek_cmd_dispatch():
     print("_peek_cmd: builds the right non-consuming command per adapter (console → None):")
     tg = agent_daemon._peek_cmd({"adapter": "telegram", "detail": {}}, 25)
@@ -174,6 +331,293 @@ def test_peek_cmd_dispatch():
     wa = agent_daemon._peek_cmd({"adapter": "whatsapp", "detail": {}}, 25)
     check("whatsapp peek", "whatsapp.py" in wa[1] and wa[-1] == "peek")
     check("console has no daemon → None", agent_daemon._peek_cmd({"adapter": "console", "detail": {}}, 25) is None)
+
+
+# --- Fix D: daemon reliability (duplicate-instance quiet exit, relaunch_self, stall guard) ---
+
+def test_duplicate_instance_exits_quietly():
+    print("Fix D: a duplicate instance logs INFO + returns 0 (not ERROR + rc 3 → no respawn churn):")
+    import logging as _logging
+    saved_acquire = agent_daemon.instance_lock.acquire
+    # The lock is held by a LIVE duplicate → acquire reports not-acquired with truthful holder info.
+    agent_daemon.instance_lock.acquire = lambda lock, hb: {
+        "acquired": False, "holder_pid": 4242, "holder_alive": True, "reclaimed": False, "fd": None}
+    records = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture()
+    root = _logging.getLogger()
+    root.addHandler(handler)
+    saved_level = root.level
+    root.setLevel(_logging.INFO)
+    try:
+        rc = agent_daemon.main(["agent_daemon.py", "--once", "--dry-run"])
+        check("returns 0 (clean exit → KeepAlive SuccessfulExit:false won't restart)", rc == 0)
+        dup = [r for r in records if "already running" in r.getMessage()]
+        check("logged the duplicate-instance line", len(dup) >= 1)
+        check("logged at INFO, not ERROR", dup and all(r.levelno == _logging.INFO for r in dup))
+        check("line names the holder pid", dup and "4242" in dup[0].getMessage())
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(saved_level)
+        agent_daemon.instance_lock.acquire = saved_acquire
+
+
+def test_clean_exit_clears_instance_lock_holder():
+    print("Bug D3: when WE acquired the lock, a clean main() exit clears the lock holder so the")
+    print("        watchdog can't be fooled by a recycled PID into a silent stay-down:")
+    import os as _os
+    import tempfile as _tf
+
+    saved_acquire = agent_daemon.instance_lock.acquire
+    saved_lock_path = agent_daemon.INSTANCE_LOCK
+    saved_hb_path = agent_daemon.HEARTBEAT
+    saved_load_channel = agent_daemon.load_channel
+    saved_load_config = agent_daemon.load_config
+    with _tf.TemporaryDirectory() as d:
+        lock = Path(d) / ".daemon.instancelock"
+        hb = Path(d) / ".daemon.heartbeat"
+        agent_daemon.INSTANCE_LOCK = lock
+        agent_daemon.HEARTBEAT = hb
+
+        def fake_acquire(lock_path, hb_path):
+            # Mimic a real acquire: record OUR pid in the lock body, hand back a held fd.
+            fd = _os.open(str(lock_path), _os.O_RDWR | _os.O_CREAT, 0o600)
+            _os.ftruncate(fd, 0)
+            _os.write(fd, str(_os.getpid()).encode())
+            return {"acquired": True, "holder_pid": _os.getpid(), "holder_alive": True,
+                    "reclaimed": False, "fd": fd}
+        agent_daemon.instance_lock.acquire = fake_acquire
+        # console adapter → main returns rc=3 BEFORE the loop (no token IO/network); the clean-exit
+        # clear must STILL run via the finally. Stub config/channel so this stays fast + isolated.
+        agent_daemon.load_channel = lambda: {"adapter": "console", "detail": {}}
+        agent_daemon.load_config = lambda: {"peek_timeout": 5, "max_concurrent_workers": 1}
+        try:
+            rc = agent_daemon.main(["agent_daemon.py", "--once", "--dry-run"])
+            check("exits with the console rc=3 (early return, before the loop)", rc == 3)
+            check("lock holder cleared on exit (no live holder for the watchdog)",
+                  agent_daemon.instance_lock.read_holder_pid(lock) is None)
+        finally:
+            agent_daemon.instance_lock.acquire = saved_acquire
+            agent_daemon.INSTANCE_LOCK = saved_lock_path
+            agent_daemon.HEARTBEAT = saved_hb_path
+            agent_daemon.load_channel = saved_load_channel
+            agent_daemon.load_config = saved_load_config
+
+
+def test_duplicate_exit_does_not_clear_live_holders_lock():
+    print("Bug D3: a duplicate instance (we did NOT acquire) must NOT clear the live holder's lock —")
+    print("        clearing it would let the watchdog wrongly think the REAL daemon is gone:")
+    import tempfile as _tf
+
+    saved_acquire = agent_daemon.instance_lock.acquire
+    saved_lock_path = agent_daemon.INSTANCE_LOCK
+    with _tf.TemporaryDirectory() as d:
+        lock = Path(d) / ".daemon.instancelock"
+        lock.write_text("4242")  # the live holder's pid, recorded in the lock body
+        agent_daemon.INSTANCE_LOCK = lock
+        agent_daemon.instance_lock.acquire = lambda lp, hp: {
+            "acquired": False, "holder_pid": 4242, "holder_alive": True,
+            "reclaimed": False, "fd": None}
+        try:
+            rc = agent_daemon.main(["agent_daemon.py", "--once", "--dry-run"])
+            check("returns 0 (clean duplicate exit)", rc == 0)
+            check("live holder's lock body is UNTOUCHED",
+                  agent_daemon.instance_lock.read_holder_pid(lock) == 4242)
+        finally:
+            agent_daemon.instance_lock.acquire = saved_acquire
+            agent_daemon.INSTANCE_LOCK = saved_lock_path
+
+
+def test_relaunch_self_shells_kickstart():
+    print("Fix D: relaunch_self best-effort shells `launchctl kickstart -k` (asserts argv):")
+    calls = []
+    saved_run = agent_daemon.subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return FakeProc(0)
+    agent_daemon.subprocess.run = fake_run
+    try:
+        agent_daemon.relaunch_self()
+        check("exactly one shell-out", len(calls) == 1)
+        argv = calls[0]
+        check("invokes launchctl kickstart -k", argv[:3] == ["launchctl", "kickstart", "-k"])
+        check("targets the agent label in a gui/<uid> domain",
+              argv[-1].startswith("gui/") and argv[-1].endswith(agent_daemon.AGENT_LABEL))
+    finally:
+        agent_daemon.subprocess.run = saved_run
+
+
+def test_relaunch_self_is_best_effort():
+    print("Fix D: relaunch_self never raises — a non-zero kickstart is logged + swallowed:")
+    saved_run = agent_daemon.subprocess.run
+
+    def boom(*a, **k):
+        raise agent_daemon.subprocess.SubprocessError("launchctl missing")
+    agent_daemon.subprocess.run = boom
+    try:
+        raised = False
+        try:
+            agent_daemon.relaunch_self()
+        except Exception:  # noqa: BLE001 — the whole point is that it must NOT raise
+            raised = True
+        check("does not raise on a subprocess error", raised is False)
+    finally:
+        agent_daemon.subprocess.run = saved_run
+
+    # A non-zero return code is also fail-open (logged, not raised).
+    agent_daemon.subprocess.run = lambda *a, **k: FakeProc(1, "", "no such service")
+    try:
+        raised = False
+        try:
+            agent_daemon.relaunch_self()
+        except Exception:  # noqa: BLE001
+            raised = True
+        check("does not raise on a non-zero kickstart", raised is False)
+    finally:
+        agent_daemon.subprocess.run = saved_run
+
+
+def test_stall_guard_warns_over_budget():
+    print("Fix D: the per-iteration stall guard WARNs when an iteration exceeds LOOP_ITER_BUDGET:")
+    check("budget is a positive number", agent_daemon.LOOP_ITER_BUDGET > 0)
+    over = agent_daemon.iteration_stall_warning(agent_daemon.LOOP_ITER_BUDGET + 1,
+                                                agent_daemon.LOOP_ITER_BUDGET)
+    check("over budget → a WARN message string", isinstance(over, str) and over != "")
+    under = agent_daemon.iteration_stall_warning(agent_daemon.LOOP_ITER_BUDGET - 1,
+                                                 agent_daemon.LOOP_ITER_BUDGET)
+    check("under budget → no message (None)", under is None)
+    check("exactly at budget → no message", agent_daemon.iteration_stall_warning(
+        agent_daemon.LOOP_ITER_BUDGET, agent_daemon.LOOP_ITER_BUDGET) is None)
+
+
+# --- Nightly self-eval: the LLM judge can run nightly (config.eval_judge_nightly) ---
+
+def test_load_config_eval_judge_nightly():
+    print("load_config: eval_judge_nightly is a bool; defaults True ('on for everyone') when absent:")
+    cfg = agent_daemon.load_config()
+    check("present and bool", isinstance(cfg.get("eval_judge_nightly"), bool))
+    saved = agent_daemon.CONFIG_PATH
+    agent_daemon.CONFIG_PATH = Path("/nonexistent/bazaar/config.json")  # exists() False → code default
+    try:
+        check("absent config → default True", agent_daemon.load_config()["eval_judge_nightly"] is True)
+    finally:
+        agent_daemon.CONFIG_PATH = saved
+
+
+def test_run_eval_deterministic_argv():
+    print("run_eval(use_judge=False): runs eval_run with --no-llm at the deterministic timeout:")
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append((cmd, k.get("timeout")))
+        return FakeProc(0, "summary line")
+
+    def body():
+        agent_daemon.run_eval({}, False, use_judge=False)
+        eval_calls = [c for c in calls if any("eval_run.py" in str(p) for p in c[0])]
+        check("invoked eval_run.py once", len(eval_calls) == 1)
+        cmd, timeout = eval_calls[0]
+        check("argv ends with run --no-llm", cmd[-2:] == ["run", "--no-llm"])
+        check("uses the deterministic timeout", timeout == agent_daemon.EVAL_TIMEOUT_SEC)
+        check("still stamps eval_state mark",
+              any("eval_state.py" in str(p) for c in calls for p in c[0]))
+    with_run(fake_run, body)
+
+
+def test_run_eval_judge_argv():
+    print("run_eval(use_judge=True): runs eval_run WITHOUT --no-llm at the larger judge timeout:")
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append((cmd, k.get("timeout")))
+        return FakeProc(0, "summary line")
+
+    def body():
+        agent_daemon.run_eval({}, False, use_judge=True)
+        eval_calls = [c for c in calls if any("eval_run.py" in str(p) for p in c[0])]
+        check("invoked eval_run.py once", len(eval_calls) == 1)
+        cmd, timeout = eval_calls[0]
+        check("argv has no --no-llm (judge runs)", "--no-llm" not in cmd)
+        check("argv ends with run", cmd[-1] == "run")
+        check("judge timeout exceeds the deterministic one (judge can take minutes)",
+              timeout == agent_daemon.EVAL_JUDGE_TIMEOUT_SEC and timeout > agent_daemon.EVAL_TIMEOUT_SEC)
+    with_run(fake_run, body)
+
+
+def test_run_eval_dry_run_spawns_nothing():
+    print("run_eval(dry_run=True): logs intent, spawns no subprocess (both branches):")
+    def must_not_run(*a, **k):
+        raise AssertionError("dry-run must not spawn a subprocess")
+
+    def body():
+        agent_daemon.run_eval({}, True, use_judge=False)
+        agent_daemon.run_eval({}, True, use_judge=True)
+        check("no subprocess spawned in dry-run", True)
+    with_run(must_not_run, body)
+
+
+def test_followup_due_parses_and_failopen():
+    print("_followup_due: parses counts on rc=0; fails open to no-work otherwise:")
+    def ok():
+        out = agent_daemon._followup_due({})
+        check("nudges/drops parsed", out["nudges"] == 2 and out["drops"] == 1)
+        check("due_nudges carried", out["due_nudges"] == [{"side": "sell"}])
+    with_run(lambda *a, **k: FakeProc(0, '{"enabled": true, "counts": {"nudges": 2, "drops": 1},'
+                                         ' "due_nudges": [{"side": "sell"}], "due_drops": []}'), ok)
+
+    def fail():
+        check("rc!=0 -> no work", agent_daemon._followup_due({}) == {
+            "nudges": 0, "drops": 0, "enabled": False, "due_nudges": []})
+    with_run(lambda *a, **k: FakeProc(1, "", "boom"), fail)
+
+    def boom(*a, **k):
+        raise agent_daemon.subprocess.SubprocessError("timed out")
+    def exc():
+        check("exception -> no work (no raise)", agent_daemon._followup_due({})["nudges"] == 0)
+    with_run(boom, exc)
+
+
+def test_followup_drops_dry_run_spawns_nothing():
+    print("run_followup_drops(dry_run=True): no subprocess:")
+    def must_not_run(*a, **k):
+        raise AssertionError("dry-run must not spawn a subprocess")
+    with_run(must_not_run, lambda: (agent_daemon.run_followup_drops({}, True),
+                                    check("no subprocess in dry-run", True)))
+
+
+def test_listing_health_due_parses_and_failopen():
+    print("_listing_health_due: returns due_item on rc=0; None otherwise:")
+    def ok():
+        check("returns the due item id", agent_daemon._listing_health_due({}) == "widget")
+    with_run(lambda *a, **k: FakeProc(0, '{"due_item": "widget", "stale_count": 3}'), ok)
+
+    def none():
+        check("no due item -> None", agent_daemon._listing_health_due({}) is None)
+    with_run(lambda *a, **k: FakeProc(0, '{"due_item": null}'), none)
+
+    def fail():
+        check("rc!=0 -> None", agent_daemon._listing_health_due({}) is None)
+    with_run(lambda *a, **k: FakeProc(2, "", "nope"), fail)
+
+
+def test_listing_health_start_dry_run_spawns_nothing():
+    print("run_listing_health_start(dry_run=True): no subprocess:")
+    def must_not_run(*a, **k):
+        raise AssertionError("dry-run must not spawn a subprocess")
+    with_run(must_not_run, lambda: (agent_daemon.run_listing_health_start({}, "widget", True),
+                                    check("no subprocess in dry-run", True)))
+
+
+def test_followup_poll_sec_in_config():
+    print("load_config exposes followup_poll_sec (default 3600):")
+    cfg = agent_daemon.load_config()
+    check("followup_poll_sec present", "followup_poll_sec" in cfg)
+    check("is a positive int", isinstance(cfg["followup_poll_sec"], int) and cfg["followup_poll_sec"] > 0)
 
 
 if __name__ == "__main__":
@@ -191,7 +635,28 @@ if __name__ == "__main__":
     test_buyer_action_decision()
     test_load_config_sweep_floor()
     test_wake_mode_reflects_fda()
+    test_buyer_continuation_action_pure()
+    test_buyer_pass_caphit_triggers_one_continuation()
+    test_buyer_pass_caphit_retry_guard_stops_hot_loop()
+    test_escalate_cap_hit_enqueues_channel_notify()
+    test_escalate_cap_hit_direct_send_in_single_flight()
+    test_peek_thread_from_pure()
     test_peek_cmd_dispatch()
+    test_duplicate_instance_exits_quietly()
+    test_clean_exit_clears_instance_lock_holder()
+    test_duplicate_exit_does_not_clear_live_holders_lock()
+    test_relaunch_self_shells_kickstart()
+    test_relaunch_self_is_best_effort()
+    test_stall_guard_warns_over_budget()
+    test_load_config_eval_judge_nightly()
+    test_run_eval_deterministic_argv()
+    test_run_eval_judge_argv()
+    test_run_eval_dry_run_spawns_nothing()
+    test_followup_due_parses_and_failopen()
+    test_followup_drops_dry_run_spawns_nothing()
+    test_listing_health_due_parses_and_failopen()
+    test_listing_health_start_dry_run_spawns_nothing()
+    test_followup_poll_sec_in_config()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

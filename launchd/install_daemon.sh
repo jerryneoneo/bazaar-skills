@@ -7,7 +7,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LA="$HOME/Library/LaunchAgents"
-PLISTS=(com.bazaarskills.chrome com.bazaarskills.agent)
+# Fix D: the independent watchdog joins the managed set so install/status/uninstall handle it too.
+PLISTS=(com.bazaarskills.chrome com.bazaarskills.agent com.bazaarskills.watchdog)
 
 case "${1:-status}" in
   install)
@@ -32,13 +33,21 @@ case "${1:-status}" in
     DAEMON_PY="${DAEMON_PY:-/usr/bin/python3}"
     echo "daemon interpreter: $DAEMON_PY"
     [ "$DAEMON_PY" = "/usr/bin/python3" ] && echo "  note: no Homebrew python found — Instant mode needs one (brew install python); Standard polling works regardless."
+    UID_NUM="$(id -u)"
     for p in "${PLISTS[@]}"; do
       sed -e "s#__RUNTIME__#$RUNTIME#g" -e "s#__PATH__#$RESOLVED_PATH#g" -e "s#__PYTHON__#$DAEMON_PY#g" "$HERE/$p.plist" > "$LA/$p.plist"
-      launchctl unload "$LA/$p.plist" 2>/dev/null || true
-      launchctl load -w "$LA/$p.plist"
-      echo "loaded $p"
+      # Fix D: if the job is ALREADY loaded, restart it ATOMICALLY with `kickstart -k` (one stop+start)
+      # instead of unload+load — the double-spawn that let a fresh instance collide with the still-live
+      # lock holder (the respawn-storm this fix removes). Only a not-yet-loaded job needs load -w.
+      if launchctl list 2>/dev/null | grep -q "$p"; then
+        launchctl kickstart -k "gui/$UID_NUM/$p"
+        echo "kickstarted $p (already loaded → atomic restart)"
+      else
+        launchctl load -w "$LA/$p.plist"
+        echo "loaded $p"
+      fi
     done
-    echo "Done. Chrome + agent are running and will start at login."
+    echo "Done. Chrome + agent (+ watchdog) are running and will start at login."
     echo "Tail logs: tail -f \"$HERE/../logs/daemon.log\"" ;;
   uninstall)
     for p in "${PLISTS[@]}"; do

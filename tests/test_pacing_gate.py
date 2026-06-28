@@ -300,6 +300,32 @@ def test_hard_ceiling_clamps_cap():
     check("evaluate honors the ceiling cap exactly", gos == pg.HARD_CAP_CEILING)
 
 
+def test_reply_delay_max_clamped_below_grace():
+    print("J2: an unbounded reply_delay_sec max is clamped DOWN to the hard ceiling, and that ceiling"
+          " is strictly below journal_reconcile.GRACE_SEC so a healthy in-flight intent can't outlive"
+          " the fold floor:")
+    import journal_reconcile as jr  # the GRACE_SEC the ceiling must stay below
+    with tempfile.TemporaryDirectory() as d:
+        cfg_path = Path(d) / "config.json"
+        # An operator/tampered config asks for a 1200s reply delay — well above the ceiling.
+        cfg_path.write_text(json.dumps({"reply_delay_sec": [0, 1200],
+                                        "interactive_reply_delay_sec": [0, 1200]}))
+        cfg = pg.load_cfg(cfg_path)
+        check("HARD_DELAY_CEILING_SEC exists",
+              isinstance(pg.HARD_DELAY_CEILING_SEC, (int, float)) and pg.HARD_DELAY_CEILING_SEC > 0)
+        check("reply_delay_sec max clamped to the ceiling",
+              cfg["delay_max"] == float(pg.HARD_DELAY_CEILING_SEC))
+        check("interactive_reply_delay_sec max clamped to the ceiling",
+              cfg["idelay_max"] == float(pg.HARD_DELAY_CEILING_SEC))
+        check("min is preserved (only the max is clamped)", cfg["delay_min"] == 0.0)
+        check("the clamped max is strictly below GRACE_SEC (a healthy intent is never folded)",
+              pg.HARD_DELAY_CEILING_SEC < jr.GRACE_SEC)
+        # A within-ceiling config is left untouched (clamp only ever tightens).
+        cfg_path.write_text(json.dumps({"reply_delay_sec": [10, 200]}))
+        cfg2 = pg.load_cfg(cfg_path)
+        check("a within-ceiling max is left unchanged", cfg2["delay_max"] == 200.0)
+
+
 def test_bad_input_rejected():
     print("input validation:")
     base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py")]
@@ -335,6 +361,7 @@ if __name__ == "__main__":
     test_now_clamp_rejects_time_travel()
     test_cap_below_one_rejected()
     test_hard_ceiling_clamps_cap()
+    test_reply_delay_max_clamped_below_grace()
     test_bad_input_rejected()
     print()
     if _failures:

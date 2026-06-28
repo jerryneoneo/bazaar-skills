@@ -33,10 +33,18 @@
 
   <key>RunAtLoad</key>
   <true/>
+  <!-- Fix D: restart ONLY on a NON-CLEAN exit. A duplicate instance (or a source-change bounce that
+       kickstarts itself) now exits 0 cleanly; KeepAlive=true would respawn it anyway and collide
+       with the lock holder again — the ~2-minute ERROR-storm + respawn churn in logs/daemon.log.
+       SuccessfulExit:false respawns a crash (rc!=0) but leaves a clean exit (rc 0) alone. -->
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- Raised 10 -> 30 so even a crash-loop backs off to once per 30s, not every 10s. -->
   <key>ThrottleInterval</key>
-  <integer>10</integer>
+  <integer>30</integer>
 
   <key>StandardOutPath</key>
   <string>__RUNTIME__/logs/agent.out.log</string>

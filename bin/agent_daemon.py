@@ -22,7 +22,6 @@ Run: agent_daemon.py            (forever, under launchd)
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import logging
 import logging.handlers
@@ -42,9 +41,18 @@ HEARTBEAT = SELLER_DIR / ".daemon.heartbeat"  # wall-clock last-tick so healthch
 CONFIG_PATH = SELLER_DIR / "data" / "config.json"
 SELLER_CONFIG_PATH = SELLER_DIR / "data" / "seller_config.json"
 
+# The launchd LaunchAgent label for this daemon (Fix D: relaunch_self kickstarts it on a code change).
+AGENT_LABEL = "com.bazaarskills.agent"
+# Fix D — per-iteration stall guard. Each main-loop iteration is timed; an iteration that runs longer
+# than this many seconds logs a WARN so a hung iteration is VISIBLE (the ~7-min supervisor stall from a
+# hung worker would have surfaced here). It is purely observability — we never kill the process
+# mid-iteration (run_pass has its own 900s tree-kill deadline; the watchdog handles a wedged loop).
+LOOP_ITER_BUDGET = 120
+
 sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
+import instance_lock  # noqa: E402  PID-aware singleton lock (reclaims a stale lock; no respawn storm)
 import proc_tree  # noqa: E402  kill the whole pass tree on preempt/timeout (shared with supervisor)
 import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
 import notify_db  # noqa: E402  FDA-gated Notification Center reader (startup wake-mode self-check)
@@ -53,6 +61,20 @@ import tab_park  # noqa: E402  keep Meta (notification-path) tabs hidden so thei
 # The runtime dir (beside the agent) or one level up (dev tree) — the harness reads its own secret
 # store under whichever holds it, so the daemon never hardcodes settings.local.json.
 TOKEN_DIRS = [SELLER_DIR, SELLER_DIR.parent]
+
+# Fix C — turn-budget robustness. A buyer pass killed at the hard turn cap returns this DISTINCT exit
+# code (harness_run.run_pass maps "rc!=0 + 'Reached max turns'" to it), so the daemon can tell
+# "capped, more work pending" from a generic failure and run exactly one bounded continuation per
+# cap-hit, up to CONTINUATION_RETRY_CAP times, before ESCALATING (never silently dropping a backlog).
+import harness_run  # noqa: E402  CAP_HIT_SIGNAL single source of truth
+CAP_HIT_SIGNAL = harness_run.CAP_HIT_SIGNAL
+CONTINUATION_RETRY_CAP = 2
+
+# Nightly self-eval subprocess timeouts. The deterministic layer is pure file I/O (fast); the LLM
+# judge runs up to MAX_JUDGE/BATCH_SIZE sonnet batches (see eval_judge.py), so it needs minutes, not
+# seconds — a 120s cap would kill it mid-run.
+EVAL_TIMEOUT_SEC = 120
+EVAL_JUDGE_TIMEOUT_SEC = 900
 
 _stop = False
 
@@ -87,6 +109,42 @@ def _source_fingerprint() -> int:
     return newest
 
 
+def relaunch_self() -> None:
+    """Fix D: best-effort single, atomic restart of THIS LaunchAgent on a source change.
+
+    `launchctl kickstart -k gui/<uid>/<label>` stops the running job and starts it again in ONE step
+    — no unload+load double-spawn, no window where two instances race the lock. Called right before
+    the source-change loop break (in BOTH the single-flight loop and the supervisor), so the bounce
+    onto fresh code is a clean single restart instead of relying on KeepAlive to notice a clean exit.
+
+    FAIL-OPEN: a non-zero rc (e.g. the job isn't loaded under launchd — a dev `--once` run) or any
+    error is logged and swallowed. It must NEVER raise: the loop is exiting anyway, and KeepAlive
+    (SuccessfulExit:false won't fire on this clean exit) plus the watchdog remain the backstops."""
+    try:
+        uid = os.getuid()
+        target = f"gui/{uid}/{AGENT_LABEL}"
+        out = subprocess.run(["launchctl", "kickstart", "-k", target],
+                             capture_output=True, text=True, timeout=15)
+        if out.returncode == 0:
+            logging.info("relaunch_self: kickstarted %s (clean single restart on fresh code)", target)
+        else:
+            logging.info("relaunch_self: kickstart %s rc=%s (not under launchd? leaving exit to "
+                         "KeepAlive/watchdog): %s", target, out.returncode, out.stderr.strip()[:120])
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.info("relaunch_self: kickstart failed (%s) — exiting; KeepAlive/watchdog backstop", exc)
+
+
+def iteration_stall_warning(elapsed: float, budget: float = LOOP_ITER_BUDGET) -> str | None:
+    """PURE (Fix D): the WARN message for a loop iteration that overran `budget` seconds, else None.
+
+    Observability only — a too-slow iteration (a hung subprocess) is made VISIBLE in the log; the
+    loop is NOT killed mid-iteration (that's run_pass's deadline + the watchdog's job). Returns None
+    at or under budget so the common fast iteration is silent."""
+    if elapsed > budget:
+        return f"loop iteration took {elapsed:.0f}s (> {budget:.0f}s budget) — a pass/probe may be wedged"
+    return None
+
+
 def setup_logging() -> None:
     LOG_DIR.mkdir(exist_ok=True)
     # Rotate so an always-on daemon's log can't grow without bound (10MB x 5 = 50MB ceiling).
@@ -118,12 +176,19 @@ def load_config() -> dict:
         "buy_poll_sec": cfg.get("buy_poll_sec", 600),
         "maint_poll_sec": cfg.get("maint_poll_sec", 600),
         "force_buy_pass_every": cfg.get("force_buy_pass_every", 6),
-        # Nightly $0 deterministic self-eval: how often to CHECK whether one is due (the actual
-        # cadence is config.eval_interval_hours, owned by eval_state.py; 0 there disables it).
+        # Nightly self-eval: how often to CHECK whether one is due (the actual cadence is
+        # config.eval_interval_hours, owned by eval_state.py; 0 there disables it).
         "eval_poll_sec": cfg.get("eval_poll_sec", 3600),
+        # Does the nightly run also invoke the billed LLM judge? Default on ("on for everyone");
+        # set false for a $0 nightly (deterministic checks only). The deterministic layer always runs.
+        "eval_judge_nightly": cfg.get("eval_judge_nightly", True),
         # Upstream update check: how often to CHECK for a newer Bazaar (the actual network throttle
         # is config.update_check_interval_hours, owned by update_check.py; 0 there disables it).
         "update_poll_sec": cfg.get("update_poll_sec", 3600),
+        # Stale-chat follow-ups: how often to CHECK whether any thread is due for a nudge or a
+        # not-interested drop (the actual 1d/3d/3d cadence + master toggle live in the followup_*
+        # config keys, owned by followup_state.py). Cheap, file-only probe — idle cost stays ~zero.
+        "followup_poll_sec": cfg.get("followup_poll_sec", 3600),
         # Phase 3: >1 opts into the concurrent supervisor (parallel sell-inbox workers across
         # marketplaces). Default 1 keeps the single-flight loop below — byte-identical behavior.
         # BAZAAR_MAX_WORKERS env overrides the file: an ops kill-switch to force single-flight
@@ -241,17 +306,103 @@ def _eval_due(env: dict) -> bool:
         return False
 
 
-def run_eval(env: dict, dry_run: bool) -> None:
-    """Run the $0 deterministic self-eval (no LLM, no browser, no channel send) and stamp it.
-    Findings land in data/eval/; the daemon only logs a one-line summary. Fail-open."""
+def _followup_due(env: dict) -> dict:
+    """Cheap, non-LLM: are any chats due for a follow-up nudge or a not-interested drop?
+    (followup_state.py). Fail-open to 'no work' on any error (same posture as _eval_due)."""
+    try:
+        out = subprocess.run([sys.executable, str(BIN / "followup_state.py"), "due"],
+                             capture_output=True, text=True, env=env, timeout=15)
+        if out.returncode != 0:
+            return {"nudges": 0, "drops": 0, "enabled": False, "due_nudges": []}
+        data = json.loads(out.stdout)
+        counts = data.get("counts", {})
+        return {"nudges": counts.get("nudges", 0), "drops": counts.get("drops", 0),
+                "enabled": data.get("enabled", False), "due_nudges": data.get("due_nudges", [])}
+    except (subprocess.SubprocessError, ValueError):
+        return {"nudges": 0, "drops": 0, "enabled": False, "due_nudges": []}
+
+
+def run_followup_reconcile(env: dict) -> None:
+    """Prune ledger entries for threads answered/closed since the last scan, so we never nudge a
+    counterpart who just replied. Best-effort + fail-open."""
+    try:
+        subprocess.run([sys.executable, str(BIN / "followup_state.py"), "reconcile"],
+                       capture_output=True, text=True, env=env, timeout=15)
+    except (subprocess.SubprocessError, OSError) as exc:
+        logging.warning("followup reconcile error (non-fatal): %s", exc)
+
+
+def run_followup_drops(env: dict, dry_run: bool) -> None:
+    """Mark every cold chat not_interested and enqueue ONE batched 'went quiet' notice. $0
+    deterministic (no LLM, no browser). Idempotent + fail-open."""
     if dry_run:
-        logging.info("[dry-run] would run deterministic self-eval (eval_run.py run --no-llm)")
+        logging.info("[dry-run] would mark cold chats not interested + notify the user")
         return
     try:
-        out = subprocess.run([sys.executable, str(BIN / "eval_run.py"), "run", "--no-llm"],
-                             capture_output=True, text=True, env=env, cwd=str(SELLER_DIR), timeout=120)
+        out = subprocess.run([sys.executable, str(BIN / "followup_state.py"), "drops"],
+                             capture_output=True, text=True, env=env, timeout=30)
+        if out.returncode == 0:
+            r = json.loads(out.stdout)
+            if r.get("dropped"):
+                logging.info("followup drops: %s marked not interested, %s notified",
+                             r.get("dropped"), r.get("notified"))
+    except (subprocess.SubprocessError, ValueError, OSError) as exc:
+        logging.warning("followup drops error (non-fatal): %s", exc)
+
+
+def _listing_health_session_active() -> bool:
+    """True when a stale-listing suggestion episode is mid-flow (the MAINT pass owns it). Fail-open."""
+    try:
+        return bool(json.loads(
+            (SELLER_DIR / "data" / "listing_health_session.json").read_text()).get("active"))
+    except (OSError, ValueError):
+        return False
+
+
+def _listing_health_due(env: dict):
+    """Cheap, non-LLM: which (if any) stale LIVE listing is due for an improvement-suggestion
+    episode? (listing_health.py). Returns the item_id or None. Fail-open to None."""
+    try:
+        out = subprocess.run([sys.executable, str(BIN / "listing_health.py"), "due"],
+                             capture_output=True, text=True, env=env, timeout=15)
+        if out.returncode != 0:
+            return None
+        return json.loads(out.stdout).get("due_item")
+    except (subprocess.SubprocessError, ValueError):
+        return None
+
+
+def run_listing_health_start(env: dict, item_id: str, dry_run: bool) -> None:
+    """Open a stale-listing episode: write the MAINT session baton + stamp the rate-limit cursor, so
+    the next maint pass composes + sends suggestions for this one item. Best-effort + fail-open."""
+    if dry_run:
+        logging.info("[dry-run] would start stale-listing episode for %s", item_id)
+        return
+    try:
+        subprocess.run([sys.executable, str(BIN / "listing_health.py"), "start", "--item", item_id],
+                       capture_output=True, text=True, env=env, timeout=15)
+    except (subprocess.SubprocessError, OSError) as exc:
+        logging.warning("listing_health start error (non-fatal): %s", exc)
+
+
+def run_eval(env: dict, dry_run: bool, use_judge: bool = False) -> None:
+    """Run the nightly self-eval and stamp it. The deterministic layer always runs ($0, no LLM, no
+    browser, no channel send). When `use_judge` is set (config.eval_judge_nightly), the same run also
+    invokes the billed MCP-less sonnet judge for nuance, so the subprocess gets the larger judge
+    timeout. Findings land in data/eval/; the daemon only logs a one-line summary. Fail-open."""
+    argv = [sys.executable, str(BIN / "eval_run.py"), "run"]
+    if not use_judge:
+        argv.append("--no-llm")  # deterministic-only: never imports eval_judge, makes zero LLM calls
+    timeout = EVAL_JUDGE_TIMEOUT_SEC if use_judge else EVAL_TIMEOUT_SEC
+    label = "deterministic + LLM judge" if use_judge else "deterministic ($0)"
+    if dry_run:
+        logging.info("[dry-run] would run %s self-eval (%s)", label, " ".join(argv[2:]))
+        return
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, env=env,
+                             cwd=str(SELLER_DIR), timeout=timeout)
         summary = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else f"rc={out.returncode}"
-        logging.info("self-eval: %s", summary[:200])
+        logging.info("self-eval (%s): %s", label, summary[:200])
         subprocess.run([sys.executable, str(BIN / "eval_state.py"), "mark"],
                        capture_output=True, text=True, env=env, timeout=15)
     except (subprocess.SubprocessError, OSError) as exc:
@@ -509,21 +660,40 @@ def _touch_heartbeat() -> None:
         logging.debug("heartbeat write failed: %s", exc)
 
 
+def reconcile_orphans(env: dict, dry_run: bool) -> None:
+    """Heal crash orphans (Fix A) before a buyer/buy pass: a reply that landed on the marketplace but
+    was never journaled (the Olaf split-brain). A cheap non-LLM subprocess that NEVER re-sends — it
+    folds the orphan as unconfirmed, advances the cursor so the pass won't auto-resend, and asks the
+    user to verify. Best-effort + fail-open: any error is swallowed so reconcile can never break the
+    pass (the BUYER/BUY prompts also run it as their first step, the primary path)."""
+    if dry_run:
+        return
+    try:
+        subprocess.run([sys.executable, str(BIN / "journal_reconcile.py")],
+                       env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.warning("journal_reconcile error (non-fatal): %s", exc)
+
+
 def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
-             extra_env: dict | None = None) -> None:
+             extra_env: dict | None = None) -> int:
     """Invoke the LLM pass (run_pass.sh seller|buyer) under the single-flight lock.
     For SELLER passes, pulse the native 'typing…' indicator every ~4s while it runs — instant,
     no LLM, covers the claude -p cold start + working time. The assistant authors all actual text.
-    extra_env seeds per-pass hints (e.g. the buyer_peek snippet) into the pass's environment."""
+    extra_env seeds per-pass hints (e.g. the buyer_peek snippet) into the pass's environment.
+
+    Returns the pass exit code (0 on dry-run / a held lock — nothing ran, so nothing to continue).
+    A buyer pass killed at the turn cap returns CAP_HIT_SIGNAL (harness_run maps it), which the buyer
+    call site turns into ONE bounded continuation (Fix C)."""
     pulse = mode in ("seller", "channel")  # the channel pass is the one the user is waiting on
     pass_env = {**env, **(extra_env or {})}
     if dry_run:
         logging.info("[dry-run] would run %s pass (typing pulse=%s, hints=%s)",
                      mode, pulse, list((extra_env or {}).keys()))
-        return
+        return 0
     if RUN_LOCK.exists():
         logging.info("run lock held — skipping %s pass this tick", mode)
-        return
+        return 0
     # Check-then-write is not atomic, but it is never raced: a single daemon instance is guaranteed
     # by INSTANCE_LOCK (fcntl), and run_pass is only ever called sequentially from that one loop.
     RUN_LOCK.write_text(str(os.getpid()))
@@ -574,24 +744,161 @@ def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
                 proc_tree.confirm_dead(proc)
                 break
         logging.info("%s pass done rc=%s", mode, proc.returncode)
+        return proc.returncode
     finally:
         RUN_LOCK.unlink(missing_ok=True)  # safe: every forced break above already confirmed the tree dead
 
 
-def _acquire_instance_lock():
-    """Process-lifetime SINGLETON. Only one agent_daemon may run: the concurrent supervisor's
-    heartbeat-TTL lease liveness assumes a single heartbeater, and a second consumer also fights the
-    Telegram offset. Returns the held fd (keep it referenced for the process lifetime) or None if
-    another instance already holds it. The OS frees the flock automatically on crash/exit."""
-    fd = os.open(str(INSTANCE_LOCK), os.O_WRONLY | os.O_CREAT, 0o600)
+def peek_thread_from(bp: dict) -> str | None:
+    """PURE (C-followup): the conservative single-thread hint derived from a buyer_peek RESULT — the
+    single fresh tracked-sell thread when there is EXACTLY one across all markets, else None (0 → a
+    fresh enquiry or nothing; >1 → ambiguous). Reading the hint from the SAME peek that drove the
+    freshness gate means the SELL memo is advanced ONCE per cycle (buyer_peek.peek already advanced
+    it); a second probe here would see the advanced memo and null the hint. Fail-open to None on any
+    malformed/old-shape peek so a missing hint just yields an unscoped (market-only) pass."""
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
+        markets = (bp or {}).get("markets") or {}
+        threads = [t for info in markets.values() for t in ((info or {}).get("sell_threads") or [])]
+        return threads[0] if len(threads) == 1 else None
+    except Exception:  # noqa: BLE001 — a pure hint derivation must never crash the loop
         return None
-    os.ftruncate(fd, 0)
-    os.write(fd, str(os.getpid()).encode())
-    return fd
+
+
+def buyer_peek_thread(env: dict) -> str | None:
+    """Conservative priority-hint thread for the UNSCOPED single-flight buyer pass: the single fresh
+    tracked-sell thread when there is EXACTLY one across all enumerable markets; otherwise None (0 →
+    a fresh enquiry or nothing; >1 → ambiguous). Under-hinting is deliberate — scoping to one of
+    several threads risks the pass fixating on it and missing the rest; mis-routing is the worst
+    outcome. Fail-open to None: a probe hiccup just yields an unscoped (market-only) pass.
+
+    NOTE: this advances the SELL memo (a fresh inbox_scan.sell_threads_new peek). The POLL path must
+    NOT call this AFTER buyer_peek() already advanced the memo (that double-advance nulls the hint —
+    C-followup); it derives the hint from the peek result via peek_thread_from() instead. This helper
+    remains for the NOTIFICATION path, where no prior SELL _peek ran this cycle."""
+    try:
+        import inbox_scan  # lazy: keeps the daemon import-side-effect-free + avoids any cycle
+        threads = [t for ids in (inbox_scan.sell_threads_new() or {}).values() for t in (ids or [])]
+        return threads[0] if len(threads) == 1 else None
+    except Exception as exc:  # noqa: BLE001 — a hint probe must never crash the loop
+        logging.warning("buyer_peek_thread probe error: %s", exc)
+        return None
+
+
+def buyer_continuation_action(rc: int, attempts: int, retry_cap: int) -> str:
+    """PURE: what to do after a buyer pass exits with code `rc`, given `attempts` continuations so far.
+
+      'continue' — the pass was killed at the turn cap (rc == CAP_HIT_SIGNAL) and the retry budget is
+                   not yet spent → run ONE more bounded continuation.
+      'escalate' — capped, but the retry budget is exhausted → surface it over the channel.
+      'none'     — a clean exit (rc 0) or a GENERIC failure (any other rc) → NOT our loop; do nothing
+                   (a generic failure is handled by the normal idempotent next-pass retry, not here)."""
+    if rc != CAP_HIT_SIGNAL:
+        return "none"
+    return "continue" if attempts < retry_cap else "escalate"
+
+
+def escalate_cap_hit(channel: dict, env: dict, resource: str, dry_run: bool,
+                     *, via_outbox: bool) -> None:
+    """ESCALATE a market that keeps hitting the turn cap, over the control channel. Never silently
+    drop a stranded backlog. Fail-open — an error is logged, not raised.
+
+    Bug D1 — two delivery modes, mirroring check_and_notify_update:
+      • via_outbox=True  → ENQUEUE a `notify` on channel_outbox (the concurrent supervisor's single
+        writer drains it). Used only where a drainer exists.
+      • via_outbox=False → DIRECT-send via telegram.py (adapter-gated). The SINGLE-FLIGHT loop has no
+        outbox drainer, so an enqueue there would be written and NEVER sent — the escalation must
+        direct-send instead (exactly the via_outbox=False branch the update notice uses)."""
+    text = (f"⚠️ buyer:{resource} keeps hitting the turn cap after {CONTINUATION_RETRY_CAP} "
+            f"continuations; its backlog may be stranded. Open {resource} and check for unread "
+            f"buyer messages.")
+    if dry_run:
+        logging.info("[dry-run] would escalate cap-hit for %s (via_outbox=%s)", resource, via_outbox)
+        return
+    if via_outbox:
+        try:
+            # In-process enqueue — channel_outbox.data_dir() reads BAZAAR_DATA_DIR, so it lands in the
+            # same outbox the supervisor's _drain_outbox flushes.
+            import channel_outbox
+            from datetime import datetime, timezone
+            path = channel_outbox.data_dir() / "channel_outbox.jsonl"
+            channel_outbox.run_enqueue("notify", text, datetime.now(timezone.utc), path,
+                                       source="cap-hit")
+            logging.warning("buyer:%s exhausted continuation budget → escalation queued", resource)
+        except (OSError, ValueError) as exc:
+            logging.error("cap-hit escalation enqueue failed for %s: %s", resource, exc)
+        return
+    # DIRECT send (single-flight). Adapter-gated exactly like the notify/update path: only telegram
+    # has one-shot send wired here; other adapters surface it via their own pass, not here.
+    if channel.get("adapter") != "telegram":
+        logging.info("cap-hit for %s but adapter=%s direct send not wired; skipping",
+                     resource, channel.get("adapter"))
+        return
+    try:
+        subprocess.run([sys.executable, str(BIN / "telegram.py"), "send", "--text", text,
+                        "--kind", "notify"], capture_output=True, text=True, env=env, timeout=20)
+        logging.warning("buyer:%s exhausted continuation budget → escalated over channel (direct)",
+                        resource)
+    except subprocess.SubprocessError as exc:
+        logging.error("cap-hit escalation direct send failed for %s: %s", resource, exc)
+
+
+def run_buyer_with_continuation(resource: str, channel: dict, env: dict, dry_run: bool,
+                                extra_env: dict | None = None, peek_thread: str | None = None) -> int:
+    """Run a buyer pass, and if it was killed at the turn cap, run exactly ONE bounded continuation
+    per cap-hit (up to CONTINUATION_RETRY_CAP) before ESCALATING. The retry guard makes this loop
+    finite — a perpetually-capping market escalates ONCE and stops, never hot-loops. Each continuation
+    re-runs `buyer` for the same `resource`; the priority-hint thread (peek_thread) rides along if set.
+
+    `resource` "" means an unscoped buyer pass (single-flight default) — the continuation re-runs
+    unscoped too. Returns the LAST pass's exit code."""
+    base_env = dict(extra_env or {})
+    if peek_thread:
+        base_env["BAZAAR_BUYER_PEEK_THREAD"] = peek_thread
+    attempts = 0
+    rc = run_pass("buyer", channel, env, dry_run, extra_env={**base_env, "BAZAAR_RESOURCE": resource}
+                  if resource else base_env)
+    while True:
+        action = buyer_continuation_action(rc, attempts, CONTINUATION_RETRY_CAP)
+        if action == "escalate":
+            # Bug D1: single-flight has no outbox drainer → DIRECT-send (via_outbox=False), mirroring
+            # the update-notice path. An enqueue here would never be delivered.
+            escalate_cap_hit(channel, env, resource or "buyer", dry_run, via_outbox=False)
+            return rc
+        if action != "continue":
+            return rc
+        attempts += 1
+        logging.info("buyer pass hit the turn cap → bounded continuation #%s (%s)",
+                     attempts, resource or "all markets")
+        reconcile_orphans(env, dry_run)  # heal any crash orphan before re-touring (best-effort, no resend)
+        rc = run_pass("buyer", channel, env, dry_run,
+                      extra_env={**base_env, "BAZAAR_RESOURCE": resource} if resource else base_env)
+
+
+def _acquire_instance_lock() -> dict:
+    """Process-lifetime SINGLETON (Fix D: thin wrapper over instance_lock.acquire).
+
+    Only one agent_daemon may run: the concurrent supervisor's heartbeat-TTL lease liveness assumes a
+    single heartbeater, and a second consumer also fights the Telegram offset. Returns the full
+    instance_lock.acquire dict — {acquired, holder_pid, holder_alive, reclaimed, fd}. The caller keeps
+    res["fd"] referenced for the process lifetime (the OS frees the flock on crash/exit). A lock left
+    by a DEAD pid is RECLAIMED, not refused (no respawn storm); a LIVE duplicate is refused with
+    truthful holder info so main() can log INFO + exit 0."""
+    return instance_lock.acquire(INSTANCE_LOCK, HEARTBEAT)
+
+
+def _clear_instance_lock() -> None:
+    """Bug D3: on a CLEAN shutdown, clear the instance-lock body so the watchdog can't be fooled.
+
+    The watchdog reads the lock-body PID to decide liveness. After a clean exit (which KeepAlive
+    won't restart) the body still names our now-dead PID; if the OS recycles that PID to an unrelated
+    live process, the watchdog thinks the daemon is alive and never restarts it (a silent stay-down).
+    instance_lock.clear_holder empties the body ONLY if WE are the recorded holder, so the watchdog
+    then sees no holder (correctly treated as not-alive → restart). Best-effort + fail-open — a
+    failure to clear must never turn a clean shutdown into an error."""
+    try:
+        instance_lock.clear_holder(INSTANCE_LOCK)
+    except Exception as exc:  # noqa: BLE001 — clearing is non-critical; never break a clean exit
+        logging.debug("instance-lock clear on exit failed: %s", exc)
 
 
 def main(argv) -> int:
@@ -604,197 +911,271 @@ def main(argv) -> int:
     setup_logging()
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
-    _instance_lock = _acquire_instance_lock()  # noqa: F841 — held for the process lifetime
-    if _instance_lock is None:
-        logging.error("another agent_daemon is already running (instance lock held) — exiting")
-        return 3
+    _lock = _acquire_instance_lock()
+    if not _lock["acquired"]:
+        # A LIVE duplicate already holds the lock. Log INFO (not ERROR) + exit 0 (a CLEAN exit) so
+        # KeepAlive={SuccessfulExit:false} does NOT respawn us — this is what stops the ~2-minute
+        # ERROR storm in logs/daemon.log where colliding respawns spammed ERROR + exited rc=3.
+        logging.info("agent_daemon already running (pid=%s, alive=%s) — exiting",
+                     _lock["holder_pid"], _lock["holder_alive"])
+        return 0
+    _instance_lock = _lock["fd"]  # noqa: F841 — held for the process lifetime (OS frees on exit)
+    if _lock["reclaimed"]:
+        logging.info("reclaimed a stale instance lock (previous holder pid was dead) — starting fresh")
     RUN_LOCK.unlink(missing_ok=True)  # clear any stale lock from a hard crash
 
-    cfg = load_config()
-    channel = load_channel()
-    env = ensure_token(dict(os.environ))
-    peek_timeout = ns.peek_timeout if ns.peek_timeout is not None else cfg["peek_timeout"]
-    if channel["adapter"] == "telegram" and not env.get("TELEGRAM_BOT_TOKEN"):
-        logging.error("TELEGRAM_BOT_TOKEN not found (env or settings.local.json) — exiting")
-        return 3
-    if channel["adapter"] == "console":
-        logging.error("channel.adapter=console has no daemon — use the interactive /sell session")
-        return 3
+    # Bug D3: once WE hold the lock, guarantee a clean-exit clear of the lock body so a recycled
+    # PID can never fool the watchdog into a silent stay-down. The finally covers every exit path
+    # below (the rc=3 early returns, the supervisor handoff, and the loop's own clean exit).
+    try:
+        cfg = load_config()
+        channel = load_channel()
+        env = ensure_token(dict(os.environ))
+        peek_timeout = ns.peek_timeout if ns.peek_timeout is not None else cfg["peek_timeout"]
+        if channel["adapter"] == "telegram" and not env.get("TELEGRAM_BOT_TOKEN"):
+            logging.error("TELEGRAM_BOT_TOKEN not found (env or settings.local.json) — exiting")
+            return 3
+        if channel["adapter"] == "console":
+            logging.error("channel.adapter=console has no daemon — use the interactive /sell session")
+            return 3
 
-    # Phase 3 (opt-in): with max_concurrent_workers > 1, hand off to the concurrent supervisor
-    # (parallel sell-inbox workers across marketplaces). Default (1) falls through to the proven
-    # single-flight loop below — completely unchanged.
-    if cfg.get("max_concurrent_workers", 1) > 1:
-        import supervisor  # lazy: avoids an import cycle (supervisor imports this module)
-        return supervisor.run(cfg, channel, env, ns, cfg["max_concurrent_workers"], peek_timeout)
+        # Phase 3 (opt-in): with max_concurrent_workers > 1, hand off to the concurrent supervisor
+        # (parallel sell-inbox workers across marketplaces). Default (1) falls through to the proven
+        # single-flight loop below — completely unchanged.
+        if cfg.get("max_concurrent_workers", 1) > 1:
+            import supervisor  # lazy: avoids an import cycle (supervisor imports this module)
+            return supervisor.run(cfg, channel, env, ns, cfg["max_concurrent_workers"], peek_timeout)
 
-    logging.info("daemon up · adapter=%s · buyer_poll=%ss · buy_poll=%ss · maint_poll=%ss · "
-                 "peek_timeout=%ss · dry_run=%s · paused=%s", channel["adapter"], cfg["buyer_poll_sec"],
-                 cfg["buy_poll_sec"], cfg["maint_poll_sec"], peek_timeout, ns.dry_run,
-                 control.is_paused())  # a file-based pause survives a daemon restart
-    _log_wake_mode()  # explicit Instant/Standard banner so the operator knows if the FDA grant took
-    if channel["adapter"] == "telegram":
-        _register_bot_commands(env)  # populate the "/" autocomplete menu (idempotent, non-fatal)
-    last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
-    last_buyer_pass = time.monotonic()                     # when an actual buyer PASS last ran (time floor)
-    last_buy = time.monotonic() - cfg["buy_poll_sec"]      # and a buy pass
-    last_maint = time.monotonic() - cfg["maint_poll_sec"]  # and a maintenance pass
-    last_eval = time.monotonic()                           # self-eval check throttle (not immediate)
-    last_update = time.monotonic()                          # upstream update-check throttle (not immediate)
-    empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
-    empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
-    _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
-    src_fp = _source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
-    while not _stop:
-        # A code change to the daemon's own sources only takes effect on restart (no hot-reload), so
-        # bounce here at a between-pass boundary (no pass runs at loop top — run_pass is synchronous).
-        if _source_fingerprint() != src_fp:
-            logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
-            break
-        _touch_heartbeat()  # one tick per loop iteration; healthcheck WARNs if this goes stale
-        # Read the pause flag ONCE per iteration. While paused, the daemon still peeks the channel
-        # (so /resume and corrections get received) but takes NO marketplace action: the channel
-        # path runs the deterministic, no-LLM drain instead of a seller pass, and the three
-        # background gates are skipped. A file-based flag → any interface can set it.
-        paused = control.is_paused()
-        if paused != _was_paused:
-            if paused:
-                logging.info("daemon PAUSED — channel peek continues; action passes held until /resume")
-            else:
-                logging.info("daemon RESUMED — %s correction(s) queued for the next pass",
-                             len(control.pending_corrections()))
-            _was_paused = paused
-        # Keep notification-path (Meta) tabs hidden during the inter-pass wait so their OS push
-        # keeps firing — a focused Meta tab delivers in-app and suppresses the readable push. The
-        # warm Chrome is a dedicated instance, so this never touches the user's own browser.
-        if not paused:
-            tab_park.park()
-        peek = channel_peek(channel, env, peek_timeout)
-        if peek["pending"]:
-            _send_typing(channel, env)                                  # instant native 'typing…'
-            if paused:
-                # Deterministic, ~$0: consume /resume + capture corrections + ack. No claude -p,
-                # no browser. Leaving the offset un-advanced would deadlock /resume, so we MUST drain.
-                logging.info("paused: %s pending → deterministic control drain (no LLM)", peek["pending"])
-                if not ns.dry_run:
-                    subprocess.run([sys.executable, str(BIN / "channel_control.py"), "drain"],
-                                   env=env, capture_output=True, timeout=60)
-            else:
-                mid_listing = _listing_active()  # skip the redundant intent line during a listing wizard
-                logging.info("%s: %s pending → typing%s + seller pass",
-                             channel["adapter"], peek["pending"],
-                             "" if mid_listing else " + intent")
-                if not mid_listing:
-                    send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)  # ~6s (TG only)
-                run_pass("seller", channel, env, ns.dry_run)            # full pass: work + report
-        # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): a market whose path
-        # resolves to "notification" (e.g. FB web push) wakes the agent the moment its OS
-        # notification lands, instead of waiting for the buyer poll. Poll-path markets (e.g.
-        # Carousell) are untouched and fall through to the buyer gate below. Idempotent: notify_watch
-        # advances its per-market cursor, and the per-thread cursors dedupe within the pass.
-        if not paused:
-            nt = notify_trigger(env)
-            if nt.get("pending"):
-                logging.info("notification trigger → buyer pass: %s", nt.get("latest_text", "")[:70])
-                run_pass("buyer", channel, env, ns.dry_run, extra_env={
-                    "BAZAAR_BUYER_PEEK_TEXT": nt.get("latest_text", "")})
-                # Deliberately do NOT touch last_buyer / last_buyer_pass here. Those drive the
-                # AGGREGATE poll gate + strand-floor for ALL markets; resetting them on a per-market
-                # notification (FB) would starve the poll path that backstops the OTHER markets
-                # (Carousell) and any FB message a notification misses. The poll runs independently
-                # on its own cadence and remains the fallback. (notify_watch's own cursor dedupes.)
-        if not paused and time.monotonic() - last_buyer >= cfg["buyer_poll_sec"]:
-            # GATE the expensive buyer pass behind a cheap, non-LLM unread probe. Only spend a
-            # full LLM browser pass when a buyer actually wrote — or, as a safety net, every Nth
-            # empty peek so a flaky unread signal can't strand a buyer.
-            bp = buyer_peek(env)
-            floor_sec = cfg["force_buyer_sweep_hours"] * 3600
-            forced, force_reason = buyer_force_due(
-                empty_peeks, cfg["force_buyer_pass_every"],
-                time.monotonic() - last_buyer_pass, floor_sec)
-            floor_due = floor_sec > 0 and (time.monotonic() - last_buyer_pass) >= floor_sec
-            # Spend the ~0-token recheck ONLY on a count-net force (not on a real peek hit, where we
-            # already know there is mail, nor on a floor force, which deliberately fires an actual
-            # pass as the strand backstop). This is what turns the old forced empty LLM sweep free.
-            recheck_unhandled, recheck_text = None, ""
-            if forced and not floor_due and not bp.get("pending"):
-                rc = buyer_recheck(env)
-                recheck_unhandled, recheck_text = rc.get("unhandled", 0), rc.get("latest_text", "")
-            action = buyer_action(bp.get("pending", 0), forced, floor_due, recheck_unhandled)
-            if action == "pass":
-                hint = bp.get("latest_text", "") or recheck_text
-                reason = (f"{bp['pending']} new" if bp.get("pending")
-                          else force_reason if floor_due
-                          else f"recheck: {recheck_unhandled} unhandled")
-                logging.info("buyer pass → %s", reason)
-                run_pass("buyer", channel, env, ns.dry_run, extra_env={
-                    "BAZAAR_BUYER_PEEK_TEXT": hint,
-                    "BAZAAR_BUYER_PEEK_FORCED": "1" if not bp.get("pending") else "",
-                })
-                last_buyer_pass = time.monotonic()
-            elif action == "skip":
-                logging.info("buyer recheck: all inboxes clear → skip forced pass (~0 tokens)")
-            else:  # idle
-                empty_peeks += 1
-                logging.info("buyer peek: nothing new (%s consecutive) → skip pass", empty_peeks)
-            if action != "idle":
-                empty_peeks = 0
-            last_buyer = time.monotonic()
+        logging.info("daemon up · adapter=%s · buyer_poll=%ss · buy_poll=%ss · maint_poll=%ss · "
+                     "peek_timeout=%ss · dry_run=%s · paused=%s", channel["adapter"], cfg["buyer_poll_sec"],
+                     cfg["buy_poll_sec"], cfg["maint_poll_sec"], peek_timeout, ns.dry_run,
+                     control.is_paused())  # a file-based pause survives a daemon restart
+        _log_wake_mode()  # explicit Instant/Standard banner so the operator knows if the FDA grant took
+        # Bug C6: sweep per-pass logs leaked by forced kills (the pause/seller-message force-break, the
+        # 900s deadline — all skip run_pass's finally in the pass tree). Startup glob-and-unlink backstop.
+        _swept = harness_run.sweep_stale_pass_logs()
+        if _swept:
+            logging.info("swept %s stale per-pass log(s) leaked by forced kills", len(_swept))
+        if channel["adapter"] == "telegram":
+            _register_bot_commands(env)  # populate the "/" autocomplete menu (idempotent, non-fatal)
+        last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
+        last_buyer_pass = time.monotonic()                     # when an actual buyer PASS last ran (time floor)
+        last_buy = time.monotonic() - cfg["buy_poll_sec"]      # and a buy pass
+        last_maint = time.monotonic() - cfg["maint_poll_sec"]  # and a maintenance pass
+        last_eval = time.monotonic()                           # self-eval check throttle (not immediate)
+        last_update = time.monotonic()                          # upstream update-check throttle (not immediate)
+        last_followup = time.monotonic()                        # stale-chat follow-up check throttle (not immediate)
+        empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
+        empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
+        _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
+        src_fp = _source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
+        while not _stop:
+            iter_start = time.monotonic()  # Fix D: time each iteration so a wedged one is VISIBLE (WARN)
+            # A code change to the daemon's own sources only takes effect on restart (no hot-reload), so
+            # bounce here at a between-pass boundary (no pass runs at loop top — run_pass is synchronous).
+            if _source_fingerprint() != src_fp:
+                logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
+                relaunch_self()  # clean single atomic restart on fresh code (no unload+load double-spawn)
+                break
+            _touch_heartbeat()  # one tick per loop iteration; healthcheck WARNs if this goes stale
+            # Read the pause flag ONCE per iteration. While paused, the daemon still peeks the channel
+            # (so /resume and corrections get received) but takes NO marketplace action: the channel
+            # path runs the deterministic, no-LLM drain instead of a seller pass, and the three
+            # background gates are skipped. A file-based flag → any interface can set it.
+            paused = control.is_paused()
+            if paused != _was_paused:
+                if paused:
+                    logging.info("daemon PAUSED — channel peek continues; action passes held until /resume")
+                else:
+                    logging.info("daemon RESUMED — %s correction(s) queued for the next pass",
+                                 len(control.pending_corrections()))
+                _was_paused = paused
+            # Keep notification-path (Meta) tabs hidden during the inter-pass wait so their OS push
+            # keeps firing — a focused Meta tab delivers in-app and suppresses the readable push. The
+            # warm Chrome is a dedicated instance, so this never touches the user's own browser.
+            if not paused:
+                tab_park.park()
+            peek = channel_peek(channel, env, peek_timeout)
+            if peek["pending"]:
+                _send_typing(channel, env)                                  # instant native 'typing…'
+                if paused:
+                    # Deterministic, ~$0: consume /resume + capture corrections + ack. No claude -p,
+                    # no browser. Leaving the offset un-advanced would deadlock /resume, so we MUST drain.
+                    logging.info("paused: %s pending → deterministic control drain (no LLM)", peek["pending"])
+                    if not ns.dry_run:
+                        subprocess.run([sys.executable, str(BIN / "channel_control.py"), "drain"],
+                                       env=env, capture_output=True, timeout=60)
+                else:
+                    mid_listing = _listing_active()  # skip the redundant intent line during a listing wizard
+                    logging.info("%s: %s pending → typing%s + seller pass",
+                                 channel["adapter"], peek["pending"],
+                                 "" if mid_listing else " + intent")
+                    if not mid_listing:
+                        send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)  # ~6s (TG only)
+                    run_pass("seller", channel, env, ns.dry_run)            # full pass: work + report
+            # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): a market whose path
+            # resolves to "notification" (e.g. FB web push) wakes the agent the moment its OS
+            # notification lands, instead of waiting for the buyer poll. Poll-path markets (e.g.
+            # Carousell) are untouched and fall through to the buyer gate below. Idempotent: notify_watch
+            # advances its per-market cursor, and the per-thread cursors dedupe within the pass.
+            if not paused:
+                nt = notify_trigger(env)
+                if nt.get("pending"):
+                    logging.info("notification trigger → buyer pass: %s", nt.get("latest_text", "")[:70])
+                    reconcile_orphans(env, ns.dry_run)  # heal crash orphans first (best-effort, no resend)
+                    run_buyer_with_continuation(
+                        "", channel, env, ns.dry_run,
+                        extra_env={"BAZAAR_BUYER_PEEK_TEXT": nt.get("latest_text", "")},
+                        peek_thread=buyer_peek_thread(env))
+                    # Deliberately do NOT touch last_buyer / last_buyer_pass here. Those drive the
+                    # AGGREGATE poll gate + strand-floor for ALL markets; resetting them on a per-market
+                    # notification (FB) would starve the poll path that backstops the OTHER markets
+                    # (Carousell) and any FB message a notification misses. The poll runs independently
+                    # on its own cadence and remains the fallback. (notify_watch's own cursor dedupes.)
+            if not paused and time.monotonic() - last_buyer >= cfg["buyer_poll_sec"]:
+                # GATE the expensive buyer pass behind a cheap, non-LLM unread probe. Only spend a
+                # full LLM browser pass when a buyer actually wrote — or, as a safety net, every Nth
+                # empty peek so a flaky unread signal can't strand a buyer.
+                bp = buyer_peek(env)
+                floor_sec = cfg["force_buyer_sweep_hours"] * 3600
+                forced, force_reason = buyer_force_due(
+                    empty_peeks, cfg["force_buyer_pass_every"],
+                    time.monotonic() - last_buyer_pass, floor_sec)
+                floor_due = floor_sec > 0 and (time.monotonic() - last_buyer_pass) >= floor_sec
+                # Spend the ~0-token recheck ONLY on a count-net force (not on a real peek hit, where we
+                # already know there is mail, nor on a floor force, which deliberately fires an actual
+                # pass as the strand backstop). This is what turns the old forced empty LLM sweep free.
+                recheck_unhandled, recheck_text = None, ""
+                if forced and not floor_due and not bp.get("pending"):
+                    rc = buyer_recheck(env)
+                    recheck_unhandled, recheck_text = rc.get("unhandled", 0), rc.get("latest_text", "")
+                action = buyer_action(bp.get("pending", 0), forced, floor_due, recheck_unhandled)
+                if action == "pass":
+                    hint = bp.get("latest_text", "") or recheck_text
+                    reason = (f"{bp['pending']} new" if bp.get("pending")
+                              else force_reason if floor_due
+                              else f"recheck: {recheck_unhandled} unhandled")
+                    logging.info("buyer pass → %s", reason)
+                    reconcile_orphans(env, ns.dry_run)  # heal crash orphans first (best-effort, no resend)
+                    # C-followup: derive the peek-thread hint from THIS peek's result (bp already advanced
+                    # the SELL memo). Calling buyer_peek_thread(env) here would advance it a SECOND time
+                    # and the now-stale memo would null the hint. A forced/recheck sweep carries no precise
+                    # sell_threads, so peek_thread_from falls back to None (unscoped) — today's behavior.
+                    run_buyer_with_continuation(
+                        "", channel, env, ns.dry_run,
+                        extra_env={
+                            "BAZAAR_BUYER_PEEK_TEXT": hint,
+                            "BAZAAR_BUYER_PEEK_FORCED": "1" if not bp.get("pending") else "",
+                        },
+                        peek_thread=peek_thread_from(bp))
+                    last_buyer_pass = time.monotonic()
+                elif action == "skip":
+                    logging.info("buyer recheck: all inboxes clear → skip forced pass (~0 tokens)")
+                else:  # idle
+                    empty_peeks += 1
+                    logging.info("buyer peek: nothing new (%s consecutive) → skip pass", empty_peeks)
+                if action != "idle":
+                    empty_peeks = 0
+                last_buyer = time.monotonic()
 
-        # MAINTENANCE (§2b detect): drain an active distribution/inbox-takeover batch one step per
-        # pass, or start a cadence-due my-listings SCAN and/or inbox SWEEP. Gated by cheap non-LLM
-        # probes so the LLM only runs when there's work (never interrupts an active listing wizard).
-        if not paused and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
-            dist_active = _distribution_active()
-            idet_active = _inbox_detect_active()
-            if dist_active or idet_active or _scan_due(env) or _inbox_sweep_due(env):
-                reason = ("drain distribution batch" if dist_active else
-                          "drain inbox-takeover batch" if idet_active else "detect due")
-                logging.info("maint pass → %s", reason)
-                run_pass("maint", channel, env, ns.dry_run)
-            last_maint = time.monotonic()
+            # MAINTENANCE (§2b detect): drain an active distribution/inbox-takeover batch one step per
+            # pass, or start a cadence-due my-listings SCAN and/or inbox SWEEP. Gated by cheap non-LLM
+            # probes so the LLM only runs when there's work (never interrupts an active listing wizard).
+            if not paused and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
+                dist_active = _distribution_active()
+                idet_active = _inbox_detect_active()
+                lh_active = _listing_health_session_active()
+                scan_due = _scan_due(env)
+                sweep_due = _inbox_sweep_due(env)
+                # Stale-listing suggestions are the LOWEST-priority maint step: only start a new episode
+                # when no higher-priority detect/drain work is pending, so it never preempts a live wizard
+                # or an in-flight batch (one item per pass; rate-limited by listing_health_interval_hours).
+                if not (dist_active or idet_active or lh_active or scan_due or sweep_due):
+                    lh_due_item = _listing_health_due(env)
+                    if lh_due_item:
+                        run_listing_health_start(env, lh_due_item, ns.dry_run)
+                        lh_active = not ns.dry_run  # dry-run writes no session, so it stays inactive
+                if dist_active or idet_active or lh_active or scan_due or sweep_due:
+                    reason = ("drain distribution batch" if dist_active else
+                              "drain inbox-takeover batch" if idet_active else
+                              "suggest stale-listing fixes" if lh_active else "detect due")
+                    logging.info("maint pass → %s", reason)
+                    run_pass("maint", channel, env, ns.dry_run)
+                last_maint = time.monotonic()
 
-        # BUY SIDE (§3): pursue active wants — search/shortlist a `searching` want, or liaise a
-        # `liaising`/`agreed` one. Gated by buy_peek (file-state only), with a periodic safety net.
-        if not paused and time.monotonic() - last_buy >= cfg["buy_poll_sec"]:
-            bpk = buy_peek(env)
-            force_buy = cfg["force_buy_pass_every"]
-            forced_buy = bool(force_buy) and empty_buys >= force_buy
-            if bpk.get("pending") or forced_buy:
-                reason = bpk.get("latest_text") or f"safety-net after {empty_buys} empty peeks"
-                logging.info("buy pass → %s", reason)
-                run_pass("buy", channel, env, ns.dry_run, extra_env={
-                    "BAZAAR_BUY_PEEK_WANT": bpk.get("want_id") or "",
-                    "BAZAAR_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
-                })
-                empty_buys = 0
-            else:
-                empty_buys += 1
-                logging.info("buy peek: nothing actionable (%s consecutive) → skip pass", empty_buys)
-            last_buy = time.monotonic()
+            # BUY SIDE (§3): pursue active wants — search/shortlist a `searching` want, or liaise a
+            # `liaising`/`agreed` one. Gated by buy_peek (file-state only), with a periodic safety net.
+            if not paused and time.monotonic() - last_buy >= cfg["buy_poll_sec"]:
+                bpk = buy_peek(env)
+                force_buy = cfg["force_buy_pass_every"]
+                forced_buy = bool(force_buy) and empty_buys >= force_buy
+                if bpk.get("pending") or forced_buy:
+                    reason = bpk.get("latest_text") or f"safety-net after {empty_buys} empty peeks"
+                    logging.info("buy pass → %s", reason)
+                    reconcile_orphans(env, ns.dry_run)  # heal crash orphans first (best-effort, no resend)
+                    run_pass("buy", channel, env, ns.dry_run, extra_env={
+                        "BAZAAR_BUY_PEEK_WANT": bpk.get("want_id") or "",
+                        "BAZAAR_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
+                    })
+                    empty_buys = 0
+                else:
+                    empty_buys += 1
+                    logging.info("buy peek: nothing actionable (%s consecutive) → skip pass", empty_buys)
+                last_buy = time.monotonic()
 
-        # NIGHTLY SELF-EVAL (deterministic, $0): on a slow throttle, check the cadence gate and run
-        # the no-LLM eval if due. Pure file reads/writes — no LLM, no browser, no channel send — so
-        # it honors the daemon's "idle cost ≈ zero" contract. The LLM judge stays manual. Gated on
-        # `not paused` too so /pause means a literal full stop (no work of any kind until /resume).
-        if not paused and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
-            if _eval_due(env):
-                logging.info("self-eval due → running deterministic checks")
-                run_eval(env, ns.dry_run)
-            last_eval = time.monotonic()
+            # STALE-CHAT FOLLOW-UPS: nudge counterparts who went quiet, then mark them not interested.
+            # Detection is a cheap non-LLM probe; a DROP is $0 deterministic (mark + ONE channel notice);
+            # a NUDGE reuses the buyer/buy pass via BAZAAR_FOLLOWUP=1 (same compose+send+journal bracket).
+            # Reconcile first so a counterpart who just replied is dropped before we decide.
+            if not paused and time.monotonic() - last_followup >= cfg["followup_poll_sec"]:
+                run_followup_reconcile(env)
+                fu = _followup_due(env)
+                if fu.get("drops"):
+                    run_followup_drops(env, ns.dry_run)
+                if fu.get("nudges"):
+                    sides = {d.get("side") for d in fu.get("due_nudges", [])}
+                    reconcile_orphans(env, ns.dry_run)  # heal crash orphans before any send
+                    if "sell" in sides:
+                        logging.info("followup nudges due (sell) → buyer pass")
+                        run_pass("buyer", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                    if "buy" in sides:
+                        logging.info("followup nudges due (buy) → buy pass")
+                        run_pass("buy", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                last_followup = time.monotonic()
 
-        # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up over the channel if a newer Bazaar
-        # is available. Single-flight loop sends directly (no outbox drain here). Never auto-applies.
-        if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
-            check_and_notify_update(channel, env, ns.dry_run, via_outbox=False)
-            last_update = time.monotonic()
+            # NIGHTLY SELF-EVAL: on a slow throttle, check the cadence gate and run the eval if due. The
+            # deterministic layer is always $0 (pure file reads/writes, no browser, no channel send); when
+            # config.eval_judge_nightly is set (default on) the same run also fires the billed LLM judge.
+            # Gated on `not paused` too so /pause means a literal full stop (no work of any kind).
+            if not paused and time.monotonic() - last_eval >= cfg["eval_poll_sec"]:
+                if _eval_due(env):
+                    use_judge = cfg.get("eval_judge_nightly", True)
+                    logging.info("self-eval due → running %s",
+                                 "deterministic + LLM judge" if use_judge else "deterministic checks")
+                    run_eval(env, ns.dry_run, use_judge)
+                last_eval = time.monotonic()
 
-        if ns.once:
-            break
-        time.sleep(1)  # peek already long-polled; brief yield
-    logging.info("daemon stopping (clean)")
-    RUN_LOCK.unlink(missing_ok=True)
-    return 0
+            # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up over the channel if a newer Bazaar
+            # is available. Single-flight loop sends directly (no outbox drain here). Never auto-applies.
+            if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
+                check_and_notify_update(channel, env, ns.dry_run, via_outbox=False)
+                last_update = time.monotonic()
+
+            # Fix D — per-iteration stall guard (observability): a hung subprocess that froze the loop
+            # for minutes (the incident's ~7-min stall) is surfaced as a WARN. Not a kill: run_pass owns
+            # the 900s tree-kill, and the watchdog restarts a truly wedged loop via the stale heartbeat.
+            stall = iteration_stall_warning(time.monotonic() - iter_start)
+            if stall:
+                logging.warning(stall)
+
+            if ns.once:
+                break
+            time.sleep(1)  # peek already long-polled; brief yield
+        logging.info("daemon stopping (clean)")
+        RUN_LOCK.unlink(missing_ok=True)
+        return 0
+    finally:
+        _clear_instance_lock()
 
 
 if __name__ == "__main__":

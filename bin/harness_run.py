@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # noqa: E402  crash-safe (tmp + os.replace) write for the cap-hit breadcrumb
 from harnesses import UnknownHarness, get_harness  # noqa: E402
 from harnesses.base import PassSpec  # noqa: E402
 
@@ -39,6 +42,35 @@ except ImportError:
 
 SELLER_DIR = Path(__file__).resolve().parent.parent
 LOG = SELLER_DIR / "logs" / "pass.log"
+
+# Fix C — turn-budget robustness.
+# The buyer pass cap is a two-tier design: a SOFT budget the prompt self-governs against (stop
+# opening new threads near it) and a HARD backstop the harness enforces ABOVE it. Raising the cap
+# ALONE failed ~82% (eval): the pass just toured more inboxes. The soft budget is the real fix; the
+# raised backstop only gives a clean stop more headroom before the kill.
+BUYER_SOFT_TURNS_DEFAULT = 30      # $BAZAAR_BUYER_SOFT_TURNS — the self-governed soft budget
+BUYER_BACKSTOP_TURNS = 50          # the hard --max-turns the harness passes (was 40)
+# When a pass is killed at the hard cap (rc!=0 AND the marker below in its log tail), run_pass returns
+# this DISTINCT code so callers can tell "capped, more work pending" from a generic failure (rc=1).
+CAP_HIT_SIGNAL = 42
+# Match the kill marker the harness writes to the log; keep this in lock-step with eval_checks'
+# MAX_TURNS_RE so a CLI-wording drift is a single-place fix.
+MAX_TURNS_MARKER = re.compile(r"reached max turns", re.IGNORECASE)
+# How much of THIS pass's per-pass output file to scan for the kill marker (C1/C5). The marker is
+# always at the tail (it is the last thing the harness writes before exiting), so we read only the
+# final window rather than loading a runaway pass's whole transcript into memory. Used by _read_tail.
+LOG_TAIL_BYTES = 8192
+
+# Bug C6 — stale per-pass-log sweep. run_pass writes the claude subprocess output to a per-pass file
+# (logs/pass-<mode>-<resource>-<pid>.log) and unlinks it in its `finally`. But a FORCED kill of the
+# pass tree (SIGTERM/SIGKILL from supervisor._preempt_all, the agent_daemon force-break on a
+# pause/seller-message interrupt, the 900s deadline, or the _reap MAX_WORKER_SEC watchdog) skips
+# Python's finally entirely, orphaning the file. Forced kills are COMMON, so without a sweep logs/
+# grows unbounded. sweep_stale_pass_logs() is the deterministic backstop: glob the per-pass files and
+# unlink any whose mtime is older than this many minutes (a live pass owns a FRESH file, so it is
+# spared). Run at daemon/supervisor startup. The cutoff sits well above any single pass's worst-case
+# wall-clock (the 900s deadline) so an in-flight pass's file is never swept out from under it.
+STALE_PASS_LOG_AGE_MIN = 60
 
 # Runtime harnesses verified end-to-end today. The install/config layer is broader; the *runner* is
 # deliberately conservative so an unverified harness can't strand the daemon (ARCHITECTURE.md §2).
@@ -113,6 +145,16 @@ listing_autonomy=auto_anomaly (publish without confirm; pause only on a real ano
 account-safety pacing. ONE step per pass so the bot stays responsive."""
 
 BUYER_PROMPT = """You are the Bazaar seller agent, running headless and unattended.
+
+FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to fold any crash orphans
+from a prior interrupted pass (a reply that landed on the marketplace but was never journaled). It is
+a cheap non-LLM call that never re-sends — it just heals the ledger and asks the seller to verify.
+
+JOURNAL DISCIPLINE (hard rule): after EACH send you MUST call `python3 bin/journal_send.py commit`
+BEFORE doing anything else — never advance to the next message or thread with an un-committed send.
+Every reply is bracketed `journal_send.py intent` (before the send) → send → `journal_send.py commit`
+(immediately after), per skills/reply-pipeline.md §5. Never hand-edit data/threads/<id>.json.
+
 Run ONE buyer-inbox watch pass per .claude/commands/sell-watch.md over your enabled
 seller_config.marketplaces: open the relevant inbox(es) (see COST DISCIPLINE for which) in the
 (already-running) Chrome and handle each new buyer message past its cursor via
@@ -130,12 +172,25 @@ snapshots are the single biggest cost per pass. If $BAZAAR_BUYER_PEEK_FORCED=1 t
 safety-net sweep with NO specific signal — open only the single most-recently-active inbox,
 confirm nothing sits unread past its cursor, and stop; do NOT sweep all marketplaces.
 
+SCOPE (priority hint, not a hard restriction): if $BAZAAR_BUYER_PEEK_THREAD is set,
+PRIORITISE that thread first (read its new messages past the cursor, reply via
+skills/reply-pipeline.md, commit) BEFORE touring any other thread. This is a PRIORITY HINT to put
+the thread that actually has new mail first; it is not a hard 'only that thread' rule. If other
+threads on this marketplace also have unread mail past their cursor, handle them too within your
+budget. Never let the hint stop you replying to a real message, and never reply to a thread the hint
+does not name unless that thread genuinely has new mail (mis-routing a reply onto the wrong thread is
+the worst outcome).
+
 TURN BUDGET (hard rule — your turn cap is finite and being killed mid-pass loses ALL progress and
-your summary): you MUST end with a one-line summary, so reserve your final turn for it and STOP.
-Do not open another inbox or thread once you are running low on turns — partial progress is fine
-because every reply marks its thread read, so the next pass resumes where you left off. NEVER loop
-on a stuck step: if an inbox or thread won't open after ONE retry, escalate it over Telegram
-(skills/channel/notifications.md) and move on. Stop as soon as the pass is complete."""
+your summary): you have a SOFT budget of about $BAZAAR_BUYER_SOFT_TURNS turns. As you approach
+$BAZAAR_BUYER_SOFT_TURNS (leave yourself ~5 turns of headroom) stop opening NEW threads: journal
+everything you have already sent via `python3 bin/journal_send.py commit` (per the JOURNAL DISCIPLINE
+rule above — never end a pass with an un-committed send), write your one-line summary, and STOP. The
+soft budget sits well below the hard cap so a clean stop almost always beats the cap. Partial
+progress is fine — every reply marks
+its thread read, so the next pass resumes where you left off. NEVER loop on a stuck step: if an inbox
+or thread won't open after ONE retry, escalate it over Telegram (skills/channel/notifications.md) and
+move on. Reserve your final turn for the summary and STOP as soon as the pass is complete."""
 
 MAINT_PROMPT = """You are the Bazaar agent doing cross-listing maintenance, headless and unattended.
 This is a BACKGROUND pass — do NOT poll the control channel or buyer inboxes for INBOUND messages
@@ -168,9 +223,33 @@ of bazaar-run.md §2b, then stop:
           on their OWN that are NOT yet tracked (absent from data/threads/ and data/buyer_threads/) and
           surface a takeover offer under the takeover gate, persisting data/inbox_detect_session.json
           for TAKEOVER on a later pass. This is how a chat you started yourself reaches your channel.
-   If nothing is due → end (no work)."""
+   If nothing is due → fall through to step 4.
+4. Else if data/listing_health_session.json is active → CONTINUE it per skills/channel/listing-health.md
+   (the LOWEST-priority maint step — a stale LIVE listing with no buyer interest for 7+ days that needs
+   improvement suggestions). Read the session (item_id + stale_row: silent_days, basis, last_inbound_ts,
+   list_price) and load data/items/<item_id>.json. FIRST re-check status=="live": if the item is now
+   sold/removed/cancelled, send NOTHING, set the session active=false, and STOP — do NOT run
+   listing_health.py mark (the episode is void). Otherwise research current comps for THIS ONE item
+   (WebSearch/WebFetch, at most ~2 parallel queries, no browser comps), compose CONCRETE improvement
+   suggestions (price vs comps, photos, title/description, reach/distribution, bump/relist — include
+   only the ones that genuinely apply; do NOT suggest a price drop if already at/below comps), send ONE
+   control-channel message (skills/channel/notifications.md notify, ref=item_id, voice per
+   skills/style.md, NO em-dashes, framed as suggestions the seller can approve — never auto-applied),
+   then run `python3 bin/listing_health.py mark --item <item_id>`, set the session active=false, STOP.
+   If nothing is active or due in any step → end (no work)."""
 
 BUY_PROMPT = """You are the Bazaar BUYER agent (acquiring for the user), headless and unattended.
+
+FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to fold any crash orphans
+from a prior interrupted pass (a reply that landed on the marketplace but was never journaled). It is
+a cheap non-LLM call that never re-sends — it just heals the ledger and asks the user to verify.
+
+JOURNAL DISCIPLINE (hard rule): after EACH send you MUST call `python3 bin/journal_send.py commit
+--side buy` BEFORE doing anything else — never advance to the next message or thread with an
+un-committed send. Every reply is bracketed `journal_send.py intent --side buy` (before the send) →
+send → `journal_send.py commit --side buy` (immediately after), per
+skills/buying/liaison-pipeline.md §6. Never hand-edit data/buyer_threads/<id>.json.
+
 Do ONE buy-side step of bazaar-run.md §3 + .claude/commands/buy-run.md, then stop. $BAZAAR_BUY_PEEK_WANT
 names the actionable want; $BAZAAR_BUY_PEEK_TEXT is a hint. Load data/buyer_config.json.
 
@@ -191,17 +270,55 @@ The max budget lives ONLY in data/budgets/<want_id>.json (read by bin/budget_gat
 bin/buyer_negotiate.py) — NEVER put a number in a walk-away ('a bit more than I can do', no figure).
 Respect pacing + per-thread cursors (idempotent). ONE step per pass."""
 
+# FOLLOW-UP BRANCH — appended to the buyer/buy prompts (byte-stable, so the 1h prompt cache is
+# unaffected). It only ACTS when $BAZAAR_FOLLOWUP=1 (the daemon sets it when followup_state.py reports
+# due nudges); otherwise the model ignores it and runs the normal inbound body. A nudge is the SAME
+# action the pass already performs (open a tracked thread, compose, pace, journal bracket) — only the
+# trigger differs, so no new pass mode / tool surface is needed. The follow-up COUNT is derived from
+# the transcript tail by followup_state.py, so no special commit tagging is required here.
+FOLLOWUP_BRANCH_SELL = """
+
+FOLLOW-UP MODE (only when $BAZAAR_FOLLOWUP=1; otherwise IGNORE this whole section): some buyers went
+quiet after our last message and are due a gentle nudge. FIRST run `python3 bin/followup_state.py due`
+and read `due_nudges` (rows: thread_id, marketplace, side, nudges_sent). Handle ONLY rows on THIS
+pass's marketplace. For each such thread: OPEN it and RE-READ its tail. If the last transcript row is
+now INBOUND (they replied since the scan), do NOT nudge — handle their reply normally via
+skills/reply-pipeline.md instead. Otherwise compose ONE short, friendly nudge (no em-dashes per
+skills/style.md; do NOT re-introduce yourself; nudge #1 lighter than #2, e.g. a soft 'just checking
+in' first, then a final 'still keen? no worries either way'). Send it bracketed EXACTLY like any reply
+(reply-pipeline.md §5): journal_send.py intent -> pacing RESERVE -> type+send -> journal_send.py
+commit. AFTER a successful commit run `python3 bin/followup_state.py mark-nudge --thread <thread_id>
+--side sell`. If pacing returns wait/quiet, do NOT send and do NOT mark (it retries next interval).
+One nudge per thread per pass; never nudge a thread whose tail is inbound."""
+
+FOLLOWUP_BRANCH_BUY = """
+
+FOLLOW-UP MODE (only when $BAZAAR_FOLLOWUP=1; otherwise IGNORE this whole section): some sellers went
+quiet after our last message and are due a gentle nudge. FIRST run `python3 bin/followup_state.py due`
+and read `due_nudges` (rows: thread_id, marketplace, side, nudges_sent). Handle ONLY rows on THIS
+pass's marketplace. For each such thread: OPEN it and RE-READ its tail. If the last transcript row is
+now INBOUND (they replied since the scan), do NOT nudge — handle their reply normally via
+skills/buying/liaison-pipeline.md instead. Otherwise compose ONE short, friendly nudge (no em-dashes
+per skills/style.md; do NOT re-introduce yourself; nudge #1 lighter than #2). Send it bracketed
+EXACTLY like any message (liaison-pipeline.md §6): journal_send.py intent --side buy -> pacing RESERVE
+-> type+send -> journal_send.py commit --side buy. AFTER a successful commit run `python3
+bin/followup_state.py mark-nudge --thread <thread_id> --side buy`. If pacing returns wait/quiet, do
+NOT send and do NOT mark (it retries next interval). One nudge per thread per pass; never nudge a
+thread whose tail is inbound."""
+
 # Skills folded into the cached prefix per mode (byte-stable, no volatile data) — fail-open.
 # `skills/style.md` is the stable voice/persona rulebook (the volatile prefs live in data/style.json,
-# read at compose time); it rides the prefix anywhere a message is composed — buyer/buy replies and
-# control-channel say/ask. Not in `maint` (a background pass composes only a fixed completion notice).
+# read at compose time); it rides the prefix anywhere a message is composed — buyer/buy replies,
+# control-channel say/ask, AND the maint stale-listing suggestions (free-form copy, so voice applies).
 CORE_SKILLS = {
     "channel": ("skills/channel/notifications.md", "skills/channel/channel.md",
                 "skills/channel/corrections.md", "skills/style.md"),
     "buyer": ("skills/reply-pipeline.md", "skills/channel/notifications.md", "skills/style.md"),
     "buy": ("skills/buying/liaison-pipeline.md", "skills/channel/notifications.md",
             "skills/style.md"),
-    "maint": ("skills/channel/notifications.md",),
+    # maint now composes free-form stale-listing suggestions (not just a fixed completion notice), so
+    # style.md (voice, NO em-dashes) + the listing-health skill ride the prefix too.
+    "maint": ("skills/channel/notifications.md", "skills/channel/listing-health.md", "skills/style.md"),
 }
 
 # Courtesy pause line for the background passes: the PreToolUse hook (bin/hooks/pause_guard.py) is
@@ -280,14 +397,18 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         )
     if mode == "buyer":
         # Sell-inbox work is mechanical (money decisions live in negotiate.py/shipping.py) → Sonnet
-        # is plenty and far cheaper. 40 is a BACKSTOP, not a workload bound: eval found the buyer
-        # pass exhausting whatever cap it was given (14→28→40 all failed ~82% of the time) by
-        # touring every inbox and looping on stuck navigation — so progress comes from BUYER_PROMPT's
-        # TURN BUDGET governor (bound discovery to the peek-hinted market, reserve the last turn to
-        # summarise, one-retry-then-escalate), NOT from raising this number. Don't bump it chasing
-        # rc=1; replies mark threads read, so partial progress carries across passes.
+        # is plenty and far cheaper. BUYER_BACKSTOP_TURNS (50) is a BACKSTOP, not a workload bound:
+        # eval found the buyer pass exhausting whatever cap it was given (14→28→40 all failed ~82% of
+        # the time) by touring every inbox and looping on stuck navigation — so progress comes from
+        # BUYER_PROMPT's TURN BUDGET governor (a SOFT budget of $BAZAAR_BUYER_SOFT_TURNS at which it
+        # stops opening new threads, journals, and summarises; the peek-thread priority hint; one
+        # retry then escalate), NOT from this number. The backstop is just above the soft budget so a
+        # clean stop has headroom; a cap-hit is now RARE and NON-FATAL (run_pass detects it → Fix C
+        # continuation). Don't bump it chasing rc=1; replies mark threads read, so partial progress
+        # carries across passes.
         return PassSpec(
-            prompt=_scope_prefix(resource) + BUYER_PROMPT + PAUSE_LINE, model="sonnet", max_turns=40,
+            prompt=_scope_prefix(resource) + BUYER_PROMPT + FOLLOWUP_BRANCH_SELL + PAUSE_LINE,
+            model="sonnet", max_turns=BUYER_BACKSTOP_TURNS,
             allowed_tools=BASE_TOOLS + _browser_tools(BUYER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("buyer"),
             prompt_cache_1h=True,
@@ -297,7 +418,8 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # money lives in buyer_negotiate.py/budget_gate.py. Reuses the smaller buyer browser set.
         # Same backlog rationale as the buyer pass: 14 was too low and stranded liaison work (rc=1).
         return PassSpec(
-            prompt=_scope_prefix(resource) + BUY_PROMPT + PAUSE_LINE, model="sonnet", max_turns=28,
+            prompt=_scope_prefix(resource) + BUY_PROMPT + FOLLOWUP_BRANCH_BUY + PAUSE_LINE,
+            model="sonnet", max_turns=28,
             allowed_tools=BASE_TOOLS + _browser_tools(BUYER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("buy"),
             prompt_cache_1h=True,
@@ -328,8 +450,9 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         return PassSpec(prompt=prompt, model="haiku", max_turns=1, strict_mcp=True, mcp_servers={})
     if mode == "eval":
         # Offline LLM-as-judge over eval records (bin/eval_judge.py). MCP-less + single-turn so it
-        # carries no browser tools and can't act on the world; sonnet for nuance. Deliberately NOT
-        # in PASS_MODES — the daemon must never run the judge; it's on-demand via /bazaar-eval only.
+        # carries no browser tools and can't act on the world; sonnet for nuance. Invoked as a library
+        # by eval_judge (not via run_pass), so it stays out of PASS_MODES; the daemon runs it on the
+        # nightly eval when config.eval_judge_nightly is set, and /bazaar-eval always runs it.
         return PassSpec(prompt=msg, model="sonnet", max_turns=1, strict_mcp=True, mcp_servers={})
     raise ValueError(f"unknown mode: {mode}")
 
@@ -358,7 +481,83 @@ def _invocation(harness, spec: PassSpec):
     # Mark every headless pass so the SessionStart update-notice hook NO-OPs here — the daemon can't
     # act on an interactive prompt, and it has its own channel update notice (agent_daemon.py).
     env = {**inv.env, **os.environ, "BAZAAR_DAEMON_PASS": "1"}
+    # Fix C: make $BAZAAR_BUYER_SOFT_TURNS resolve in the BUYER_PROMPT. Default it ONLY when no
+    # explicit value is set, so an operator/caller value (already merged via os.environ above) wins.
+    env.setdefault("BAZAAR_BUYER_SOFT_TURNS", str(BUYER_SOFT_TURNS_DEFAULT))
     return argv, env
+
+
+def sweep_stale_pass_logs(max_age_min: int = STALE_PASS_LOG_AGE_MIN) -> list[str]:
+    """Bug C6 — remove leaked per-pass log files (logs/pass-*.log) older than `max_age_min` minutes.
+
+    run_pass's `finally` unlinks the per-pass file on the happy path, but a FORCED kill of the pass
+    tree skips Python finally, so a stale file is left behind on every preempt/deadline/watchdog kill.
+    This sweep is the deterministic backstop — call it at daemon/supervisor startup (and optionally
+    once per loop). A FRESH per-pass file (a live pass still writing to it) is younger than the cutoff
+    and is spared; the human-readable logs/pass.log never matches the `pass-*.log` glob, so it is never
+    touched. Fail-open throughout: a missing logs dir or an unlink race must never crash the caller.
+
+    Returns the basenames it removed (empty on nothing-to-do / any error)."""
+    removed: list[str] = []
+    cutoff = time.time() - max_age_min * 60
+    try:
+        candidates = list(LOG.parent.glob("pass-*.log"))
+    except OSError:
+        return removed
+    for f in candidates:
+        if f == LOG:  # never the shared human-readable log (defensive; the glob already excludes it)
+            continue
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+                removed.append(f.name)
+        except OSError:
+            continue  # a concurrent unlink / stat race is fine — best-effort cleanup
+    return removed
+
+
+def _read_tail(path: Path) -> str:
+    """Read a per-pass output file, bounded to the last LOG_TAIL_BYTES (the kill marker is always at
+    the tail — a runaway pass can produce a large transcript, so we never load it whole just to find
+    one line). Fail-open to '' — a read error never reclassifies rc."""
+    try:
+        with path.open("rb") as handle:
+            try:
+                size = os.fstat(handle.fileno()).st_size
+            except OSError:
+                size = 0
+            if size > LOG_TAIL_BYTES:
+                handle.seek(size - LOG_TAIL_BYTES)
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _is_cap_hit(rc: int, pass_output: str) -> bool:
+    """A cap-hit = the pass exited non-zero AND THIS pass's OWN output carries the 'Reached max turns'
+    marker. Keyed on BOTH so it is robust to CLI-wording drift (the marker) and never misfires on a
+    success that happens to echo the phrase (the rc).
+
+    Bug C1: `pass_output` is THIS pass's PER-PASS file content, NOT a byte slice of the shared
+    logs/pass.log. With the concurrent supervisor running fb ∥ carousell passes into the same shared
+    file, an offset slice [since..EOF] of the shared log would capture a CONCURRENT worker's marker
+    and misclassify this pass — so each pass writes its own output to an isolated file and scans only
+    that."""
+    if rc == 0:
+        return False
+    return bool(MAX_TURNS_MARKER.search(pass_output))
+
+
+def _record_cap_hit(mode: str, resource: str) -> None:
+    """Drop a per-resource cap-hit breadcrumb so a caller (daemon/supervisor) can see a pass was
+    killed at the cap and schedule a bounded continuation. Atomic + fail-open."""
+    label = f"{mode}:{resource}" if resource else mode
+    # Derive from SELLER_DIR (not the frozen PASS_STATE_DIR) so tests that relocate the tree see it.
+    try:
+        atomic_io.write_json(SELLER_DIR / "data" / "pass_state" / f"{label}.json",
+                             {"capped": True, "ts": _utcnow(), "resource": resource})
+    except OSError:
+        pass  # a breadcrumb is best-effort; the rc=42 signal is the primary channel
 
 
 def run_pass(mode: str, resource: str = "") -> int:
@@ -370,11 +569,42 @@ def run_pass(mode: str, resource: str = "") -> int:
         env = {**env, "BAZAAR_RESOURCE": resource}
     LOG.parent.mkdir(parents=True, exist_ok=True)
     label = f"{mode}:{resource}" if resource else mode
-    with LOG.open("a") as log:
-        log.write(f"=== {_utcnow()} {label} pass ({harness.name}) ===\n")
-        log.flush()
-        rc = subprocess.run(argv, cwd=str(SELLER_DIR), env=env, stdout=log, stderr=log).returncode
-        log.write(f"=== {_utcnow()} {label} pass done rc={rc} ===\n")
+    # Bug C1 — PER-PASS output isolation. The claude subprocess writes to its OWN file (keyed by
+    # resource + pid so two concurrent workers never collide), so cap-detection scans ONLY this
+    # pass's output. The shared logs/pass.log is still maintained for human tailing (header + the
+    # pass output folded back in + footer), but it is NEVER the source for the kill marker — a
+    # concurrent worker's marker in the shared file must not reclassify this pass.
+    safe_resource = re.sub(r"[^A-Za-z0-9_.-]", "_", resource) if resource else "all"
+    pass_log = LOG.parent / f"pass-{mode}-{safe_resource}-{os.getpid()}.log"
+    rc = 1
+    pass_output = ""  # default so a subprocess-spawn error can't NameError the cap-hit check below
+    try:
+        with pass_log.open("w+") as out:
+            rc = subprocess.run(argv, cwd=str(SELLER_DIR), env=env,
+                                stdout=out, stderr=out).returncode
+        pass_output = _read_tail(pass_log)
+    finally:
+        # Fold this pass's output into the shared human log (header + body + footer), then drop the
+        # per-pass file. Best-effort: a logging hiccup must never change the rc the daemon acts on.
+        try:
+            with LOG.open("a") as shared:
+                shared.write(f"=== {_utcnow()} {label} pass ({harness.name}) ===\n")
+                try:
+                    shared.write(pass_log.read_text(errors="replace"))
+                except OSError:
+                    pass
+                shared.write(f"=== {_utcnow()} {label} pass done rc={rc} ===\n")
+        except OSError:
+            pass
+        try:
+            pass_log.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # Fix C: distinguish a turn-cap kill ("more work pending") from a generic failure. Only the buyer
+    # pass tours a backlog, so only it can strand work at the cap — scope the detection to it.
+    if mode == "buyer" and _is_cap_hit(rc, pass_output):
+        _record_cap_hit(mode, resource)
+        return CAP_HIT_SIGNAL
     return rc
 
 

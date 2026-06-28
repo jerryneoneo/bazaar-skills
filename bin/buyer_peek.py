@@ -10,8 +10,9 @@ Contract (mirrors the channel adapters' ``peek``):
 
 It reads the unread signal straight from the already-running warm CDP Chrome
 (``bin/chrome_debug.sh`` on :9222) — pure stdlib, no Playwright, no LLM:
-    • Facebook  → unread count is in the tab title, e.g. "(14) Facebook" (plain HTTP)
-    • Carousell → unread badge in the inbox UI, read via CDP ``Runtime.evaluate``
+    • Facebook  → PRECISE per-thread classification (inbox_scan; FB selling-inbox rows are enumerable),
+                  with a coarse aggregate count (unread marketplace rows / tab-title "(N)") as fallback
+    • Carousell → PRECISE per-thread classification (inbox_scan), aggregate inbox badge as fallback
 
 It compares the live signal against a per-market memo in ``data/buyer_peek_state.json`` so a
 reply that is still pending does NOT re-fire the pass every cycle. It NEVER advances the
@@ -60,11 +61,16 @@ MARKET_PROBES: dict[str, dict] = {
     "fb": {
         # Match any FB/Messenger tab. The leading "(N) Facebook" title count is FB-GLOBAL (DMs +
         # notifications + marketplace), so it badly over-counts — a quiet marketplace inbox still
-        # showed "(20)". When the tab is on the Marketplace inbox we instead count the conversation
-        # ROWS that need a reply. CRITICAL: those rows are `div[role="row"]`, NOT anchors — FB shows
-        # them with a status line "<buyer> is waiting for your response." / "<buyer> sent you a message
-        # about your listing". An `a[href*="/t/"]` query matches hidden Messenger links and misses the
-        # whole marketplace list (the bug that let FB selling enquiries pile up). Off-inbox → title.
+        # showed "(20)". This count is now only the AGGREGATE FALLBACK: the authoritative signal is
+        # the PRECISE per-thread classifier (inbox_scan.sell_markets_new — FB is enumerable now), so
+        # peek() prefers precise['fb'] and uses this count only when the scan can't run.
+        #
+        # On the Marketplace selling inbox we return a COARSE count = number of UNREAD conversation
+        # rows we can enumerate (the same div[role="button"] + SVG-avatar rows inbox_scan reads), so
+        # the fallback is not permanently 0 when the aggregate "Marketplace … N new messages" row is
+        # absent (the OLAF miss: a known-thread reply that never bumped that aggregate). We still read
+        # the aggregate row first (it's the cheapest precise-ish number when present). Off-inbox → the
+        # coarse global title count (over-fires safe).
         "url_match": ["facebook.com"],
         "url_match_alt": ["messenger.com"],
         "mode": "eval",
@@ -73,17 +79,58 @@ MARKET_PROBES: dict[str, dict] = {
             let titleCount = 0;
             const tm = (document.title || '').match(/^\s*\((\d+)\+?\)/);
             if (tm) titleCount = parseInt(tm[1], 10);
-            // On the Marketplace inbox, FB renders an aggregated "Marketplace … N new messages" row
-            // (a [role=row]); N is the precise marketplace-unread count. The per-listing Selling rows
-            // are NOT reliably CDP-selectable, and the [role=row] list is otherwise the general
-            // Messenger "Chats" (Meta, etc.) — so we read the aggregate row, not individual threads.
             if (/\/marketplace\/inbox/.test(location.pathname)) {
+              // 1) Aggregated "Marketplace … N new messages" row, if present (cheap precise-ish count).
               for (const r of Array.from(document.querySelectorAll('[role="row"]'))) {
                 const t = (r.textContent || '').trim().replace(/\s+/g, ' ');
                 const m = t.match(/Marketplace.*?(\d+)\s*new messages?/i);
                 if (m) return { count: parseInt(m[1], 10), snippet: 'Marketplace: ' + m[1] + ' new messages' };
               }
-              return { count: 0, snippet: '' };  // on the inbox, no aggregate row → no marketplace unread
+              // 2) No aggregate row → COARSE count of UNREAD enumerable conversation rows, so the
+              //    fallback isn't stuck at 0 when the badge stays flat. unread = a preview leaf at
+              //    >= MEDIUM weight (500) OR bolder than the row's own title; read previews are ~400.
+              //    Fail-open to 0. (B5 — lowered the 500 floor + the theme-independent title-weight
+              //    compare so semibold/short unread rows aren't dropped.)
+              // B2 — anchored to the actual ROW SHAPE so a real preview ("… Within 5m can you
+              // meet?", a preview merely containing "N new messages") is NOT swallowed as noise;
+              // the bare `m\b` unit alternative (collided with English "5m"/"meet") is dropped.
+              const NOISE = /^Number of unread notifications|^Marketplace\b.*?\b\d+\s*new messages?\s*$|^[^·]+·\s*Within\s+\d+\s*(?:kilomet(?:er|re)s?|met(?:er|re)s?|km)\s*$/i;
+              const rows = Array.prototype.slice.call(document.querySelectorAll('div[role="button"]'))
+                .filter(r => {
+                  const tt = (r.textContent || '').trim();
+                  return r.querySelector('image') && tt.indexOf(' · ') !== -1 && tt.length >= 20 && !NOISE.test(tt);
+                });
+              let unread = 0; let snippet = '';
+              for (const r of rows) {
+                const txt = (r.textContent || '').trim().replace(/\s+/g, ' ');
+                const ls = Array.prototype.slice.call(r.querySelectorAll('*'))
+                  .filter(n => n.children.length === 0 && (n.textContent || '').trim());
+                // B4 — partition leaves STRUCTURALLY by DOM order (the separator-dot leaf's ordinal),
+                // not by indexOf of collapsed text (which found the FIRST occurrence and mis-bucketed
+                // a preview leaf whose text also appears in the title).
+                let sepOrdinal = -1;
+                for (let s = 0; s < ls.length; s++) {
+                  if ((ls[s].textContent || '').trim() === '·') { sepOrdinal = s; break; }
+                }
+                let titleWeight = 0;
+                const titleHi = sepOrdinal >= 0 ? sepOrdinal : ls.length;
+                for (let k = 0; k < titleHi; k++) {
+                  const w = parseInt(getComputedStyle(ls[k]).fontWeight, 10) || 0;
+                  if (w > titleWeight) titleWeight = w;
+                }
+                let rowUnread = false;
+                const previewLo = sepOrdinal >= 0 ? sepOrdinal + 1 : 0;
+                for (let j = previewLo; j < ls.length; j++) {
+                  const n = ls[j];
+                  const t = (n.textContent || '').trim();
+                  if (t === '·' || /^\d{1,2}:\d{2}/.test(t)) continue;
+                  const fw = parseInt(getComputedStyle(n).fontWeight, 10) || 0;
+                  if (fw >= 500) { rowUnread = true; break; }
+                  if (titleWeight && fw > titleWeight) { rowUnread = true; break; }
+                }
+                if (rowUnread) { unread++; if (!snippet) snippet = txt.slice(0, 160); }
+              }
+              return { count: unread, snippet };
             }
             // Any other FB/Messenger page → coarse global-title fallback (over-fires safe).
             return { count: titleCount, snippet: '' };
@@ -337,12 +384,14 @@ def is_new(market: str, cur: dict, memo: dict) -> bool:
 def peek(update_memo: bool = True) -> dict:
     """Probe all enabled markets; return the peek contract. Fail-open-safe throughout.
 
-    For markets whose inbox rows are per-thread enumerable (Carousell), `new` comes from the PRECISE
-    classifier (inbox_scan): a market is sell-new only when a tracked sell thread has a fresh reply or
-    an unknown non-system buyer enquiry arrives — buy-thread rows and promos no longer trip a sell
-    pass. Non-enumerable markets (FB/eBay) and any scan failure fall back to the aggregate is_new
-    below, so the revenue path can never be made LESS sensitive than today (and the daemon's forced
-    sweep backstops a missed precise signal)."""
+    For markets whose inbox rows are per-thread enumerable (Carousell AND FB), `new` comes from the
+    PRECISE classifier (inbox_scan): a market is sell-new only when a tracked sell thread has a fresh
+    reply or an unknown non-system buyer enquiry arrives — buy-thread rows and promos no longer trip a
+    sell pass. Routing FB through the precise path closes the OLAF miss: a known-thread FB reply that
+    does NOT bump the aggregate "Marketplace N new messages" badge is still caught per-thread. Markets
+    not present in the precise dict (eBay, or any FB/Carousell scan failure) fall back to the aggregate
+    is_new below, so the revenue path can never be made LESS sensitive than today (and the daemon's
+    forced sweep backstops a missed precise signal)."""
     targets = list_page_targets()
     memo = load_memo()
     markets_out: dict[str, dict] = {}
@@ -350,11 +399,18 @@ def peek(update_memo: bool = True) -> dict:
     latest_text = ""
     next_memo = dict(memo)  # immutable update — build a new memo, don't mutate the loaded one
 
+    # C-followup: ONE inbox_scan.sell_peek() advances the SELL memo a SINGLE time and returns BOTH
+    # the per-market bool gate (sell_markets) AND the per-market thread-id hint (sell_threads). The
+    # daemon poll path reads both from this peek's output, so it no longer advances the memo a second
+    # time (which would null the Fix-C peek-thread hint). Fail-open: a scan error falls back to the
+    # aggregate is_new() below for every market (revenue path never made less sensitive).
     try:
         import inbox_scan  # lazy: breaks the inbox_scan -> buyer_peek import cycle
-        precise = inbox_scan.sell_markets_new()  # {market: bool} for enumerable markets only
+        sp = inbox_scan.sell_peek()
+        precise = sp.get("sell_markets", {})         # {market: bool} for enumerable markets only
+        sell_threads = sp.get("sell_threads", {})    # {market: [thread_id, ...]} for tracked rows
     except Exception:
-        precise = {}  # fail-open: fall back to the aggregate signal for every market
+        precise, sell_threads = {}, {}  # fail-open: aggregate signal for every market, no hint
 
     for market in enabled_markets():
         cur = probe_market(market, MARKET_PROBES[market], targets)
@@ -363,7 +419,11 @@ def peek(update_memo: bool = True) -> dict:
         else:
             new = cur["found"] and is_new(market, cur, memo)  # aggregate fallback (FB/eBay, or scan down)
         markets_out[market] = {"count": cur["count"], "snippet": cur["snippet"],
-                               "found": cur["found"], "new": new}
+                               "found": cur["found"], "new": new,
+                               # Conservative per-market priority hint (Fix C / C-followup): the
+                               # matched tracked-sell thread id(s) this peek. The daemon derives the
+                               # single-thread hint from this WITHOUT a second memo advance.
+                               "sell_threads": list(sell_threads.get(market, []))}
         if new:
             pending += 1
             if not latest_text:

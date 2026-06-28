@@ -10,6 +10,7 @@
 .codex/
 .env
 .env.local
+.secrets/
 
 # Hidden money + identity (the core invariants — MUST stay local)
 data/seller_config.json
@@ -51,6 +52,10 @@ data/pacing_state.json.tmp
 data/channel_outbox.jsonl
 data/channel_outbox.jsonl.lock
 data/channel_outbox.jsonl.tmp
+data/thread_outbox.jsonl
+data/thread_outbox.jsonl.lock
+data/thread_outbox.jsonl.tmp
+data/pass_state/*
 data/leases/
 data/availability.json
 data/escalations.jsonl
@@ -59,6 +64,14 @@ data/channel_transcript.jsonl
 data/eval_state.json
 data/eval_state.json.tmp
 data/eval/*
+data/followup_state.json
+data/followup_state.json.tmp
+data/followup_state.json.lock
+data/listing_health_state.json
+data/listing_health_state.json.tmp
+data/listing_health_state.json.lock
+data/listing_health_session.json
+data/listing_health_session.json.tmp
 data/style_proposals.jsonl
 data/ui_cache/*
 !data/items/.gitkeep
