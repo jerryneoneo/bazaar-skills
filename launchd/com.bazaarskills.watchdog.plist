@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bazaarskills.watchdog</string>
+
+  <!-- Fix D: an INDEPENDENT watchdog (separate from the agent it guards, so it survives a wedged
+       agent). It runs read-only every StartInterval and restarts the agent ONLY when launchd thinks
+       the job is loaded but its loop is dead (stale heartbeat or a dead lock holder). It is NOT
+       KeepAlive — it does one short pass and exits 0; launchd re-runs it on the interval. -->
+  <key>ProgramArguments</key>
+  <array>
+    <!-- __PYTHON__ is resolved by install_daemon.sh (same stable interpreter as the agent). -->
+    <string>__PYTHON__</string>
+    <string>__RUNTIME__/bin/daemon_watchdog.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__RUNTIME__</string>
+
+  <!-- TEMPLATE: install_daemon.sh substitutes __RUNTIME__ (this checkout) and __PATH__ (the dirs
+       where node/npx/claude/curl live, detected at install) before copying into ~/Library/LaunchAgents. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+
+  <!-- Periodic, not KeepAlive: one read-only check every 120s, matching the watchdog's cadence. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>120</integer>
+
+  <key>StandardOutPath</key>
+  <string>__RUNTIME__/logs/watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__RUNTIME__/logs/watchdog.err.log</string>
+</dict>
+</plist>

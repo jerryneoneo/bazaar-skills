@@ -61,6 +61,14 @@ DEFAULT_INTERACTIVE_DELAY = (2, 6)  # attended console: short, live-chat-cadence
 DEFAULT_QUIET = (23, 8)
 HARD_CAP_CEILING = 60       # a misconfigured config can only ever TIGHTEN pacing, never exceed this
 MAX_NOW_DRIFT_SEC = 300     # --now is a narrow test seam: clamp it to wall clock (no time-travel)
+# HARD_DELAY_CEILING_SEC: the upper clamp on a post-go reply delay (both reply_delay_sec and
+# interactive_reply_delay_sec). A delay is waited out AFTER the intent is recorded but BEFORE the
+# send, so an unbounded delay would let a HEALTHY in-flight intent sit pending longer than
+# journal_reconcile.GRACE_SEC and be folded as a false crash orphan. This ceiling MUST stay strictly
+# below journal_reconcile.GRACE_SEC (=600) with margin, so the longest legitimate intent->send window
+# can never reach the fold floor. Like HARD_CAP_CEILING, a tampered/fat-fingered config can only ever
+# tighten pacing toward this ceiling, never exceed it.
+HARD_DELAY_CEILING_SEC = 300
 
 
 def data_dir():
@@ -187,6 +195,24 @@ def evaluate(state, marketplace, kind, now, cfg, mode="unattended"):
 # ---------------------------------------------------------------------------
 # config + IO
 # ---------------------------------------------------------------------------
+def _validate_delay_pair(value, key):
+    """Validate a [min, max] delay pair and clamp its max DOWN to HARD_DELAY_CEILING_SEC.
+
+    A malformed value raises ValueError (loud, like reply_delay_sec); a well-formed max above the
+    ceiling is clamped (a tampered/fat-fingered config can only tighten pacing, never blow past the
+    fold floor). Returns (min, clamped_max) as floats. Never mutates the input."""
+    if not (isinstance(value, (list, tuple)) and len(value) == 2):
+        raise ValueError(f"{key} must be a [min, max] pair, got {value!r}")
+    delay_min, delay_max = float(value[0]), float(value[1])
+    if delay_min < 0 or delay_max < delay_min:
+        raise ValueError(f"{key} must be 0 <= min <= max, got {value!r}")
+    # Clamp DOWN so an unbounded delay can never let a healthy in-flight intent outlive the reconcile
+    # fold floor (journal_reconcile.GRACE_SEC). min is clamped too so min <= max always holds.
+    delay_max = min(delay_max, float(HARD_DELAY_CEILING_SEC))
+    delay_min = min(delay_min, delay_max)
+    return delay_min, delay_max
+
+
 def load_cfg(config_path):
     """Read the pacing knobs from config.json, with validated defaults."""
     config = {}
@@ -204,21 +230,16 @@ def load_cfg(config_path):
     # anti-detection budget, never blow past it.
     cap = min(cap, HARD_CAP_CEILING)
 
-    delay = config.get("reply_delay_sec", list(DEFAULT_DELAY))
-    if not (isinstance(delay, (list, tuple)) and len(delay) == 2):
-        raise ValueError(f"reply_delay_sec must be a [min, max] pair, got {delay!r}")
-    delay_min, delay_max = float(delay[0]), float(delay[1])
-    if delay_min < 0 or delay_max < delay_min:
-        raise ValueError(f"reply_delay_sec must be 0 <= min <= max, got {delay!r}")
+    # Both delay ranges are validated AND clamped to HARD_DELAY_CEILING_SEC so an unbounded max can
+    # never let a healthy in-flight intent outlive journal_reconcile.GRACE_SEC and be folded.
+    delay_min, delay_max = _validate_delay_pair(
+        config.get("reply_delay_sec", list(DEFAULT_DELAY)), "reply_delay_sec")
 
-    # Attended-console jitter — validated symmetrically with reply_delay_sec. A malformed value
-    # raises (loud, like reply_delay_sec); a missing key falls back to the short default.
-    idelay = config.get("interactive_reply_delay_sec", list(DEFAULT_INTERACTIVE_DELAY))
-    if not (isinstance(idelay, (list, tuple)) and len(idelay) == 2):
-        raise ValueError(f"interactive_reply_delay_sec must be a [min, max] pair, got {idelay!r}")
-    idelay_min, idelay_max = float(idelay[0]), float(idelay[1])
-    if idelay_min < 0 or idelay_max < idelay_min:
-        raise ValueError(f"interactive_reply_delay_sec must be 0 <= min <= max, got {idelay!r}")
+    # Attended-console jitter — validated + clamped symmetrically with reply_delay_sec. A malformed
+    # value raises (loud, like reply_delay_sec); a missing key falls back to the short default.
+    idelay_min, idelay_max = _validate_delay_pair(
+        config.get("interactive_reply_delay_sec", list(DEFAULT_INTERACTIVE_DELAY)),
+        "interactive_reply_delay_sec")
 
     quiet = config.get("quiet_hours", list(DEFAULT_QUIET))
     if not (isinstance(quiet, (list, tuple)) and len(quiet) == 2):

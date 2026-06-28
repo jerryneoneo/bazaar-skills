@@ -13,6 +13,12 @@ sweeps both sides each pass: on the **sell** side it lists items and negotiates 
 **buy** side it searches for what you want, shortlists matches, and negotiates with sellers, the
 faithful inverse of selling (counter *up* to a hidden ceiling instead of *down* to a hidden floor).
 
+Structurally it is two parts: a harness-agnostic **skill bundle** (the declarative selling/buying
+policy the model reads and executes, in `skills/` and `.claude/commands/`) driven by a resilient
+local **runtime** (the `bin/` daemon: single-flight loop, leasing, pacing, crash-safe journaling, and
+a watchdog). Claude Code is the swappable *harness* it runs inside, not the agent itself; the three
+layers below describe how the skill bundle is organized.
+
 There is **no hosted plane**: every secret and every record stays on your device.
 
 ## Design principles

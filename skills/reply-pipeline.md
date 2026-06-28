@@ -184,10 +184,18 @@ cannot see actions other passes took on this account):
   `unattended`). The mode changes **only the post-`go` jitter** — the hourly cap and `quiet_hours`
   are enforced identically in both modes, so it can never let you over-send or send during quiet
   hours.
-- `go` → wait the returned `delay_sec`, then `type(message)` + `send()`. The delay is small in
-  interactive mode (a few seconds, the natural cadence of a live chat) and longer when unattended
-  (the anti-automation jitter). **Even in interactive mode it is non-zero on purpose — wait it;
-  never fire an instant, zero-delay send (that's the automation tell).**
+- `go` → **bracket the send so a crash can never split-brain the ledger** (a reply on the
+  marketplace with a stale cursor and no journaled outbound — the Olaf failure). Do it in this exact
+  order:
+  1. **Record the intent BEFORE the send** (deterministic Python, not a hand-edit):
+     `python3 bin/journal_send.py intent --thread <market>:<id> --market <market> --in-msg "<inbound_msg_id>" --text "<your reply>"`
+     Capture the printed `id` as `<intent_id>`.
+  2. Wait the returned `delay_sec`, then `type(message)` + `send()`. The delay is small in interactive
+     mode (a few seconds, the natural cadence of a live chat) and longer when unattended (the
+     anti-automation jitter). **Even in interactive mode it is non-zero on purpose — wait it; never
+     fire an instant, zero-delay send (that's the automation tell).**
+  3. **Commit immediately AFTER `send()` returns** (this writes the thread file atomically):
+     `python3 bin/journal_send.py commit --thread <market>:<id> --intent <intent_id> [--status <new_status>]`
 - `wait` → at this marketplace's hourly cap; **do NOT send.** Leave the thread at its cursor
   (idempotent) and tell the seller you are pacing; it retries next pass.
 - `quiet` → inside `quiet_hours`; **queue, don't send.**
@@ -196,20 +204,51 @@ The cap is enforced **per marketplace account** and shared across sell and buy w
 buyer reply and a buy-side message on the same marketplace draw from one budget.
 
 ## 6. Persist
-Append both the inbound and your outbound message to `thread.transcript`
-(`{msg_id,dir,text,ts}`), set `thread.cursor.last_handled_msg_id` + `last_handled_ts`
-to the message just handled, update `status`, and write the thread file. The cursor
-is the idempotency key — never reply to a message at or before the cursor again.
+The bracket in §5 already persists. `bin/journal_send.py commit` writes the thread file
+**atomically**: it appends both the inbound and your outbound row to `thread.transcript`
+(`{msg_id,dir,text,ts}`; the outbound `msg_id` is `out|<iso-ts>`), advances
+`thread.cursor.last_handled_msg_id` + `last_handled_ts` to the message just handled, sets `status`
+(when you pass `--status`), and refreshes `updated_at`. The cursor is the idempotency key — never
+reply to a message at or before the cursor again, and `commit` is itself idempotent (re-running the
+same commit adds no duplicate rows and never double-advances).
+
+**Do NOT hand-edit `data/threads/<id>.json`** — never "append to the transcript" or "write the
+thread file" yourself. The deterministic `commit` call is the ONLY journaling path; a hand-edit is
+what crashed mid-pass and dropped the Olaf outbound. If you set additional fields the bracket does
+not cover (e.g. an `agent_note`), do that by re-reading and writing the file only AFTER `commit` has
+landed the send + cursor.
+
+## 7. Proactive follow-up (when a buyer went quiet)
+Reactive replies above handle a buyer who wrote to us. The **follow-up** path handles a buyer who did
+NOT: when our last message goes unanswered, `bin/followup_state.py` schedules up to 2 gentle nudges
+(gentle escalation, ~1d then ~3d), then marks the buyer not interested (~3d later). It is OFF unless
+`followup_enabled` (config) is on, and is driven by the buyer pass only when `$BAZAAR_FOLLOWUP=1`
+(see the FOLLOW-UP MODE block in the buyer prompt). A nudge is **not** a new mechanism: compose a
+short friendly line and send it through the EXACT §5 bracket (`journal_send.py intent` → pace →
+`type`+`send()` → `journal_send.py commit`), then `python3 bin/followup_state.py mark-nudge --thread
+<id> --side sell`. Always re-read the tail first and skip the nudge if the buyer has replied since the
+scan (handle their reply normally instead). The not-interested **drop** is deterministic and never
+touches thread `status` — a re-engaging buyer is still answered by §1-§6 as usual.
 
 ## ESCALATE (shared)
 1. Post a brief holding reply to the buyer ("Let me check on that and get right back
-   to you!"), paced/sent per step 5 (reply naturally, no identity line, per `voice.md` Rule 3).
-2. Set thread `status:"escalated"`.
+   to you!"), **bracketed exactly like a normal send (step 5)** — `journal_send.py intent` →
+   pace → `type`+`send()` → `journal_send.py commit --status escalated`. This is the precise
+   Olaf failure: a holding reply went out but the cursor never advanced because the pass crashed
+   before the hand-edit, so the next pass re-escalated. The bracket makes the holding reply +
+   cursor advance atomic. Reply naturally, no identity line, per `voice.md` Rule 3.
+2. The `commit --status escalated` in step 1 already set thread `status:"escalated"` **and** advanced
+   the cursor (the holding reply *is* the handling) — do not re-advance or hand-edit the thread file.
 3. Append to `data/escalations.jsonl`:
    `{"thread_id","item_id","buyer_handle","open_question","context_summary","status":"open","ts"}`
-4. Advance the cursor (the holding reply *is* the handling) and **surface the open question to
-   the seller over the channel** via `skills/channel/notifications.md` (`notify(...)` with a
-   `ref` = this escalation's id; assist-mode offers carry `accept/counter/decline` actions).
-   (Console-only deployments fall back to `/sell-resolve`.)
+4. **Surface the open question to the seller over the channel** via
+   `skills/channel/notifications.md` (`notify(...)` with a `ref` = this escalation's id; assist-mode
+   offers carry `accept/counter/decline` actions). (Console-only deployments fall back to
+   `/sell-resolve`.)
 When the seller answers, the reply is sent and saved to `qa_bank` so the same question
 auto-answers next time (the compounding loop).
+
+**End-of-pass discipline (turn budget):** reserve your final turn to journal via
+`bin/journal_send.py commit` and write the one-line summary; **never end a pass with an un-committed
+send.** If you are running low on turns, stop opening new threads, commit what you have already sent,
+summarise, and STOP — the next pass resumes from the cursors (per the buyer pass TURN BUDGET).

@@ -117,8 +117,17 @@ self-count from the transcript**:
 - Pass `--mode interactive` only when a human is driving this session (the `/buy` console tells you
   to); an unattended daemon pass omits it (defaults to `unattended`). The mode changes **only the
   post-`go` jitter** — the hourly cap and `quiet_hours` apply identically in both.
-- `go` → wait the returned `delay_sec` (small in interactive mode, longer when unattended; non-zero
-  either way — never an instant zero-delay send), then `type(message)` + `send()`.
+- `go` → **bracket the send so a crash can never split-brain the ledger** (a reply on the marketplace
+  with a stale cursor and no journaled outbound). Same discipline as the seller pipeline, but
+  `--side buy` (targets `data/buyer_threads/<id>.json`):
+  1. **Record the intent BEFORE the send:**
+     `python3 bin/journal_send.py intent --side buy --thread <market>:<id> --market <market> --in-msg "<inbound_msg_id>" --text "<your reply>"`
+     Capture the printed `id` as `<intent_id>`. (On INITIATE there is no inbound — pass the opening
+     trigger as `--in-msg` so the cursor advances; the seed step set `source`/cursor already.)
+  2. Wait the returned `delay_sec` (small in interactive mode, longer when unattended; non-zero
+     either way — never an instant zero-delay send), then `type(message)` + `send()`.
+  3. **Commit immediately AFTER `send()` returns** (writes the thread file atomically):
+     `python3 bin/journal_send.py commit --side buy --thread <market>:<id> --intent <intent_id> [--status <new_status>]`
 - `wait` → at this marketplace's hourly cap; **do NOT send**; retry next pass.
 - `quiet` → inside `quiet_hours`; **queue, don't send.**
 
@@ -126,21 +135,40 @@ The cap is **per marketplace account** and atomic across concurrent passes, so b
 on one marketplace count against the same budget.
 
 ## 7. Persist
-Append the inbound (if any) and your outbound message to `thread.transcript`
-(`{msg_id,dir,text,ts}`), set `thread.cursor.last_handled_msg_id` + `last_handled_ts` to the message
-just handled, update `status`, and write the thread file. The cursor is the idempotency key — never
-reply to a message at or before the cursor again.
+The bracket in §6 already persists. `bin/journal_send.py commit --side buy` writes the buyer thread
+file **atomically**: it appends the inbound (if any) and your outbound row to `thread.transcript`
+(`{msg_id,dir,text,ts}`; outbound `msg_id` is `out|<iso-ts>`), advances
+`thread.cursor.last_handled_msg_id` + `last_handled_ts` to the message just handled, sets `status`
+(when you pass `--status`), and refreshes `updated_at`. The cursor is the idempotency key — never
+reply to a message at or before the cursor again, and `commit` is itself idempotent. **Do NOT
+hand-edit `data/buyer_threads/<id>.json`** — the deterministic `commit` is the only journaling path.
+
+## 8. Proactive follow-up (when a seller went quiet)
+When OUR last message to a seller goes unanswered, `bin/followup_state.py` schedules up to 2 gentle
+nudges (gentle escalation, ~1d then ~3d), then marks the seller not interested (~3d later). OFF unless
+`followup_enabled` (config) is on; driven by the buy pass only when `$BAZAAR_FOLLOWUP=1` (see the
+FOLLOW-UP MODE block in the buy prompt). A nudge reuses the EXACT §6 bracket (`journal_send.py intent
+--side buy` → pace → `type`+`send()` → `journal_send.py commit --side buy`), then `python3
+bin/followup_state.py mark-nudge --thread <id> --side buy`. Re-read the tail first and skip the nudge
+if the seller has replied since the scan (handle their reply via §3-§7 instead). The not-interested
+drop never touches thread `status`, so a re-engaging seller is still handled normally. Do not chase a
+thread that is `agreed`/`closed`/`escalated` (those are terminal for follow-up).
 
 ## ESCALATE (to the USER — shared)
-1. Post a brief holding reply to the seller ("Let me check on that and get back to you shortly!") —
-   paced/sent per section 6 (reply naturally, no identity line, per `voice.md` Rule 3).
-2. Set thread `status:"escalated"`.
+1. Post a brief holding reply to the seller ("Let me check on that and get back to you shortly!"),
+   **bracketed exactly like a normal send (section 6)** — `journal_send.py intent --side buy` →
+   pace → `type`+`send()` → `journal_send.py commit --side buy --status escalated`. This makes the
+   holding reply + cursor advance atomic, so a crash mid-pass can never re-escalate (the buy-side
+   mirror of the Olaf failure). Reply naturally, no identity line, per `voice.md` Rule 3.
+2. The `commit --side buy --status escalated` in step 1 already set thread `status:"escalated"`
+   **and** advanced the cursor (the holding reply *is* the handling) — do not re-advance or hand-edit
+   the thread file.
 3. Append to `data/buyer_escalations.jsonl`:
    `{"thread_id","want_id","seller_handle","open_question","context_summary","status":"open","ts"}`.
-4. Advance the cursor (the holding reply *is* the handling) and **surface the question to the user**
-   over the channel via `skills/channel/notifications.md` (`notify(...)` with a `ref` = this
-   escalation's id). The user's answer is sent to the seller and the thread returns to `active`/
-   `liaising`. (Console-only deployments fall back to a `/buy` console prompt.)
+4. **Surface the question to the user** over the channel via `skills/channel/notifications.md`
+   (`notify(...)` with a `ref` = this escalation's id). The user's answer is sent to the seller and
+   the thread returns to `active`/`liaising`. (Console-only deployments fall back to a `/buy` console
+   prompt.)
 
 ## Invariants
 - **Max budget** never stated, never loaded here, never in a reply — reached only via

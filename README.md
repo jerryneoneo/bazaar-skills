@@ -64,7 +64,9 @@ On macOS, `./setup` offers to install missing **Node** and **Google Chrome** for
 
 ## How it works
 
-Three layers, deliberately simple:
+Bazaar is an **agent** with two parts: a harness-agnostic **skill bundle** — the declarative selling/buying policy in [`skills/`](skills/) and `.claude/commands/` that the model reads and executes — driven by a resilient local **runtime** in [`bin/`](bin/): a single-flight launchd daemon with leasing, pacing, crash-safe journaling, and a watchdog that turns those playbooks into a worker that runs itself. (Claude Code is the swappable *harness* it runs inside — not what it is; see the support table above.)
+
+The skill bundle itself is three layers, deliberately simple:
 
 - **Channel** — how you talk to the agent. Adapter-agnostic flows (`skills/channel/*.md`) are written against a small set of abstract verbs, so Telegram and the console behave identically (and new channels drop in the same way).
 - **Browser** — how it acts on marketplaces. A shared action vocabulary (`skills/browser-actions.md`) plus per-site recipes (`skills/listing-flows/*.md`) drive your real Chrome session, so the agent acts as you with your existing logins.

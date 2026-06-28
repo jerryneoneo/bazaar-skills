@@ -4,7 +4,8 @@
 Pipeline: build the corpus (eval_corpus) -> deterministic checks (eval_checks, $0) -> optional
 LLM judge (eval_judge) over the not-yet-flagged records -> cluster into improvement candidates
 (eval_cluster) -> persist. The deterministic checks alone catch the two reported defects, so
-`--no-llm` is a complete, zero-cost run (used by the nightly daemon self-check + CI).
+`--no-llm` is a complete, zero-cost run (CI gate, and the nightly daemon when
+config.eval_judge_nightly is false). By default the nightly daemon runs WITH the judge.
 
 Outputs (all local, gitignored — they quote conversation text):
     data/eval/findings.jsonl       every finding

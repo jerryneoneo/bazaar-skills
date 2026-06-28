@@ -171,6 +171,24 @@ def test_heartbeat_status():
     check("reports the age in seconds", abs(age - 10) < 0.01)
 
 
+def test_lock_pid_consistency():
+    print("Fix D: lock/heartbeat PID consistency — the split-brain seen in the incident is flagged:")
+    import os as _os
+    me = _os.getpid()
+    # heartbeat PID alive AND matches the lock holder → ok.
+    ok = healthcheck.lock_pid_consistency(hb_pid=me, holder_pid=me, hb_pid_alive=True)
+    check("alive + matching → ok", ok["level"] == healthcheck.OK)
+    # heartbeat PID dead → WARN (the dead-PID heartbeat from the incident).
+    dead = healthcheck.lock_pid_consistency(hb_pid=92748, holder_pid=92748, hb_pid_alive=False)
+    check("dead heartbeat pid → warn", dead["level"] == healthcheck.WARN)
+    # heartbeat PID alive but DISAGREES with the lock holder → WARN (split-brain).
+    split = healthcheck.lock_pid_consistency(hb_pid=111, holder_pid=222, hb_pid_alive=True)
+    check("alive but mismatched → warn", split["level"] == healthcheck.WARN)
+    # No data to compare (missing heartbeat or lock) → ok (don't false-alarm; other checks cover it).
+    none = healthcheck.lock_pid_consistency(hb_pid=None, holder_pid=None, hb_pid_alive=False)
+    check("no data → ok (no false alarm)", none["level"] == healthcheck.OK)
+
+
 if __name__ == "__main__":
     print("healthcheck tests\n")
     test_onboarded()
@@ -181,6 +199,7 @@ if __name__ == "__main__":
     test_permissions_check_no_crash()
     test_render_and_secret_safety()
     test_heartbeat_status()
+    test_lock_pid_consistency()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

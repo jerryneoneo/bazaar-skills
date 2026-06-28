@@ -107,6 +107,7 @@ return
 ```
 item.size_bucket = choice
 if item has floor + size → item.status = "live"          # now fully managed
+    if item.published_at is unset: item.published_at = <now ISO-8601>   # stale-listing clock (listing_health.py); set once
 say "✅ Now managing “<title>”, I'll watch its <market> chats and negotiate for you."
 current_item_id = item_id ; → DISTRIBUTE this item (offer cross-list), then next queue entry
 ```

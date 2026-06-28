@@ -35,6 +35,15 @@ from pathlib import Path
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_TTL_SEC = 120
 
+# AGENT_MARKET_TTL_SEC: the canonical liveness window for a `market:<id>` lease held by a supervisor
+# worker. The supervisor (bin/supervisor.py) acquires + heartbeats each market lease with this TTL,
+# and journal_reconcile's live-lease guard MUST read liveness with the SAME window — otherwise a
+# worker whose heartbeat is 120-600s old reads LIVE to the supervisor but stale to the guard, and
+# reconcile folds the worker's still-in-flight intent (the Olaf in-flight-steal). Keep this the single
+# source of truth: supervisor.py's LEASE_TTL_SEC SHOULD be switched to import this constant so the two
+# can never drift (a follow-up — supervisor.py is owned by a parallel round and is not edited here).
+AGENT_MARKET_TTL_SEC = 600
+
 
 def data_dir():
     env = os.environ.get("BAZAAR_DATA_DIR")

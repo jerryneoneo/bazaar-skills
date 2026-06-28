@@ -38,6 +38,7 @@ CDP_URL = "http://127.0.0.1:9222/json/version"
 DAEMON_LABELS = ("com.bazaarskills.chrome", "com.bazaarskills.agent")
 AGENT_LABEL = "com.bazaarskills.agent"
 HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / ".daemon.heartbeat"
+LOCK_PATH = Path(__file__).resolve().parent.parent / ".daemon.instancelock"
 # Normal cadence is ~15s idle / ~4s mid-pass (run_pass ticks the heartbeat), so a 300s gap means the
 # loop is genuinely wedged (e.g. a hung subprocess), not merely busy in a long pass.
 HEARTBEAT_STALE_SEC = 300
@@ -246,6 +247,48 @@ def heartbeat_check() -> list[dict]:
                    "loop may be starting or wedged — check logs/daemon.log")]
 
 
+def lock_pid_consistency(hb_pid, holder_pid, hb_pid_alive: bool) -> dict:
+    """PURE: cross-reference the heartbeat PID against the instance-lock holder PID — the exact
+    split-brain from the incident (a stale heartbeat from a DEAD pid, or a heartbeat PID that
+    disagrees with the live lock holder, i.e. two writers). Returns an ok/warn check dict.
+
+    Stays OK (no false alarm) when there's nothing to compare (a missing heartbeat or lock → other
+    checks own those cases). WARNs only on a CONFIDENT inconsistency:
+      • the heartbeat PID is dead              → a corpse is still 'heartbeating' (the incident), or
+      • the heartbeat PID disagrees with the lock holder while alive → two daemons / split-brain."""
+    if hb_pid is None or holder_pid is None:
+        return _check("daemon-lock-consistency", OK, "no lock/heartbeat PID to cross-check")
+    if not hb_pid_alive:
+        return _check("daemon-lock-consistency", WARN,
+                      f"heartbeat PID {hb_pid} is not alive (stale heartbeat from a dead daemon)",
+                      "restart the daemon: launchd/install_daemon.sh install (the watchdog also heals this)")
+    if hb_pid != holder_pid:
+        return _check("daemon-lock-consistency", WARN,
+                      f"heartbeat PID {hb_pid} ≠ instance-lock holder {holder_pid} (split-brain?)",
+                      "two daemons may be running — restart: launchd/install_daemon.sh install")
+    return _check("daemon-lock-consistency", OK, f"heartbeat + lock agree (pid {hb_pid}, alive)")
+
+
+def lock_pid_check() -> list[dict]:
+    """If the always-on AGENT daemon is LOADED, cross-check the heartbeat PID against the
+    instance-lock holder PID (lock_pid_consistency). Silent (returns []) in interactive mode or when
+    launchctl can't confirm the job is loaded — same gating as heartbeat_check. Reads only PIDs."""
+    la = Path.home() / "Library" / "LaunchAgents"
+    if not (la / f"{AGENT_LABEL}.plist").exists():
+        return []
+    if _launchctl_loaded(AGENT_LABEL) is not True:
+        return []
+    import instance_lock  # local bin/ module — PID liveness + lock-holder parse (no side effects)
+    try:
+        hb_pid = json.loads(HEARTBEAT_PATH.read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        hb_pid = None
+    holder_pid = instance_lock.read_holder_pid(LOCK_PATH)
+    hb_alive = instance_lock.is_pid_alive(hb_pid) if isinstance(hb_pid, int) else False
+    check = lock_pid_consistency(hb_pid if isinstance(hb_pid, int) else None, holder_pid, hb_alive)
+    return [] if check["level"] == OK else [check]
+
+
 def run_checks(harness_name: str | None = None) -> dict:
     data_dir = _data_dir()
     cdp = cdp_check()
@@ -258,6 +301,7 @@ def run_checks(harness_name: str | None = None) -> dict:
         *permissions_check(harness_name),
         *daemon_checks(),
         *heartbeat_check(),
+        *lock_pid_check(),
     ]
     return {
         "ok": all(c["level"] != FAIL for c in checks),

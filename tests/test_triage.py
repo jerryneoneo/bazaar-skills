@@ -164,6 +164,44 @@ def test_listings_draft_and_undistributed():
         check("sold item not flagged", "d" not in issues)
 
 
+def test_followups_due_surfaced():
+    print("stale chat (we sent last msg, aged past the gap) surfaces under followups:")
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_json(tmp, "config.json", {"followup_enabled": True})
+        # buyer's last contact, then our reply ~1d+ ago and unanswered -> nudge #1 due
+        _write_json(tmp, "threads/fb:1.json",
+                    _thread("active", [_in("i1", "interested"), _out("o2", "yes, available")], "o2"))
+        d = triage.build_digest(Path(tmp), NOW)
+        check("one follow-up due", d["counts"]["followups"] == 1)
+        check("flagged as a nudge", d["followups"][0]["action"] == "nudge")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_json(tmp, "config.json", {"followup_enabled": False})
+        _write_json(tmp, "threads/fb:1.json",
+                    _thread("active", [_in("i1", "interested"), _out("o2", "yes, available")], "o2"))
+        d = triage.build_digest(Path(tmp), NOW)
+        check("disabled -> no follow-ups surfaced", d["counts"]["followups"] == 0)
+
+
+def test_listings_stale_surfaced():
+    print("live published listing with no buyer interest for 7d+ surfaces under listings_stale:")
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_json(tmp, "config.json", {"listing_health_enabled": True, "stale_days": 7})
+        # published 2026-06-01 (~26d before NOW), never any inbound -> stale
+        _write_json(tmp, "items/silent.json",
+                    {"item_id": "silent", "title": "Silent", "status": "live",
+                     "list_price": 20, "listing_urls": {"fb": "u"}, "imported_at": "2026-06-01"})
+        # a draft is NOT a staleness signal (owned by the draft/undistributed row)
+        _write_json(tmp, "items/draft.json",
+                    {"item_id": "draft", "title": "Draft", "status": "draft", "listing_urls": {}})
+        d = triage.build_digest(Path(tmp), NOW)
+        ids = {r["item_id"] for r in d["listings_stale"]}
+        check("one stale listing", d["counts"]["listings_stale"] == 1)
+        check("the silent one flagged", "silent" in ids)
+        check("draft not in stale", "draft" not in ids)
+        check("draft still in listings", any(r["item_id"] == "draft" for r in d["listings"]))
+
+
 def test_open_checkouts():
     print("issued/pending checkouts flagged, completed excluded:")
     with tempfile.TemporaryDirectory() as tmp:
@@ -276,6 +314,8 @@ if __name__ == "__main__":
     test_unread_no_cursor_means_unread()
     test_unread_buy_thread_detected()
     test_listings_draft_and_undistributed()
+    test_followups_due_surfaced()
+    test_listings_stale_surfaced()
     test_open_checkouts()
     test_open_wants()
     test_cadence_overdue_and_fresh()
