@@ -2,8 +2,10 @@
 
 Where Bazaar Skills is headed. This is **directional, not a set of commitments**; order and timing
 shift as we learn. The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter
-seams throughout), so most roadmap items slot in without reworking the core. They're just not wired
-for runtime yet. For the system design behind these items, see
+seams throughout), so most roadmap items slot in behind stable interfaces. The axes are at different
+stages: the channel seam is clean (some adapters below are already built and just await onboarding
+exposure), while the OS seam needs some core work beyond a new adapter (the daemon's instance lock and
+notification path still assume macOS). For the system design behind these items, see
 [ARCHITECTURE-OVERVIEW.md](ARCHITECTURE-OVERVIEW.md).
 
 Versions track the root [`VERSION`](VERSION) file; shipped changes are recorded in
@@ -50,12 +52,17 @@ Released 2026-06-28 (see [CHANGELOG.md](CHANGELOG.md)):
 
 ## 🔭 Later
 
-Designed-for via adapter seams; not yet wired for runtime.
+Designed-for via adapter seams. Status varies by item, as noted.
 
-- **More channels.** iMessage, WhatsApp, Slack, and running **multiple channels at once**.
-- **More operating systems.** Windows always-on daemon and Linux (`systemd`).
-- **More harnesses and flexible model selection.** Additional agent harnesses beyond Claude Code,
-  and per-task model choice through the same seam.
+- **More channels.** The **iMessage and WhatsApp adapters are already built and daemon-dispatched**;
+  what remains is exposing them in onboarding (today onboarding offers only Telegram + console).
+  **Slack** and running **multiple channels at once** are still planned (not yet built).
+- **More operating systems.** Windows (Task Scheduler) has a real but incomplete platform adapter;
+  Linux (`systemd`) has none yet. Both need some core work beyond a new adapter — the daemon's
+  single-instance lock (`fcntl`), the notification trigger, and the health checks still assume macOS.
+- **More harnesses and flexible model selection.** Additional agent harnesses beyond Claude Code
+  (the Codex install layer exists; its runtime is an unverified stub), and per-task model choice
+  through the same seam.
 - **More marketplaces.** Depop, ThredUp, Nextdoor (catalogued today as stubs).
 - **Discount-vs-new framing.** Show the real percentage off brand-new retail in listings and
   negotiation, from a seller-confirmed figure.
