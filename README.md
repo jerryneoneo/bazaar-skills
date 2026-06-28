@@ -16,7 +16,7 @@ _An open-source project by [Carousell](https://carousell.com)._
 
 You chat with it on Telegram or the console. It lists your items on the marketplaces that fit your region, replies to buyers and sellers in a natural voice, and negotiates within limits you set — your lowest sell price and highest buy budget stay secret. Everything ships **P2P**, so every deal has one clear total: price + delivery.
 
-### Supported today (`v0.1.0`)
+### Supported today (`v0.2.0`)
 
 | | Now | On the roadmap |
 |---|---|---|
@@ -24,7 +24,7 @@ You chat with it on Telegram or the console. It lists your items on the marketpl
 | **OS** | macOS | Linux · Windows |
 | **Harness** | Claude Code | Codex · others |
 
-The architecture is channel-, OS-, and harness-agnostic by design (adapter seams throughout), so the roadmap items slot in without reworking the core. They're just not wired for runtime yet.
+The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter seams throughout), so the roadmap items slot in without reworking the core. They're just not wired for runtime yet. See **[ROADMAP.md](ROADMAP.md)** for the full picture.
 
 ---
 
@@ -71,6 +71,8 @@ Three layers, deliberately simple:
 - **Deterministic money code** — the only logic that touches secrets is plain, tested Python with JSON in/out: `bin/floor_gate.py` (accept/counter/reject against your hidden floor) and `bin/shipping.py` (delivery fee + buyer total from your zone table). **Your floor and exact address never enter a prompt, reply, listing, or transcript** — buyers only ever see a delivery *fee*.
 
 You choose how hands-off it is. Onboarding sets an autonomy preset — `hands-free`, `balanced`, or `all-steps` — wiring both the business approval gates *and* the harness permission layer together, so an unattended run isn't blocked by per-tool prompts. An above-list or bidding close **always** asks you first.
+
+For the full system design (the layers, the deterministic engines, the trust invariants, and what's built vs planned), see **[ARCHITECTURE-OVERVIEW.md](ARCHITECTURE-OVERVIEW.md)**.
 
 ---
 

@@ -76,6 +76,8 @@ data/ui_cache/*
 # data/fixtures/ (test data). See data/README.md for what every other path holds.
 
 # Internal docs — kept locally, withheld from the public repo (design / strategy, not for distribution)
+# NOTE: ARCHITECTURE.md is the INTERNAL as-built doc. The PUBLIC system overview ships as
+# ARCHITECTURE-OVERVIEW.md (a distinct basename, deliberately not matched by the pattern below).
 ARCHITECTURE.md
 gtm.md
 gtm.html
