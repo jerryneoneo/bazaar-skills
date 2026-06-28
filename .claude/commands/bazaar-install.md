@@ -35,6 +35,13 @@ Read first: `skills/channel/intro.md`, `skills/channel/adapters.md`, `skills/mar
 ```
 say  intro  (reuse skills/channel/intro.md body — "I'm Bazaar …")
 
+# PERMISSIONS: let me act for you. SAY THIS UP FRONT, before §0 runs the first tool (the prompt
+#   appears the moment I run a script/browser tool; tell the user what to expect so they don't deny it).
+say  "One quick thing before we start. Claude Code will ask your permission the first time I run a
+      tool (my helper scripts, and the browser I use to reach your marketplaces). Choose Allow, and
+      pick 'Allow always' (or 'Yes, and don't ask again') so I can keep working for you without
+      pausing at every step. That one approval is what lets me list, search, and reply hands-free."
+
 # 0. HARNESS — which agent runtime are you using?
 #    Normal path: Stage 1 (install.sh / install.ps1) already had you SELECT a runtime and SIGN IN,
 #    and exports it as $BAZAAR_HARNESS — so trust it and DON'T re-ask.
@@ -140,6 +147,10 @@ say  "✅ Bazaar is set up. Send /list with photos to sell, /search to buy, or o
 - The autonomy step (§8) is what lets Bazaar list, search, and check chats unattended — it wires the
   business-approval preset AND the harness allow-list/approval-mode together (see
   `skills/bazaar-config.md` → "Two layers of autonomy").
+- **Permissions up front:** the PERMISSIONS `say` (before §0) tells the user Claude Code will prompt on
+  the first tool and to pick "Allow always". Without that approval every step stalls on a prompt and
+  the interactive setup feels broken. (The always-on daemon doesn't hit this: it runs with a pre-granted
+  `--allowedTools` list from §5/§8 gen-settings.)
 - Re-running is safe and idempotent; for piecemeal changes after setup, use `/bazaar`.
 - Honor `--dry-run`: `install.py supervisor` stays in dry-run; no Chrome launch; report intended steps.
 ```

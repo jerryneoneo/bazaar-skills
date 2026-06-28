@@ -31,6 +31,10 @@ say()  { printf '\033[1;36mBazaar:\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mBazaar:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# Are we running inside an agent (Claude Code / Codex) rather than a person at a terminal? Such a
+# context has /dev/tty but no human to answer it: reads block, and an exec'd nested agent is invisible.
+in_agent()       { [ -n "${CLAUDECODE:-}" ] || [ -n "${AI_AGENT:-}" ] || [ -n "${BAZAAR_DAEMON_PASS:-}" ]; }
+can_attach_tty() { [ -t 0 ] && [ -t 1 ] && [ -e /dev/tty ] && ! in_agent; }   # a REAL interactive terminal
 
 # --- dependency auto-install helpers (macOS / Homebrew) --------------------------------------
 brew_bin() {
@@ -39,9 +43,9 @@ brew_bin() {
   [ -x /usr/local/bin/brew ]   && { echo /usr/local/bin/brew;   return 0; }
   return 1
 }
-confirm_yes() {  # confirm_yes "question" -> 0 yes / 1 no; auto-yes with --yes; no TTY -> no
+confirm_yes() {  # confirm_yes "question" -> 0 yes / 1 no; auto-yes with --yes; no real terminal -> no
   [ "$ASSUME_YES" = 1 ] && return 0
-  [ -e /dev/tty ] || return 1
+  can_attach_tty || return 1
   printf '\033[1;36mBazaar:\033[0m %s [Y/n] ' "$1" >/dev/tty
   local ans=""; read -r ans </dev/tty || return 1
   case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
@@ -119,7 +123,8 @@ present_label()     { have "$1" && echo "[installed]" || echo "[not installed]";
 if [ -n "$HOST" ]; then
   HARNESS="$(normalize_harness "$HOST")"
   [ -n "$HARNESS" ] || die "--host must be claude|claude-code|codex (got '$HOST')."
-elif [ "$ASSUME_YES" = 1 ] || [ ! -e /dev/tty ]; then
+elif [ "$ASSUME_YES" = 1 ] || ! can_attach_tty; then
+  # No real terminal to answer the menu (CI, piped, or inside an agent) -> don't stall on /dev/tty.
   HARNESS="$(python3 bin/bazaar-config get host 2>/dev/null || true)"
   [ -n "$HARNESS" ] || HARNESS="claude-code"   # only verified runtime → safe non-interactive default
 else
@@ -151,7 +156,7 @@ fi
 # --- 3. sign-in gate -------------------------------------------------------------------------
 while ! python3 bin/install.py harness --name "$HARNESS" >/dev/null 2>&1; do
   warn "$AGENT is not signed in yet."
-  if [ -e /dev/tty ] && [ "$ASSUME_YES" != 1 ]; then
+  if can_attach_tty && [ "$ASSUME_YES" != 1 ]; then
     say "Sign in: run \`$(signin_cmd "$AGENT")\` in another terminal, then press Enter to re-check (q to quit)."
     read -r ans </dev/tty || die "No input — sign in, then re-run ./setup."
     case "$ans" in q|Q) die "Aborted. Sign in, then re-run ./setup." ;; esac
@@ -204,5 +209,15 @@ if [ -f "$SELF_DIR/data/seller_config.json" ]; then
   exit 0
 fi
 export BAZAAR_HARNESS="$HARNESS"
-say "First-time setup — handing off to $AGENT for guided onboarding…"
-exec "$AGENT" "$HANDOFF_PROMPT"
+if can_attach_tty; then
+  say "First-time setup — handing off to $AGENT for guided onboarding…"
+  exec "$AGENT" "$HANDOFF_PROMPT"        # bare terminal: replace this process with the onboarding session
+fi
+# Inside an agent / non-TTY: an exec'd nested session has no attachable TTY and would be invisible — the
+# onboarding the user expects never appears. Emit an explicit directive the calling agent (or user)
+# follows, then exit cleanly. The next session also self-heals (bin/hooks/onboarding_notice.py).
+say "Bazaar v$VER is installed (launchers, config, migrations done) — onboarding isn't finished yet."
+say "NEXT: $HANDOFF_PROMPT"
+say "  • In this Claude session: run /bazaar-install  (or just say: set me up)."
+say "  • In a plain terminal:     $AGENT \"$HANDOFF_PROMPT\""
+exit 0
