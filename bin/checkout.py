@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe (tmp + os.replace) JSON writes
 import floor_gate  # reuse load_floor_record — the floor stays here, never leaves
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -117,8 +118,7 @@ def issue(item_id: str, thread_id: str, price: float) -> dict:
         "currency": _currency(),
         "issued_at": _now(),
     }
-    CHECKOUTS_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=2) + "\n")
+    atomic_io.write_json(path, record)
     return record
 
 

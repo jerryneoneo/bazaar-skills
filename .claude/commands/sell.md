@@ -38,4 +38,6 @@ Then:
 - Floor only in `data/floors/<id>.json`; never shown or stated.
 - Above-list offers → **bidding → confirm with me first** (never auto-commit). Record offers only
   from the buyer's real words (no invented numbers).
-- Ship-only; account-safety pacing on browser actions; human confirms before publishing.
+- Ship-only; account-safety pacing on browser actions. Publishing follows
+  `config.approvals.steps.publish`: the default and hands-free presets publish automatically;
+  stricter presets confirm with you first.

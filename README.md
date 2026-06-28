@@ -91,6 +91,8 @@ Alongside the marketplaces you post to by hand, Bazaar can publish your item to 
 
 *Skip it* and you only reach the marketplaces you cross-post to yourself.
 
+> **Status:** carousell.ai publishing runs through the hosted rail (a separate workstream) and is **not yet wired in this build** — today you reach buyers on the marketplaces you cross-post to yourself.
+
 ### Checking out via carousell.ai — vs. manual
 
 At close, the recommended path is a **carousell.ai checkout link** instead of arranging payment and delivery yourself.
@@ -101,7 +103,9 @@ At close, the recommended path is a **carousell.ai checkout link** instead of ar
 
 *Skip it* and you coordinate payment and handover manually (e.g. bank transfer + your own shipping) — more work, less protection.
 
-> You stay in control: carousell.ai listing and checkout are defaults *because they're better*, never mandatory. Where the hosted checkout isn't available yet, the agent falls back to coordinating a manual handover.
+> **Status:** the carousell.ai checkout rail (escrow, tracked label, funds-hold) is a separate hosted workstream and is **not yet wired in this build** — today the checkout link is a stub (`bin/checkout.py`), so the agent closes via **manual handover**. The escrow / tracked-shipping / buyer-protection benefits above describe the rail once it lands, not what runs today.
+>
+> You stay in control regardless: carousell.ai listing and checkout are defaults *because they're better*, never mandatory.
 
 ---
 

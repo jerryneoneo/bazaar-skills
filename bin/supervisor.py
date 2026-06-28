@@ -19,14 +19,13 @@ exclusive passes; only the parallel buyer fan-out and the per-resource leases ar
 
 import json
 import logging
-import os
-import signal
 import subprocess
 import sys
 import time
 
 import agent_daemon as ad   # imported lazily by ad.main() → fully-initialized module, no cycle
 import lease
+import proc_tree   # shared kill-the-whole-tree teardown (also used by agent_daemon's default loop)
 
 LEASE_TTL_SEC = 600    # crash-recovery TTL — generously above any single loop iteration's blocking
                        # subprocess timeouts, so a live worker's lease is never wrongly reclaimed.
@@ -95,30 +94,14 @@ def _holder(market, seq):
     return f"sup:buyer:{market}:{seq}"
 
 
+# Teardown lives in proc_tree (shared with agent_daemon's default loop). Kept as thin module-local
+# aliases so the worker call sites and tests read naturally.
 def _kill_tree(proc, sig):
-    """Signal the worker's whole process GROUP, not just the wrapper. Workers are launched with
-    start_new_session=True, so the pgid == the wrapper pid — this reaches run_pass.sh → harness_run
-    → the `claude` grandchild that actually drives the tab. (Signalling only proc.pid would orphan
-    claude, leaving it driving the account after the lease is released — the CRITICAL bug.)"""
-    try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass  # already gone
+    proc_tree.kill_tree(proc, sig)
 
 
-def _confirm_dead(proc, grace=10):
-    """SIGTERM the group, wait, then SIGKILL — return ONLY once the whole tree is gone."""
-    _kill_tree(proc, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    _kill_tree(proc, signal.SIGKILL)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        logging.error("worker pid %s survived SIGKILL", proc.pid)
+def _confirm_dead(proc, grace=proc_tree.GRACE_SEC):
+    proc_tree.confirm_dead(proc, grace)
 
 
 def _reap(workers):
@@ -224,9 +207,16 @@ def _launch_buyer(market, env, peek, holder, dry_run, hint=None):
     worker_env = {**env, "BAZAAR_BUYER_PEEK_TEXT": text}
     # start_new_session=True → the worker leads its own process group, so _kill_tree can signal the
     # whole tree (wrapper + claude grandchild) on preempt. Without it, preempt would orphan claude.
-    proc = subprocess.Popen([str(ad.BIN / "run_pass.sh"), "buyer", "--resource", market],
-                            env=worker_env, cwd=str(ad.SELLER_DIR), start_new_session=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        proc = subprocess.Popen([str(ad.BIN / "run_pass.sh"), "buyer", "--resource", market],
+                                env=worker_env, cwd=str(ad.SELLER_DIR), start_new_session=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        # Popen failed (e.g. fork/ENOMEM/exec error) AFTER we took the lease — release it so the
+        # market isn't stranded until the TTL expires, and don't crash the supervisor loop.
+        logging.error("buyer worker [%s]: launch failed (%s) — releasing lease", market, exc)
+        lease.release(_data(), f"market:{market}", holder)
+        return None
     return proc
 
 
@@ -252,8 +242,10 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         if ad._source_fingerprint() != src_fp:
             logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
             break
+        ad._touch_heartbeat()  # same .daemon.heartbeat the single-flight loop writes — so healthcheck's
+                               # staleness check works in concurrent mode too (else it WARNs falsely)
         _reap(workers)
-        _heartbeat(workers)
+        _heartbeat(workers)  # lease heartbeats for live workers (distinct from the daemon heartbeat above)
         _drain_outbox(channel, env, ns.dry_run)   # flush queued background notices, in order
         paused = ad.control.is_paused()
 

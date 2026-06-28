@@ -21,6 +21,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # crash-safe (tmp + os.replace) JSON writes
 from scan_state import parse_iso  # reuse the tz-safe ISO parser
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -66,7 +68,7 @@ def run_due(now: datetime) -> dict:
 def run_mark(now: datetime) -> dict:
     state = _load_json(EVAL_STATE_PATH)
     updated = {**state, "last_eval_at": now.isoformat()}
-    EVAL_STATE_PATH.write_text(json.dumps(updated, indent=2) + "\n")
+    atomic_io.write_json(EVAL_STATE_PATH, updated)
     return updated
 
 

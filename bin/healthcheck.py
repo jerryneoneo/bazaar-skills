@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -35,6 +36,11 @@ from platforms import UnsupportedPlatform  # noqa: E402
 
 CDP_URL = "http://127.0.0.1:9222/json/version"
 DAEMON_LABELS = ("com.bazaarskills.chrome", "com.bazaarskills.agent")
+AGENT_LABEL = "com.bazaarskills.agent"
+HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / ".daemon.heartbeat"
+# Normal cadence is ~15s idle / ~4s mid-pass (run_pass ticks the heartbeat), so a 300s gap means the
+# loop is genuinely wedged (e.g. a hung subprocess), not merely busy in a long pass.
+HEARTBEAT_STALE_SEC = 300
 
 FAIL, WARN, OK = "fail", "warn", "ok"
 
@@ -135,6 +141,43 @@ def daemon_checks() -> list[dict]:
     return results
 
 
+def heartbeat_status(raw: str | None, now: float, stale_sec: int = HEARTBEAT_STALE_SEC):
+    """PURE: classify a heartbeat file's content. Returns (level, age_seconds|None).
+    level: "ok" (ticking) | "stale" (loaded but loop wedged) | "missing" (no/invalid heartbeat)."""
+    if raw is None:
+        return ("missing", None)
+    try:
+        ts = float(json.loads(raw).get("ts"))
+    except (ValueError, TypeError, AttributeError):
+        return ("missing", None)
+    age = now - ts
+    return (("stale" if age > stale_sec else "ok"), age)
+
+
+def heartbeat_check() -> list[dict]:
+    """If the always-on AGENT daemon is LOADED, WARN when its loop heartbeat is missing or stale —
+    launchd thinks the job is up but the loop isn't ticking (wedged on a hung subprocess). The
+    "installed but not loaded" case is already covered by daemon_checks, so skip it here."""
+    la = Path.home() / "Library" / "LaunchAgents"
+    if not (la / f"{AGENT_LABEL}.plist").exists():
+        return []  # interactive mode — no daemon loop expected
+    if _launchctl_loaded(AGENT_LABEL) is not True:
+        return []
+    try:
+        raw = HEARTBEAT_PATH.read_text()  # no exists() pre-check → no TOCTOU on a vanishing file
+    except OSError:
+        raw = None
+    level, age = heartbeat_status(raw, time.time())
+    if level == "ok":
+        return [_check("daemon-heartbeat", OK, f"loop ticking ({int(age)}s ago)")]
+    if level == "stale":
+        return [_check("daemon-heartbeat", WARN,
+                       f"daemon loaded but loop hasn't ticked in {int(age)}s (wedged?)",
+                       "check logs/daemon.log; restart via launchd/install_daemon.sh install")]
+    return [_check("daemon-heartbeat", WARN, "daemon loaded but no heartbeat yet",
+                   "loop may be starting or wedged — check logs/daemon.log")]
+
+
 def run_checks(harness_name: str | None = None) -> dict:
     data_dir = _data_dir()
     checks = [
@@ -143,6 +186,7 @@ def run_checks(harness_name: str | None = None) -> dict:
         onboarded_check(data_dir),
         *marketplace_checks(data_dir),
         *daemon_checks(),
+        *heartbeat_check(),
     ]
     return {
         "ok": all(c["level"] != FAIL for c in checks),

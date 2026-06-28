@@ -21,6 +21,9 @@ import math
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import atomic_io  # harden the hidden floor file to owner-only on read (it holds the secret floor)
+
 # Path to the floors dir, resolved relative to this script (bin/ -> ../data/floors).
 FLOORS_DIR = Path(__file__).resolve().parent.parent / "data" / "floors"
 
@@ -32,6 +35,7 @@ def load_floor_record(item_id):
     path = FLOORS_DIR / f"{item_id}.json"
     if not path.exists():
         raise FileNotFoundError(f"no floor record for item_id={item_id!r} at {path}")
+    atomic_io.harden(path)  # the floor is confidential — never leave it world-readable
     record = json.loads(path.read_text())
     floor = record.get("floor")
     list_price = record.get("list_price")

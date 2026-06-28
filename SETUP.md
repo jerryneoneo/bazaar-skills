@@ -109,8 +109,10 @@ Create **`~/bazaar-skills/.claude/settings.local.json`** (gitignored):
 - **`.mcp.json`** registers Playwright MCP and **attaches** to a running Chrome (doesn't relaunch):
   ```json
   { "mcpServers": { "playwright": { "command": "npx",
-      "args": ["-y","@playwright/mcp@latest","--cdp-endpoint","http://127.0.0.1:9222"] } } }
+      "args": ["-y","@playwright/mcp@0.0.76","--cdp-endpoint","http://127.0.0.1:9222"] } } }
   ```
+  > The MCP version is **pinned** (`@0.0.76`, not `@latest`) on purpose — a floating tag can pull a
+  > breaking release mid-session. Bump it deliberately, then re-run the suite.
 - **`bin/chrome_debug.sh`** launches real Chrome on the persistent profile `.browser-profile` with
   `--remote-debugging-port=9222`. launchd keeps it alive (§8).
 - **🔧 MANUAL — log in once:** with that Chrome open, sign into **each marketplace you enabled**
@@ -134,9 +136,12 @@ cd ~/bazaar-skills
 bin/chrome_debug.sh &                         # warm Chrome (first time, confirm logins)
 launchd/install_daemon.sh install             # loads chrome + agent LaunchAgents (RunAtLoad+KeepAlive)
 ```
-- ⚠️ GOTCHA — **plist PATH**: `launchd/com.bazaarskills.agent.plist` must list the dirs where
-  `claude`/`npx`/`node` live (nvm bin + `~/.local/bin`). launchd has a minimal PATH otherwise →
-  passes can't find `claude`/`npx`. Derive from your `which` output (§2).
+- **plist PATH (auto-derived):** the committed plists are TEMPLATES — `launchd/install_daemon.sh`
+  substitutes `__RUNTIME__` (this checkout), `__PATH__` (the dirs where your `claude`/`npx`/`node`
+  live, detected via `which` at install), and `__PYTHON__` (a stable FDA-grantable interpreter,
+  preferring Homebrew python over the bare `/usr/bin/python3` shim) before copying them into
+  `~/Library/LaunchAgents`. You only need to hand-edit `__PATH__` if detection misses a dir
+  (launchd jobs otherwise get a minimal PATH and can't find `claude`/`npx`).
 - The two jobs: `com.bazaarskills.chrome` (warm browser) + `com.bazaarskills.agent`
   (`bin/agent_daemon.py`). They start at login and restart on crash.
 
