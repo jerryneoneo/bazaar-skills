@@ -24,7 +24,7 @@ You chat with it on Telegram or the console. It lists your items on the marketpl
 | **OS** | macOS | Linux · Windows |
 | **Harness** | Claude Code | Codex · others |
 
-The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter seams throughout), so the roadmap items slot in without reworking the core. They're just not wired for runtime yet. See **[ROADMAP.md](ROADMAP.md)** for the full picture.
+The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter seams throughout), so most roadmap items slot in behind stable interfaces. The axes are at different stages, though: the channel seam is clean (the iMessage and WhatsApp adapters are already built and daemon-dispatched, pending onboarding exposure), while the OS seam needs core work beyond a new adapter (the daemon's instance lock and notification path still assume macOS). Wired for runtime today: Telegram + console, macOS, Claude Code. See **[ROADMAP.md](ROADMAP.md)** for the full picture.
 
 ---
 
