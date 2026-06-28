@@ -39,6 +39,8 @@ data/buy_session.json
 data/inbox_detect_session.json
 data/catchup_session.json
 data/buyer_peek_state.json
+data/inbox_buy_state.json
+data/inbox_sell_state.json
 data/notify_watch_state.json
 data/scan_state.json
 data/scan_state.json.tmp
@@ -79,6 +81,9 @@ data/ui_cache/*
 # NOTE: ARCHITECTURE.md is the INTERNAL as-built doc. The PUBLIC system overview ships as
 # ARCHITECTURE-OVERVIEW.md (a distinct basename, deliberately not matched by the pattern below).
 ARCHITECTURE.md
+# AGENT.md is the INTERNAL runtime deep-dive (same depth as ARCHITECTURE.md) — withheld from public
+# until reviewed. Flip this off (and link it from README) to ship it.
+AGENT.md
 gtm.md
 gtm.html
 

@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import buyer_recheck  # noqa: E402
 import buyer_peek  # noqa: E402
+import inbox_scan  # noqa: E402  precise per-thread signal that overrides the count for enumerable markets
 
 _fail = []
 
@@ -100,12 +101,57 @@ def test_readonly_no_memo_write():
     check("did not write the memo", raised is False)
 
 
+def _patch_precise(signal):
+    """Override the precise per-thread signal (inbox_scan.sell_actionable_now). Returns restore()."""
+    saved = inbox_scan.sell_actionable_now
+    inbox_scan.sell_actionable_now = lambda: dict(signal)
+    return lambda: setattr(inbox_scan, "sell_actionable_now", saved)
+
+
+def test_precise_excludes_promos():
+    print("precise signal: enumerable market has count>0 (promos) but precise says clear → unhandled 0:")
+    restore = _patch(["carousell"], {"carousell": {"found": True, "count": 9, "snippet": "promo"}})
+    unpatch = _patch_precise({"carousell": False})
+    try:
+        out = buyer_recheck.recheck()
+        check("carousell unhandled False despite count 9", out["markets"]["carousell"]["unhandled"] is False)
+        check("total unhandled 0 (forced sweep skipped)", out["unhandled"] == 0)
+    finally:
+        unpatch(); restore()
+
+
+def test_precise_flags_real_activity():
+    print("precise signal: enumerable market precise True → still unhandled (real buyer not missed):")
+    restore = _patch(["carousell"], {"carousell": {"found": True, "count": 1, "snippet": "real buyer"}})
+    unpatch = _patch_precise({"carousell": True})
+    try:
+        out = buyer_recheck.recheck()
+        check("carousell unhandled True", out["markets"]["carousell"]["unhandled"] is True)
+        check("total unhandled 1", out["unhandled"] == 1)
+    finally:
+        unpatch(); restore()
+
+
+def test_market_absent_from_precise_uses_count():
+    print("market absent from precise (FB / scan down) → conservative count-based rule kept:")
+    restore = _patch(["fb"], {"fb": {"found": True, "count": 3, "snippet": "x"}})
+    unpatch = _patch_precise({})  # nothing precise → fall back to count
+    try:
+        out = buyer_recheck.recheck()
+        check("fb flagged unhandled by count", out["markets"]["fb"]["unhandled"] is True)
+    finally:
+        unpatch(); restore()
+
+
 if __name__ == "__main__":
     print("buyer_recheck tests\n")
     test_clear_inboxes_zero_unhandled()
     test_unread_market_flagged()
     test_unreadable_market_conservative()
     test_readonly_no_memo_write()
+    test_precise_excludes_promos()
+    test_precise_flags_real_activity()
+    test_market_absent_from_precise_uses_count()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

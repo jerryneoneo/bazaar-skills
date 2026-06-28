@@ -54,11 +54,26 @@ def recheck() -> dict:
     unhandled = 0
     latest_text = ""
 
+    # PRECISE per-thread signal for enumerable markets (Carousell): excludes buy-thread rows and
+    # promo/system accounts from "unhandled", so a forced sweep no longer fires on a promo bumping the
+    # aggregate count. Read-only and memo-free (sell_actionable_now persists nothing), preserving this
+    # gate's strictly-read-only contract. Markets absent from `precise` (FB/eBay, or a scan failure)
+    # keep the conservative count-based rule below — the safety net is never made LESS safe for a real
+    # buyer (an unread human handle still counts as unhandled; the 2h floor sweep is the last backstop).
+    try:
+        import inbox_scan  # lazy: breaks the inbox_scan -> buyer_peek import cycle
+        precise = inbox_scan.sell_actionable_now()  # {market: bool}, enumerable + readable only
+    except Exception:
+        precise = {}  # fail-open CONSERVATIVE: no precise signal → count-based for every market
+
     for market in buyer_peek.enabled_markets():
         cur = buyer_peek.probe_market(market, buyer_peek.MARKET_PROBES[market], targets)
         unknown = not cur.get("found", False)
         count = int(cur.get("count") or 0)
-        is_unhandled = unknown or count > 0
+        if market in precise:
+            is_unhandled = precise[market]  # precise: only genuine sell activity (no promos/buy rows)
+        else:
+            is_unhandled = unknown or count > 0  # conservative fallback (non-enumerable / scan down)
         markets_out[market] = {"count": count, "unknown": unknown,
                                "snippet": cur.get("snippet", ""), "unhandled": is_unhandled}
         if is_unhandled:
