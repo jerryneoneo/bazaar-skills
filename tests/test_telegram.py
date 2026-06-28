@@ -8,6 +8,8 @@ filtering — plus token-safety (missing token fails cleanly, token never printe
 send/poll/getfile round-trip is verified separately once a bot token exists.
 """
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -215,6 +217,73 @@ def test_setcommands_constraints():
     check("descriptions are 1-256 chars", ok_desc)
 
 
+def test_token_format():
+    print("token-format pre-check (offline):")
+    check("real-shaped token accepted",
+          telegram.is_valid_token_format("123456789:AAEabc_DEF-ghiJKLmnoPQRstuVWXyz012345"))
+    check("surrounding whitespace tolerated",
+          telegram.is_valid_token_format("  123:AAEabc_DEF-ghiJKLmnoPQRstuVWXyz012345  "))
+    check("missing colon rejected", not telegram.is_valid_token_format("123456789AAEabc"))
+    check("non-digit bot id rejected",
+          not telegram.is_valid_token_format("abc:AAEabc_DEF-ghiJKLmnoPQRstuVWXyz012345"))
+    check("too-short auth rejected", not telegram.is_valid_token_format("123:short"))
+    check("empty rejected", not telegram.is_valid_token_format(""))
+
+
+def _run_verify(tmp, *, token, getme=None, getme_raises=False, chat_id=None):
+    """Call cmd_verify with telegram.api/get_token mocked; return (rc, parsed_json_dict)."""
+    _isolate(tmp)
+    telegram.save_state({**telegram.DEFAULT_STATE, "chat_id": chat_id})
+    orig_api, orig_token = telegram.api, telegram.get_token
+    telegram.get_token = lambda: token
+
+    def fake_api(method, params, tok):
+        if getme_raises:
+            raise telegram.ShimError("Bot API getMe HTTP 401")
+        return getme or {"username": "my_bazaar_bot", "id": 1, "is_bot": True}
+
+    telegram.api = fake_api
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = telegram.cmd_verify(_NS())
+    finally:
+        telegram.api, telegram.get_token = orig_api, orig_token
+    return rc, json.loads(buf.getvalue())
+
+
+def test_verify():
+    print("verify gate (format -> getMe -> chat-bound):")
+    secret = "123456789:SECRETwithenoughlengthtopassformat_000000"
+    with tempfile.TemporaryDirectory() as tmp:
+        # Malformed token: never hits the network, exits 3.
+        rc, out = _run_verify(tmp, token="not-a-token")
+        check("bad format exits 3", rc == 3)
+        check("bad format -> token_valid false", out["token_valid"] is False)
+
+        # Valid token but the bot has never been /start-ed -> not ready (exit 1).
+        rc, out = _run_verify(tmp, token=secret, chat_id=None)
+        check("valid token, no chat exits 1", rc == 1)
+        check("token_valid true", out["token_valid"] is True)
+        check("chat_bound false", out["chat_bound"] is False)
+        check("bot_username surfaced", out["bot_username"] == "my_bazaar_bot")
+
+        # Valid token AND a captured chat_id -> fully ready (exit 0).
+        rc, out = _run_verify(tmp, token=secret, chat_id=188452196)
+        check("valid token + bound chat exits 0", rc == 0)
+        check("chat_bound true + chat_id reported",
+              out["chat_bound"] is True and out["chat_id"] == 188452196)
+
+        # getMe rejects the token (401) -> token_valid false, exit 3.
+        rc, out = _run_verify(tmp, token=secret, getme_raises=True)
+        check("rejected token exits 3", rc == 3)
+        check("rejected -> token_valid false", out["token_valid"] is False)
+
+        # The token must never appear in verify's output.
+        all_text = json.dumps(out)
+        check("token never printed by verify", "SECRETwithenough" not in all_text)
+
+
 if __name__ == "__main__":
     print("telegram.py structural tests\n")
     test_keyboard()
@@ -227,6 +296,8 @@ if __name__ == "__main__":
     test_setcommands_registers()
     test_setcommands_idempotent()
     test_setcommands_constraints()
+    test_token_format()
+    test_verify()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

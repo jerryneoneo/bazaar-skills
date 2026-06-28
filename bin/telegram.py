@@ -22,13 +22,19 @@ Subcommands:
           -> {"ok": true, "registered": <int>} | {"ok": true, "skipped": "unchanged"}
           Registers BOT_COMMANDS so Telegram shows them in the "/" autocomplete menu
           (setMyCommands). Idempotent: a content hash in channel_state skips redundant calls.
+  verify  -> {"token_valid": bool, "bot_username": str|null, "chat_bound": bool, "chat_id": int|null}
+          The onboarding bind gate: a fast offline token-format check, then an authoritative
+          getMe round-trip (proves the token works), then reports whether a chat has /start-ed
+          (chat_id captured). Exit 0 = ready (token valid + chat bound) · 1 = valid token but no
+          chat yet (keep the user on /start) · 3 = token missing/malformed/rejected.
 
-Exit: 0 ok · 2 bad input · 3 token/state/API error.
+Exit: 0 ok · 1 valid-but-not-ready (verify only) · 2 bad input · 3 token/state/API error.
 """
 
 import argparse
 import hashlib
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -63,6 +69,17 @@ BOT_COMMANDS = [
 
 class ShimError(Exception):
     """Operational error -> exit 3. Message must never contain the token."""
+
+
+# A Telegram bot token is `<bot_id>:<auth>` — digits, a colon, then ~35 chars of [A-Za-z0-9_-].
+# This is a cheap offline pre-check so an obviously-wrong paste fails with a clear message before
+# we hit the network; getMe (in cmd_verify) is the authoritative test.
+TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
+
+
+def is_valid_token_format(token: str) -> bool:
+    """True if `token` has the shape of a Telegram bot token. Pure + offline (testable)."""
+    return bool(TOKEN_RE.match((token or "").strip()))
 
 
 def get_token():
@@ -283,6 +300,32 @@ def cmd_setcommands(ns):
     return 0
 
 
+def cmd_verify(ns):
+    """The onboarding bind gate. Fast offline format check, then getMe (authoritative), then
+    report whether a chat has /start-ed yet. Never prints the token (getMe echoes only the bot's
+    own username, not the token)."""
+    token = get_token()  # ShimError -> exit 3 if env var is unset
+    if not is_valid_token_format(token):
+        # Don't even hit the network on an obviously-malformed paste — clearer, faster signal.
+        print(json.dumps({"token_valid": False, "bot_username": None, "chat_bound": False,
+                          "chat_id": None, "reason": "token format looks wrong (expected "
+                          "<digits>:<35+ chars>); re-copy it from BotFather"}))
+        return 3
+    try:
+        me = api("getMe", {}, token)  # bot-global; proves the token is live
+    except ShimError as exc:
+        # Token-free message by construction (api() strips the URL); 401 => bad/revoked token.
+        print(json.dumps({"token_valid": False, "bot_username": None, "chat_bound": False,
+                          "chat_id": None, "reason": str(exc)}))
+        return 3
+    state = load_state()
+    chat_id = state.get("chat_id")
+    chat_bound = chat_id is not None
+    print(json.dumps({"token_valid": True, "bot_username": me.get("username"),
+                      "chat_bound": chat_bound, "chat_id": chat_id}))
+    return 0 if chat_bound else 1
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="telegram.py", add_help=True)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -314,6 +357,8 @@ def build_parser():
     sc.add_argument("--force", action="store_true", dest="force",
                     help="re-register even if the command set is unchanged")
     sc.set_defaults(func=cmd_setcommands)
+    vf = sub.add_parser("verify")
+    vf.set_defaults(func=cmd_verify)
     return p
 
 

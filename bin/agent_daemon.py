@@ -121,6 +121,9 @@ def load_config() -> dict:
         # Nightly $0 deterministic self-eval: how often to CHECK whether one is due (the actual
         # cadence is config.eval_interval_hours, owned by eval_state.py; 0 there disables it).
         "eval_poll_sec": cfg.get("eval_poll_sec", 3600),
+        # Upstream update check: how often to CHECK for a newer Bazaar (the actual network throttle
+        # is config.update_check_interval_hours, owned by update_check.py; 0 there disables it).
+        "update_poll_sec": cfg.get("update_poll_sec", 3600),
         # Phase 3: >1 opts into the concurrent supervisor (parallel sell-inbox workers across
         # marketplaces). Default 1 keeps the single-flight loop below — byte-identical behavior.
         # BAZAAR_MAX_WORKERS env overrides the file: an ops kill-switch to force single-flight
@@ -253,6 +256,55 @@ def run_eval(env: dict, dry_run: bool) -> None:
                        capture_output=True, text=True, env=env, timeout=15)
     except (subprocess.SubprocessError, OSError) as exc:
         logging.warning("self-eval failed: %s", exc)
+
+
+# Daemon update notice dedupes per VERSION via a long snooze (a NEWER upstream version still breaks
+# through — see update_check.should_prompt). So the seller is pinged about a given release ~once, not
+# every cadence, but is always told when a fresh release lands.
+UPDATE_NOTICE_SNOOZE_DAYS = 30
+
+
+def check_and_notify_update(channel: dict, env: dict, dry_run: bool, *, via_outbox: bool) -> None:
+    """Throttled, read-only upstream-update check -> ONE channel heads-up if a newer Bazaar exists.
+    NEVER auto-applies (account safety); the seller runs /bazaar-upgrade. via_outbox: the supervisor
+    ENQUEUEs (its single writer drains the outbox); the single-flight loop sends directly (it has no
+    outbox drain). Fail-open throughout — a broken check must never disturb the loop."""
+    try:
+        out = subprocess.run([sys.executable, str(BIN / "update_check.py"), "check"],
+                             capture_output=True, text=True, env=env, timeout=20)
+        info = json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else {}
+    except (subprocess.SubprocessError, ValueError):
+        return
+    if not info.get("should_prompt"):
+        return
+    summary = info.get("summary") or f"v{info.get('current', '?')} -> v{info.get('latest', '?')}"
+    text = (f"🆙 Bazaar update available: {summary}. "
+            f"Run /bazaar-upgrade when convenient (I won't auto-update).")
+    if dry_run:
+        logging.info("[dry-run] would notify update: %s", summary)
+        return
+    if channel.get("adapter") != "telegram":
+        logging.info("update available (%s) but adapter=%s notice not wired; skipping",
+                     summary, channel.get("adapter"))
+        return  # don't snooze: a future telegram-capable run should still surface it
+    try:
+        if via_outbox:
+            subprocess.run([sys.executable, str(BIN / "channel_outbox.py"), "enqueue", "--kind",
+                            "notify", "--text", text, "--source", "update-check"],
+                           capture_output=True, text=True, env=env, timeout=15)
+        else:
+            subprocess.run([sys.executable, str(BIN / "telegram.py"), "send", "--text", text,
+                            "--kind", "notify"], capture_output=True, text=True, env=env, timeout=20)
+        logging.info("update notice %s: %s", "queued" if via_outbox else "sent", summary)
+    except subprocess.SubprocessError as exc:
+        logging.warning("update notice failed: %s", exc)
+        return  # don't snooze on send failure -> retry next interval
+    try:  # dedupe this version (a newer release still breaks through update_check.should_prompt)
+        subprocess.run([sys.executable, str(BIN / "update_check.py"), "snooze", "--days",
+                        str(UPDATE_NOTICE_SNOOZE_DAYS)], capture_output=True, text=True,
+                       env=env, timeout=15)
+    except subprocess.SubprocessError:
+        pass
 
 
 def buy_peek(env: dict) -> dict:
@@ -588,6 +640,7 @@ def main(argv) -> int:
     last_buy = time.monotonic() - cfg["buy_poll_sec"]      # and a buy pass
     last_maint = time.monotonic() - cfg["maint_poll_sec"]  # and a maintenance pass
     last_eval = time.monotonic()                           # self-eval check throttle (not immediate)
+    last_update = time.monotonic()                          # upstream update-check throttle (not immediate)
     empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
     empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
     _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
@@ -729,6 +782,12 @@ def main(argv) -> int:
                 logging.info("self-eval due → running deterministic checks")
                 run_eval(env, ns.dry_run)
             last_eval = time.monotonic()
+
+        # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up over the channel if a newer Bazaar
+        # is available. Single-flight loop sends directly (no outbox drain here). Never auto-applies.
+        if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
+            check_and_notify_update(channel, env, ns.dry_run, via_outbox=False)
+            last_update = time.monotonic()
 
         if ns.once:
             break

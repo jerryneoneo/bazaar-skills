@@ -48,7 +48,9 @@ TOKEN_ENV_KEYS = ["TELEGRAM_BOT_TOKEN", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID"]
 # balanced grants what the normal loop needs; all-steps grants the minimum (the seller is present).
 BIN_TOOLS = [
     "Bash(python3 bin/*.py:*)", "Bash(bin/*.sh:*)",
-    "Bash(curl http://127.0.0.1:9222/*:*)",
+    # Match the actual CDP check (`curl -s http://127.0.0.1:9222/...` in chrome_debug.sh / docs) and
+    # the committed settings.json baseline — a rule for bare `curl` would not match the `-s` calls.
+    "Bash(curl -s http://127.0.0.1:9222/*:*)",
 ]
 DATA_TOOLS = ["Read(data/**)", "Write(data/**)", "Edit(data/**)"]
 AUTONOMY_ALLOW = {
@@ -56,6 +58,20 @@ AUTONOMY_ALLOW = {
     "balanced":   PLAYWRIGHT_TOOLS + BIN_TOOLS + DATA_TOOLS,
     "all-steps":  PLAYWRIGHT_TOOLS + BIN_TOOLS,  # seller is present to approve writes
 }
+# The MINIMUM-viable autonomous permission floor — the rules whose absence genuinely breaks an
+# unattended interactive run. verify_settings checks the EFFECTIVE grant (committed settings.json ∪
+# generated settings.local.json) covers these, catching a wiped/stale/hand-edited file at
+# validate/healthcheck time rather than mid-pass. This is a CURATED subset (present in BOTH the
+# committed baseline and what gen-settings writes) — deliberately NOT the full PLAYWRIGHT_TOOLS, so a
+# baseline that omits a rarely-used tool (e.g. browser_run_code_unsafe) isn't falsely flagged. The
+# daemon's headless passes grant their own set via --allowedTools, independent of this floor.
+_CORE_BROWSER_TOOLS = [
+    "mcp__playwright__browser_navigate", "mcp__playwright__browser_click",
+    "mcp__playwright__browser_type", "mcp__playwright__browser_fill_form",
+    "mcp__playwright__browser_evaluate", "mcp__playwright__browser_snapshot",
+    "mcp__playwright__browser_file_upload", "mcp__playwright__browser_wait_for",
+]
+REQUIRED_ALLOW = _CORE_BROWSER_TOOLS + ["Bash(python3 bin/*.py:*)", "Bash(bin/*.sh:*)"]
 
 # Pin the Playwright MCP to an EXACT version (not the floating `@latest` dist-tag). `@latest` makes
 # npx hit the npm registry to resolve the tag on EVERY browser pass cold start (1 to 4s each); an
@@ -165,7 +181,12 @@ def _launcher_body(name: str, description: str, abs_dest: str) -> str:
         f"dir, so you must work from there.\n\n"
         f"1. Find the Bazaar home: read `~/.bazaar/home` if it exists, else use `{abs_dest}`.\n"
         f"2. `cd` into that directory.\n"
-        f"3. Then follow `.claude/commands/{name}.md` from there and do exactly what it says.\n"
+        f"3. Update check (quiet, throttled, fail-open): run `python3 bin/update_check.py check`. "
+        f"If it prints `\"should_prompt\": true`, tell the user in ONE short line that a newer Bazaar "
+        f"is available (use its `summary` field) and offer to run `/bazaar-upgrade`. If they "
+        f"decline, run `python3 bin/update_check.py snooze`. Never block the command on this — "
+        f"continue regardless of the result.\n"
+        f"4. Then follow `.claude/commands/{name}.md` from there and do exactly what it says.\n"
     )
 
 
@@ -271,6 +292,12 @@ def cmd_validate(ns, plat) -> int:
     style_path = dest / "data" / "style.json"
     if style_path.exists():
         results["data/style.json"] = validate_style_file(style_path)
+    # Permissions audit: are the autonomous-run essentials actually granted? (no-op for harnesses
+    # that don't use an allow-list). Catches a wiped/stale settings.local.json that JSON-parses fine
+    # but would block the daemon's tools mid-pass.
+    perms = harness.verify_settings(dest, REQUIRED_ALLOW)
+    if perms.get("applicable"):
+        results["permissions.allow"] = "ok" if perms["ok"] else "missing: " + ", ".join(perms["missing"])
     ok = all(v == "ok" for v in results.values())
     print(json.dumps({"ok": ok, "harness": harness.name, "files": results}))
     return 0 if ok else 3

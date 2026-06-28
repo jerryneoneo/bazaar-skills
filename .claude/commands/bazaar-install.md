@@ -82,7 +82,9 @@ run  python3 bin/install.py gen-settings --harness <harness>
 run  python3 bin/install.py gen-mcp --harness <harness>   # writes MCP config in the harness's
                                                            # format (.mcp.json / config.toml)
 run  bin/chrome_debug.sh &                                 # warm Chrome on the persistent profile
-     -> verify CDP: curl -s http://127.0.0.1:9222/json/version
+run  python3 bin/wait_cdp.py                               # block until CDP is actually serving
+     -> ready:false (exit 3) -> Chrome didn't come up: check it launched (a window appears), then
+        re-run; do NOT proceed to marketplace login against a dead browser. ready:true -> continue.
 
 # 7. CHOOSE MARKETPLACES + LOG IN (SETUP.md §6 login loop)
 goto skills/channel/onboarding.md#CHOOSE_MARKETPLACES   # region-filtered from data/marketplaces.json

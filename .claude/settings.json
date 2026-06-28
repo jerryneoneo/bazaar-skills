@@ -34,10 +34,24 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git --no-pager diff --stat HEAD -- bin/agent_daemon.py bin/supervisor.py tests/test_pause_interrupt.py)",
-      "Bash(git --no-pager log --oneline 77e4f08..HEAD -- bin/agent_daemon.py bin/supervisor.py tests/test_pause_interrupt.py)"
+      "Bash(git --no-pager log --oneline 77e4f08..HEAD -- bin/agent_daemon.py bin/supervisor.py tests/test_pause_interrupt.py)",
+      "Bash(gh auth *)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)"
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/bin/hooks/update_notice.py\""
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",

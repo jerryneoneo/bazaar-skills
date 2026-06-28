@@ -97,6 +97,17 @@ field not found:   notify "🧩 Couldn't find <field> on <platform> (page may ha
                           Skip this platform, or retry?" actions=[retry=Retry, skip=Skip]
 ```
 
+**Bazaar update available (from the daemon's throttled `update_check`):** a one-way heads-up, NOT a
+pending escalation. The always-on daemon checks upstream on a slow cadence (`config.update_check_interval_hours`,
+default 24h, read-only `git fetch`) and, when a newer Bazaar is available, sends ONE notice. It is
+**NOTIFY-only — never auto-applied** (account safety); the seller runs `/bazaar-upgrade` when they
+choose. Deduped per version via `update_check snooze` (a newer release still breaks through). The
+supervisor ENQUEUEs it (single-writer drain); the single-flight loop sends directly.
+```
+notify "🆙 Bazaar update available: v<current> -> v<latest>. Run /bazaar-upgrade when convenient
+        (I won't auto-update)."   # kind=notify, no actions — informational
+```
+
 ## Inbound — resolving the seller's answer (dispatched by the loop on an `action`/`text` event)
 
 Look up `pending[]` by `payload.ref`. Then:

@@ -355,7 +355,9 @@ def _invocation(harness, spec: PassSpec):
     if override and harness.name == "claude-code" and argv:
         argv[0] = override
     # Let an explicit env value win over the harness default (e.g. ENABLE_PROMPT_CACHING_1H=0).
-    env = {**inv.env, **os.environ}
+    # Mark every headless pass so the SessionStart update-notice hook NO-OPs here — the daemon can't
+    # act on an interactive prompt, and it has its own channel update notice (agent_daemon.py).
+    env = {**inv.env, **os.environ, "BAZAAR_DAEMON_PASS": "1"}
     return argv, env
 
 

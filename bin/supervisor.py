@@ -231,6 +231,7 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     last_buy = time.monotonic() - cfg["buy_poll_sec"]
     last_maint = time.monotonic() - cfg["maint_poll_sec"]
     last_eval = time.monotonic()
+    last_update = time.monotonic()   # upstream update-check throttle (not immediate)
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
     ad._log_wake_mode()  # explicit Instant/Standard banner (did the FDA grant take?)
@@ -358,6 +359,13 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
             if ad._eval_due(env):
                 ad.run_eval(env, ns.dry_run)
             last_eval = time.monotonic()
+
+        # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up if a newer Bazaar is available.
+        # ENQUEUE here (the _drain_outbox at loop top is the single writer). Read-only, so it does
+        # NOT require an exclusive (no-workers) window. Never auto-applies.
+        if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
+            ad.check_and_notify_update(channel, env, ns.dry_run, via_outbox=True)
+            last_update = time.monotonic()
 
         if ns.once:
             break

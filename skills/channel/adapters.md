@@ -57,10 +57,16 @@ whatever adapter you're reachable on now, usually the console):
      **username** that must end in `bot` (e.g. `my_bazaar_bot`).
   3. BotFather replies with an **HTTP API token** that looks like `123456789:AAE…`. Copy it.
   4. Paste that token here when the agent asks. It is written to `.claude/settings.local.json → env`
-     as `TELEGRAM_BOT_TOKEN` — never printed, logged, or committed (gitignored).
+     as `TELEGRAM_BOT_TOKEN` — never printed, logged, or committed (gitignored). The agent then runs
+     `python3 bin/telegram.py verify` (offline format check + a `getMe` round-trip): on `token_valid:
+     false` it says what's wrong and re-asks for the token — **the binding is never written on a bad
+     token.** (exit 3 = bad token, 1 = token good but no chat yet, 0 = ready.)
   5. Open your new bot via the `t.me/<username>` link BotFather gives you and tap **Start** (or send
      `/start`). The agent runs `telegram.py poll` until it captures your `chat_id` (single-tenant —
-     it then ignores every other chat) and confirms *"connected as @you."*
+     it then ignores every other chat), then re-runs `telegram.py verify` and only declares
+     *"connected as @<bot_username>"* once it returns `chat_bound: true` (exit 0). If the user is not
+     ready to `/start` now, offer to continue on `console` and bind Telegram later — never proceed
+     with an unbound (null `chat_id`) Telegram channel.
   6. The agent runs `python3 bin/telegram.py setcommands` once so your everyday commands (`/status`,
      `/list`, `/search`, `/delist`, `/detect`, `/pause`, `/resume`) show up in Telegram's `/`
      autocomplete menu right away (the daemon also re-registers this idempotently on each restart).

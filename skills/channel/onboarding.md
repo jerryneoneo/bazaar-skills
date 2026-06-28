@@ -67,7 +67,14 @@ if the chosen adapter is not already bound:
                             #             (teaches: create the bot, copy the token, paste it here);
                             # console  -> no-op
     (sets the token env var for install.py gen-settings to pick up; verifies one round-trip)
+# BIND GATE (telegram only) — do NOT write the binding until it is proven live + chat-bound:
+#   1. after the token is pasted: `python3 bin/telegram.py verify`
+#        token_valid:false (exit 3) -> say the reason, re-ask for the token, repeat (never write).
+#   2. token good but chat_bound:false (exit 1) -> tell them to open t.me/<bot_username> and tap
+#        Start; loop `telegram.py poll` then `telegram.py verify` until exit 0 (chat captured).
+#        If they can't /start now, offer console and bind Telegram later — never bind a null chat_id.
 write seller_config.channel = { adapter: choice, bound_at: <today>, detail: {…non-secret ids…} }
+     # (only reached once verify returns exit 0 for telegram; console binds immediately)
 
 # SWITCHING IS EASY — never lock the user in, and make sure they KNOW it:
 #  • Right after binding, TELL them: "You can change your interface anytime — just say 'switch to
@@ -99,10 +106,17 @@ for id in enabled where registry[id].connector.auth=="chrome_session":
     host = python3 bin/resolve_domain.py --market <id> --region <region>   # -> regional host
     marketplaces[id].site = host                                          # persist for listing/scan
     navigate("https://<host>/")                                           # open the regional site
-    confirm "Logged in to <display_name> for your region (<host>) in your Chrome?"
-        yes -> marketplaces[id].auth = "confirmed"
-        no  -> marketplaces[id].auth = "needs_login"                      # already navigated there;
-               say "Log in to <host> in the Chrome I just opened. I never sign in for you."
+    # EARN the status — don't trust a self-report. Probe the live page (read-only, ~0 tokens):
+    probe = python3 bin/login_check.py market <id>   # logged_in(0) / logged_out(1) / unknown(3)
+        logged_in  -> marketplaces[id].auth = "confirmed" ; say "✅ Logged in to <display_name>."
+        logged_out -> marketplaces[id].auth = "needs_login"
+                      say "Log in to <host> in the Chrome I just opened, then say 'done' and I'll
+                           re-check. I never sign in for you."
+                      on 'done' -> re-run login_check; loop until logged_in (or the seller skips).
+        unknown    -> # probe couldn't tell (DOM drift / odd page) — fall back to the seller:
+                      confirm "Logged in to <display_name> for your region (<host>) in your Chrome?"
+                          yes -> marketplaces[id].auth = "confirmed"
+                          no  -> marketplaces[id].auth = "needs_login" ; (same log-in nudge + re-check)
     # NEVER auto-log-in (account safety; chrome_session = the seller's real Chrome handles auth).
 say  a note that listings are filtered per item by category at publish time
      (e.g. "I'll only send fashion to Poshmark.").
@@ -203,7 +217,9 @@ offered  = [ m for m in registry if m.status=="active" and (region in m.regions 
 ask  "Which marketplaces should I search?" options=[<m.id>=<m.display_name> for m in offered]  (multi)
      -> chosen: marketplaces[id] = { enabled:true, auth:"unknown", connector:<type> } ; else enabled:false
 for id in enabled where registry[id].connector.auth=="chrome_session":
-     navigate the regional site (resolve_domain.py) ; confirm "logged in?" -> set marketplaces[id].auth
+     navigate the regional site (resolve_domain.py) ; probe `python3 bin/login_check.py market <id>`
+     -> logged_in: auth="confirmed" · logged_out: auth="needs_login" (+ log-in nudge + re-check loop)
+        · unknown: fall back to confirm "logged in?" -> set marketplaces[id].auth
      # NEVER auto-log-in (account safety; the buyer's real Chrome handles auth).
 write data/buyer_config.json {
      channel, currency, region, timezone, marketplaces, delivery_area,

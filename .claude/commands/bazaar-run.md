@@ -25,6 +25,12 @@ Load `data/config.json` (`approvals`, pacing). Load whichever side configs exist
 (`marketplaces` array→object in `skills/marketplaces.md`; `approvals`-absent in `skills/bazaar-config.md`).
 If **neither** side config exists → run `skills/channel/intro.md` (which leads into onboarding) and return.
 
+**Single-consumer guard (at session start):** run `python3 bin/daemon_conflict.py`. If it reports
+`conflict:true` (the always-on daemon is loaded AND the channel is single-consumer like Telegram), the
+daemon and this interactive session would steal each other's messages. WARN the seller with its
+`reason` and offer to either stop the daemon (`launchd/install_daemon.sh uninstall`) or close this
+session and let the daemon run. Do this once per session, not every pass. (console = no conflict.)
+
 ## Each pass
 ```
 # 1. CONTROL CHANNEL — drain it (both command sets)

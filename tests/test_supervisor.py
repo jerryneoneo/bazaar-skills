@@ -119,8 +119,11 @@ def test_run_once_idle_no_launches():
         patch(n, lambda *a, **k: False)
     paused_saved = agent_daemon.control.is_paused
     agent_daemon.control.is_paused = lambda: False
+    # update_poll_sec is large so the (network) upstream update check does NOT fire in this idle
+    # in-process smoke — it's covered by test_update_check / test_update_notice_hook + the daemon
+    # dry-run. The other *_poll_sec are 0 to exercise their gates.
     cfg = {"buyer_poll_sec": 0, "buy_poll_sec": 0, "maint_poll_sec": 0, "eval_poll_sec": 0,
-           "force_buyer_pass_every": 0}
+           "update_poll_sec": 10 ** 9, "force_buyer_pass_every": 0}
     ns = argparse.Namespace(once=True, dry_run=True)
     try:
         rc = supervisor.run(cfg, {"adapter": "telegram", "detail": {}}, dict(os.environ), ns, 3, 1)

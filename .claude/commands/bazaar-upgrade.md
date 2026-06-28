@@ -27,7 +27,10 @@ run `./setup --yes`     # re-run path: no onboarding, just refresh (data/seller_
 if launchd/install_daemon.sh exists AND a daemon is loaded:
     run `launchd/install_daemon.sh install`   # reload (install is idempotent: stop+load)
 
-# 5. Show what changed.
+# 5. Reset the update-check state (clears any snooze/dismiss + throttle so the next check is fresh).
+run `python3 bin/update_check.py clear`
+
+# 6. Show what changed.
 after = `cat VERSION`
 if before != after:
     say "Updated Bazaar $before → $after."

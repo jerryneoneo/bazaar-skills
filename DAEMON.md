@@ -10,6 +10,8 @@ launchd (RunAtLoad + KeepAlive, survives logout/reboot/crash)
 └── com.bazaarskills.agent    → bin/agent_daemon.py   (no LLM)
         • long-`peek`s Telegram (non-consuming) → on pending → run_pass.sh seller
         • every buyer_poll_sec → run_pass.sh buyer
+        • every update_poll_sec → throttled read-only upstream update check; on a newer release,
+          ONE channel heads-up (NEVER auto-applies — you run /bazaar-upgrade). Deduped per version.
         • single-flight lock, logs, restart-on-crash
             └── run_pass.sh → harness_run.py → the active harness's headless pass (today
                  `claude -p`, scoped perms) does the real work, driving the warm Chrome over
@@ -93,6 +95,9 @@ fails for any reason it's skipped silently (you still get typing + the full pass
 - **`/sell`** (Claude Code console) = at-desk, native streaming visibility.
 - **Don't run both against the browser/Telegram at once** (single consumer + run-lock). To drive
   interactively, `install_daemon.sh uninstall` first, use `/sell`, then `install` again.
+- The interactive loop self-guards: it runs `python3 bin/daemon_conflict.py` at session start and
+  warns if a loaded daemon would fight it (conflict iff daemon loaded AND channel is single-consumer
+  like Telegram/WhatsApp; `console` never conflicts). Exit 1 = conflict, 0 = safe.
 
 ## Reliability properties
 - **Survives** terminal close, logout, reboot (RunAtLoad), and crashes (KeepAlive + ThrottleInterval).

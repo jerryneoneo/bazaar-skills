@@ -85,6 +85,31 @@ class ClaudeCodeHarness(Harness):
     def config_files(self, dest: Path) -> list[Path]:
         return [self._settings_path(dest), self._mcp_path(dest)]
 
+    def verify_settings(self, dest: Path, required_allow: list[str]) -> dict:
+        """Audit the EFFECTIVE permission grant: committed `settings.json` UNION generated
+        `settings.local.json` (Claude Code merges both). Reports which `required_allow` rules are
+        missing and whether the PreToolUse safety hooks are present. A merge that dropped the bin/
+        browser rules — or a hand-edited settings.local.json — fails here at validate/healthcheck
+        time, BEFORE an unattended pass silently can't use a tool. Read-only; never reads a secret."""
+        allow: set[str] = set()
+        hooks_present = False
+        for fname in ("settings.json", "settings.local.json"):
+            path = dest / ".claude" / fname
+            if not path.exists():
+                continue
+            try:
+                cfg = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(cfg, dict):
+                continue
+            allow |= set((cfg.get("permissions") or {}).get("allow") or [])
+            if (cfg.get("hooks") or {}).get("PreToolUse"):
+                hooks_present = True
+        missing = sorted(a for a in required_allow if a not in allow)
+        return {"harness": self.name, "ok": not missing, "applicable": True,
+                "missing": missing, "hooks_present": hooks_present, "allow_count": len(allow)}
+
     def load_env(self, dest: Path) -> dict[str, str]:
         """Tokens live in settings.local.json's `env` block. {} if not written yet / unreadable."""
         path = self._settings_path(dest)
