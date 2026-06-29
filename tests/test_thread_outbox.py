@@ -238,6 +238,24 @@ def test_mark_sent_flips_status_and_stamps():
         check("mark_sent of unknown id is a no-op", miss.get("marked") is False)
 
 
+def test_mark_escalated_sets_durable_flag():
+    print("mark_escalated stamps a durable exactly-once flag (record stays pending + visible):")
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            rid = to.enqueue("fb:t", "fb", "x", "i", NOW_UTC, side="sell")["id"]
+            res = to.mark_escalated(rid)
+            check("reports escalated", res.get("escalated") is True)
+            rec = to.peek(statuses=to.OPEN_STATUSES)["pending"][0]
+            check("escalated flag set", rec.get("escalated") is True)
+            check("escalated_ts stamped", bool(rec.get("escalated_ts")))
+            check("record still pending (visible, not dropped)", rec.get("status") == "pending")
+            check("mark_escalated of unknown id is a no-op",
+                  to.mark_escalated("nope").get("escalated") is False)
+        finally:
+            os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
 def test_peek_status_filter():
     print("peek --status selects pending | sent_unverified | open:")
     with tempfile.TemporaryDirectory() as d:
@@ -288,6 +306,7 @@ if __name__ == "__main__":
     test_enqueue_distinct_inmsg_not_deduped()
     test_find_pending_by_inbound_matches_pending_only()
     test_mark_sent_flips_status_and_stamps()
+    test_mark_escalated_sets_durable_flag()
     test_peek_status_filter()
     test_bad_input_rejected()
     print()
