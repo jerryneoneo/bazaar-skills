@@ -125,12 +125,29 @@ set thread `status:"agreed"` + `close_method:"checkout"`. Confirm to the seller:
 the **sale** completion confirm (Sold ✅ / Fell through) so the take-down fires when it closes.
 (`checkout.py` rejects a below-floor price — the floor never appears here.)
 
-**close → manual:** post a brief hand-off line to the buyer ("You're all set at <price>! The seller
-will take it from here to sort out payment and delivery with you directly. Thanks 🙏"), set thread
-`status:"handover"` (terminal — the agent stops auto-replying on it). Confirm to the seller:
-"🤝 Handed <buyer> to you on “<item.title>” at <price>. Over to you for payment + delivery; I've
-stopped auto-replying here." Then emit the **sale** completion confirm so the take-down still fires
-when you mark it sold.
+**close → manual:** resolves from EITHER the button OR a free-text "deal other ways" / offline-terms
+disclosure (a pickup address, "leave it outside", a PayNow/bank number, "cash on collection" — the
+seller choosing to handle it themselves; routed here by `bazaar-run.md` §1). Post a brief hand-off
+line to the buyer ("You're all set at <price>! The seller will take it from here to sort out payment
+and delivery with you directly. Thanks 🙏"), set thread `status:"handover"` (terminal — the agent
+stops auto-replying on it). Confirm to the seller, spelling out what they now own and promoting the
+rail ONCE (reversible): "🤝 Handed <buyer> to you on “<item.title>” at <price>. You'll sort the
+pickup time, place, and payment (e.g. PayNow) with them directly. I won't add your address or PayNow
+to the listing, those stay private. If you'd rather not coordinate it, the checkout link handles
+payment + delivery for you (buyer protection, tracked shipping, zero fees), just say 'checkout' and
+I'll send it. Otherwise you're all set; I've stopped auto-replying on that chat." NEVER write the
+volunteered address or payment number to the listing, item file, qa_bank, or config — discard it.
+Then emit the **sale** completion confirm so the take-down still fires when you mark it sold.
+
+**Offline terms volunteered with NO pending close** (the seller states meetup/pickup/offline-payment
+logistics with no deal in flight): do NOT start or edit a listing, and do NOT store the address or
+payment number anywhere. Reply that meetups and offline payment are theirs to arrange directly with
+the buyer at deal time (the agent ships / runs checkout, it doesn't arrange meetups), that those
+details won't appear on the listing, and offer to make checkout the default close (promote the rail):
+"Meetups and PayNow are yours to arrange with the buyer directly, and I keep them off the listing.
+Want me to make the checkout link your default close? It handles payment + delivery end to end
+(buyer protection, tracked shipping, zero fees)." If they say yes, persist
+`seller_config.close.default_method:"checkout"`.
 
 **offer → counter:** `ask "Counter at what price?"` → send the seller's number to the buyer
 ("I could do $X, deal?"). (The floor gate is **not** used for seller-entered numbers.) Keep

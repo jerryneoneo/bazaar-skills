@@ -62,21 +62,47 @@ for e in events (in order):
                                 on nothing during the sweep. Turn-based/resumable in
                                 data/catchup_session.json (one market or one question per pass); ack the
                                 slow sweep first, do one step, let later passes continue it.
-                    /pause   -> `python3 bin/control.py pause --source <adapter>`; ack "⏸ Paused…".
-                                The daemon holds all action passes and interrupts any running pass
-                                within ~one poll cadence; while paused, free-text you send is captured
-                                as a CORRECTION (control.py correct) — see RESUME below. The deterministic
-                                drain (bin/channel_control.py) handles /pause,/resume + correction capture
-                                without an LLM, so a paused agent costs ~$0.
+                    /pause   -> `python3 bin/control.py pause --source <adapter>`. Do NOT send your
+                                own "Paused" line: the system sends the SINGLE confirmation
+                                deterministically (the non-LLM drain bin/channel_control.py, gated by
+                                control.claim_pause_ack — exactly once per pause episode), so an
+                                LLM-authored ack here would just duplicate it. The daemon holds all
+                                action passes, preempts any live worker / interrupts a running pass
+                                within ~one poll cadence, and a /pause at the channel is recognized
+                                deterministically (no seller pass needed); while paused, free-text you
+                                send is captured as a CORRECTION (control.py correct) — see RESUME
+                                below. The drain handles /pause,/resume + correction capture without an
+                                LLM, so a paused agent costs ~$0.
                     /resume  -> `python3 bin/control.py resume --source <adapter>`. BEFORE resuming normal
                                 work, run skills/channel/corrections.md: drain pending corrections,
                                 apply each to the durable state the relevant pass reads, mark applied.
    action:   resolve the matching pending notify via skills/channel/notifications.md
              (sell escalations/bids/sale, AND buy escalations/deals)
-   text/photo while a flow is mid-step -> feed it as that flow's awaited input
+   text while a flow is mid-step -> feed it as that flow's awaited input
    # Mid-step = data/listing_session.json OR data/distribution_session.json OR data/buy_session.json
    # is active; route the reply to whichever is active (only one runs at a time). Never re-ask which
    # item/want it is — that's a persistence bug (see listing.md / search.md routing rules).
+   PHOTO while a LISTING session is mid-step -> it is MORE PHOTOS, NEVER a price/floor answer.
+   # A photo can never be the awaited price/floor text. The daemon's settle window already coalesces
+   # an initial burst into one START pass, so this covers later stragglers (an extra angle sent after
+   # the session opened). If they are more angles of session.item_id, append to fields.photos (refine
+   # identification only if material) and ack briefly ("added 📷"). If they are clearly a DIFFERENT
+   # item, do NOT silently fold them in: ask "More angles of <current item>, or a new item to list?"
+   # and act on the answer next pass. NEVER parse a photo as the awaited price/floor reply.
+
+   text (free reply) that ANSWERS an OPEN pending escalation -> resolve that pending, NOT the gate.
+   # Before the FRESH-MESSAGE INTENT GATE, check channel_state.pending[] (notifications.md:8 already
+   # states a free-text reply resolves a pending). If the message reads as a reply to an OPEN pending
+   # — by kind + the item/buyer it names + your last [out] turn — dispatch it to
+   # skills/channel/notifications.md "Inbound" for that ref; do NOT run the intent gate, do NOT start
+   # a listing/search. In particular: a message describing an OFFLINE deal (meetup / self-collect /
+   # a pickup address / "leave it outside" / an offline payment instruction such as a PayNow or bank
+   # number / "cash on collection") in reply to a pending `close` = the seller choosing "Deal other
+   # ways" -> resolve that close as `manual` (notifications.md close → manual). NEVER treat it as a
+   # new listing or a listing edit, and NEVER copy the address or payment number into the listing /
+   # item / qa_bank / config — discard it (private; see onboarding.md trust rules). If no pending
+   # close exists, handle per the no-pending case in notifications.md (arrange-it-yourself + promote
+   # the rail); still start NOTHING.
 
    text/photo with NO active session (a FRESH message) -> run the INTENT GATE below, then
    start AT MOST ONE flow. This gate is authoritative: it decides sell vs buy ONCE, so the
@@ -92,6 +118,12 @@ for e in events (in order):
    #          "buy", "under $X", "max", "budget", "bid", or a marketplace URL to acquire.
    #   SELL = user wants to OFFLOAD it. Signals: "selling", "for sale", "list this",
    #          "how much can I get", or a bare item description / no verb.
+   #          NOT SELL: a message that only states meetup / pickup / offline-payment LOGISTICS for an
+   #          item already in play ("can be picked up at <address>", "leave it outside", "paynow to
+   #          <number>", "cash on collection") is a deal-handling message, not "list this". Route it
+   #          per the pending-answer branch above (resolve a pending `close` to `manual`); if no
+   #          pending exists, reply per notifications.md's no-pending case. Start NO listing, and
+   #          never copy the address/payment into the listing/item/qa_bank/config.
    #   NEUTRAL = photo with no caption, or a caption that is only a description.
    #   FOLLOW-UP = a no-signal message that only makes sense as a reply to your OWN last [out]
    #          turn in the RECENT CONTROL-CHANNEL CONVERSATION block (injected into the channel
@@ -116,12 +148,18 @@ for e in events (in order):
    #      AMBIGUOUS (#5): ask ONE clarifying question, start nothing.
    #   1. text only, no photo, BUY intent   -> BUY  (search.md START)
    #   2. photo (+/- text), BUY intent      -> BUY  (search.md START; photo = visual context, not a listing)
-   #   3. photo, SELL intent or NEUTRAL     -> SELL (listing.md START)
+   #   3. photo, SELL intent (clear caption) -> SELL (listing.md START; goes straight to research)
    #   4. text only, no photo, SELL intent  -> SELL (listing.md START; it will ask for photos)
-   #   5. AMBIGUOUS (both buy+sell signals, or a photo whose caption is unclear)
-   #        -> do NOT guess. ask() ONE question and start NOTHING until the answer:
-   #           ask("Want me to BUY this for you, or LIST it for sale?", options="buy=Buy it,sell=Sell it")
-   #           Route per the answer on the next pass.
+   #   5. photo + NEUTRAL (no caption / description-only) -> SELL side entry (listing.md START). A photo
+   #      almost always means sell-or-buy but WHICH is unclear, so listing.md START ASKS sell-or-buy
+   #      FIRST (its awaiting_intent step) with the photos already downloaded + stashed in the session,
+   #      and redirects to BUY (search.md) if the seller picks "buy". The photo routes to the listing
+   #      skill because that is where photo intake + the session live, so the photos survive the ask;
+   #      this honors "ask sell/buy only when unclear" without losing the images. (If the buy side is
+   #      unavailable per the SCOPE guard, listing.md skips the ask and lists.)
+   #   6. AMBIGUOUS text (both buy+sell signals, no photo) -> do NOT guess. ask() ONE question, start
+   #      NOTHING until the answer; route on the next pass:
+   #           ask("Want me to sell this for you, or buy one like it?", options="sell=Sell it,buy=Buy one")
    # SCOPE / CONFIG guard (every branch): only an AVAILABLE side may start.
    #   - chosen side available     -> start that one flow and return.
    #   - chosen side NOT available -> do NOT silently start the other side. say() it isn't set up

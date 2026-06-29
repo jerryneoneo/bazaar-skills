@@ -5,6 +5,12 @@ is a **state machine** persisted in `data/listing_session.json`, not one long bl
 Each seller pass: load the session, do ONE step, send a progress/question message, return.
 The seller always knows what's happening (the daemon also fires an instant "👀 on it" ack
 before each pass, covering the claude cold-start).
+**Photo intake is settled + responsive:** the daemon coalesces a one-by-one photo burst (it waits a
+few seconds for the rest) and sends an instant receipt ack, so START always sees the WHOLE batch in
+one pass — never a partial set, and a later photo is never mis-read as a price reply. Identification
+and pricing run as a **background research worker** when available (`data/research_results/`); this
+flow reads its result if present and otherwise does the same vision+comps inline (the fail-closed
+backstop), so a listing is never stranded by a worker that did not finish.
 
 > Talks to the seller via `channel.md` verbs; drives marketplaces via `browser-actions.md`;
 > money via `bin/floor_gate.py` / `bin/negotiate.py`; fee preview via `bin/shipping.py`.
@@ -17,16 +23,19 @@ before each pass, covering the claude cold-start).
 
 ## `data/listing_session.json`
 ```json
-{ "active": true, "item_id": "<kebab>", "step": "awaiting_listing_inputs",
+{ "active": true, "item_id": "<kebab>", "step": "researching",
+  "batch_id": "<id|null>", "intent": "sell",
   "fields": { "title","category","category_tag","condition","attributes","photos":[],
               "comp_low","comp_med","comp_high","list_price","floor","size_bucket" },
   "updated_at": "<iso>" }
 ```
-`step` ∈ `identify → awaiting_listing_inputs → publishing → done`.
-One step per pass; write the session and return after each. After the research, list price, floor,
-additional info, and delivery size are gathered in **ONE combined ask** (the seller answers all of
-it in a single message). Item **size is auto-determined** at START and stated for correction inside
-that combined ask, not asked as its own step; see `awaiting_listing_inputs`.
+`step` ∈ `awaiting_intent → researching → awaiting_listing_inputs → publishing → done`.
+One step per pass; write the session and return after each. `awaiting_intent` exists only for a
+bare/unclear photo (ask sell-or-buy first, holding the photos); a clear sell caption skips straight
+to `researching`. After the research, list price, floor, additional info, and delivery size are
+gathered in **ONE combined ask** (the seller answers all of it in a single message). Item **size is
+auto-determined** during research and stated for correction inside that combined ask, not asked as
+its own step; see `awaiting_listing_inputs`.
 
 ## Routing (every seller pass)
 Load `listing_session.json` **first**. If `active` and the new event is the seller's reply, apply it
@@ -39,37 +48,66 @@ is active; re-asking is a persistence bug** (e.g. a bare "$20" answering the pri
 these as `awaiting_listing_inputs` and continue there — its handler re-asks only the still-missing
 required fields (list price, floor) and treats info as optional, so a stranded session resumes
 cleanly. Write the session back with the canonical `awaiting_listing_inputs` so the legacy name is
-migrated on first touch (never leave a session on a step name with no handler).
+migrated on first touch (never leave a session on a step name with no handler). A legacy `identify`
+step (the old transient pre-research name) → resume at `researching` (re-run research from
+`fields.photos`). A session on `awaiting_intent` is waiting for the seller's sell-or-buy choice;
+apply their reply per that step (never re-ask which item — the photos are already in the session).
 If photos arrive with no active session AND the caption is not
 buy-intent, START. A photo whose caption asks to ACQUIRE the item ("get this", "want", "looking
 for", "find me", "under $X", "max", "budget", "bid", or a marketplace link to buy) is a BUY, not a
 listing — do NOT START here; the control-channel intent gate (bazaar-run.md §1) routes it to
 search.md. A photo with no caption, a sell-intent caption ("selling", "for sale"), or a bare item
-description is a listing: START. Otherwise ignore (not a listing).
+description routes here: START. Otherwise ignore (not a listing). START resolves intent FIRST — a
+clear sell caption goes straight to research; a bare/description-only photo asks sell-or-buy
+(`awaiting_intent`) before any work, holding the photos so they survive the answer.
 
-### START (photos, no active session, not buy-intent)
+### START (photos, no active session, routed here by the gate)
 ```
-# ACK FIRST — this is REQUIRED and must fire BEFORE the slow vision/comps work below, even if the
-# daemon already sent a generic intent line (that one-liner does NOT satisfy this per-flow ack; see
-# skills/voice.md Rule 2). Never go silent between the photo and the research. Keep it LLM-authored
-# and contextual, conveying: got the photo, researching the item + a fair price now, will message
-# back when done.
-say "📸 Got your photos! I'll identify the item, research a fair price, and get it ready for
-     <your enabled marketplaces>, then check the price with you. I'll message you when I'm done.
-     (I only ship, no meetups.)"
-     # <your enabled marketplaces> = the seller's ENABLED platforms named from
-     # seller_config.marketplaces → marketplaces.json display_name (e.g. "Facebook Marketplace,
-     # Carousell + eBay"). NEVER hardcode "FB + Carousell"; reflect what's actually enabled.
-[vision] identify from the downloaded photos → title, category, condition, attributes,
-         category_tag (one of the fixed taxonomy in skills/marketplaces.md; drives the publish
-         filter), and size_bucket — auto-determine the delivery size (small|medium|large|bulky)
-         from the item type (e.g. book/clothing=small, monitor/lamp=medium, large appliance=large,
-         desk/sofa=bulky; default medium when unsure). Store in fields.size_bucket.
+# The daemon already SETTLED the photo burst and sent an instant receipt ack ("📸 Got it…"), so the
+# WHOLE batch is here in ONE pass — identify on the complete set, never a partial one, and do NOT
+# re-ack mere receipt (that would be a double ack). Lead with the NEXT beat (the sell/buy ask, or the
+# research narration). Never go silent between a beat and the work it promises (voice.md Rule 2).
+[download] each pending photo → data/photos/<batch_id>/NN.jpg (channel.md ask_images / telegram.py
+           getfile). Mint batch_id (short kebab from the caption, else a short uid). Stash
+           fields.photos = [paths] and session.batch_id so they survive the sell/buy round-trip.
+# INTENT — ask sell-or-buy ONLY when unclear (per the gate). A clear sell caption, or buy side
+# unavailable, skips the ask.
+if the routing caption clearly states SELL, OR the buy side is unavailable:
+    session.intent = "sell" ; fall through to RESEARCH in THIS pass.
+else (NEUTRAL — no caption / description-only):
+    write listing_session { step:"awaiting_intent", intent:null, batch_id, fields.photos }
+    ask "Quick one: want me to SELL this for you, or BUY one like it?"
+        (options="sell=Sell it,buy=Buy one")
+    return
+
+### awaiting_intent → (the seller picks sell or buy)
+# The session holds the photos already. Apply the choice; never re-ask which item.
+if BUY:  session.active=false (close listing_session) ; start skills/buying/search.md with
+         fields.photos as the want's seed/visual context (a photo-seeded search). return.
+if SELL: session.intent="sell" ; step="researching" ; fall through to RESEARCH this pass.
+# anything else (not a clear sell/buy) → re-ask the one sell/buy question; stay in awaiting_intent.
+
+### RESEARCH (step=researching) — identify + price, narrated so the seller sees movement
+# Instant narration FIRST (the receipt ack already landed; this promises the work you then do).
+say "🔎 On it, identifying the item and pricing it against the market now. (I ship only, no meetups.)"
+# BACKGROUND-WORKER SEAM (fail-closed): if data/research_results/<batch_id>.json exists, the
+# background research worker finished — READ title/category/category_tag/condition/attributes/
+# size_bucket + comp_low/med/high from it and SKIP the inline vision+comps below. Otherwise (no
+# worker, or it has not finished) do the SAME work inline now — the listing is never stranded.
+[vision] identify from fields.photos → title, category, condition, attributes, category_tag (one of
+         the fixed taxonomy in skills/marketplaces.md; drives the publish filter), and size_bucket —
+         auto-determine the delivery size (small|medium|large|bulky) from the item type (book/
+         clothing=small, monitor/lamp=medium, large appliance=large, desk/sofa=bulky; default medium
+         when unsure). Store in fields.size_bucket.
 [WebSearch] "<title> used price <region>" → comp_low/med/high   (fast; skip slow browser comps here).
          If you run more than one comp query (e.g. add a "<title> sold price <region>" lookup for a
          tighter range), issue them as PARALLEL calls in ONE turn — never back-to-back. Comps depend
          on the title from [vision] above, so [vision] runs first; the comp queries then fan out.
-say "🔎 Looks like a <title> (<condition>). Similar ones sell ~<low> to <high> <currency>."
+say "🔎 Looks like a <title> (<condition>). Similar ones sell ~<low> to <high> <currency>.
+     I'll get it ready for <your enabled marketplaces>."
+     # <your enabled marketplaces> = the seller's ENABLED platforms named from
+     # seller_config.marketplaces → marketplaces.json display_name (e.g. "Facebook Marketplace,
+     # Carousell + eBay"). NEVER hardcode "FB + Carousell"; reflect what's actually enabled.
 # ONE combined ask — list price + floor + optional info + the stated (auto) size. The seller answers
 # all of it in a single message (e.g. "$12 listing, $10 floor, comes with dust jacket"). A bare
 # number is read as the list price. NEVER split these across passes.
@@ -78,7 +116,7 @@ ask "To get it live, reply in one message:
      2) Your floor, the lowest you'd accept? 🔒 PRIVATE, never shown to buyers; I only ever quote
         your list price.
      3) Anything buyers should know (what's included / condition notes)? Optional, say 'skip'.
-     I'll set delivery size to <fields.size_bucket> (typical for a <title>); tell me if that's off."
+     I'll ship it as <fields.size_bucket> (typical for a <title>); tell me if that's off."
                                                           → step=awaiting_listing_inputs
 write listing_session ; return
 ```
@@ -109,8 +147,18 @@ write listing_session ; return
 fields.list_price = <parsed list price>
 write data/floors/<item_id>.json { item_id, list_price, floor, auto_counter_step,
                                    auto_counter_rounds, currency }   # FLOOR goes ONLY here, never echoed
-if additional_info given (not 'skip'): append to data/qa_bank.jsonl
-     {item_id,q:"details",a:<additional_info>,source:"frontloader"}
+if additional_info given (not 'skip'):
+     # TRUST GUARD (defense-in-depth, mirrors the buyer-safe "NO floor/address" item-file rule below):
+     # additional_info is BUYER-FACING. Before storing, STRIP any exact address, phone/PayNow/bank
+     # number, or offline-payment instruction ("paynow to <n>", "cash on collection", "pickup at
+     # <address>", "leave it outside"). Those are private and must NEVER reach qa_bank, the item, or a
+     # buyer reply (onboarding.md trust rules). If the seller's note is ONLY such details, store
+     # nothing and say once: "I've kept your address and payment details private, they don't go on the
+     # listing. Meetups and payment are arranged with the buyer at deal time, and the checkout link
+     # handles payment + delivery for you (buyer protection, tracked shipping, zero fees)." Otherwise
+     # store only the buyer-safe remainder:
+     append to data/qa_bank.jsonl
+     {item_id,q:"details",a:<buyer-safe additional_info>,source:"frontloader"}
 # Size is already set (auto at START, or corrected from this reply). No fee preview here: shipping.py
 # needs the item record (written at PUBLISH); buyers are quoted the fee in-chat via shipping.py later.
 # IMMEDIATE ACK: the seller just answered, so they must hear back before any slow step. The "✅ All
@@ -136,7 +184,7 @@ if eligible is empty: say "None of your platforms accept a <category_tag> item, 
 # ANOMALY gate (auto_anomaly): anchor = min(web median, platform suggested price seen at publish)
 if list_price > price_anomaly_ratio*anchor OR < 0.5*anchor:
     notify price-anomaly (notifications.md) ; step=awaiting_anomaly_decision ; return
-say "✅ All set, publishing to <eligible joined> now. ~2-3 min, I'll message you when they're live."
+say "✅ All set, listing on <eligible joined> now. I'll message you as each goes live."
 step=publishing ; write session
 published = []
 for market in eligible:
@@ -148,9 +196,13 @@ for market in eligible:
     # before re-posting; treat a hit as already-published.
     if items.listing_urls.get(market): published.append(market) ; continue
     # account-safety pacing: reserve a slot before posting (atomic, per-marketplace; never self-count).
-    # `python3 bin/pacing_gate.py reserve --marketplace <market> --kind publish`
+    # A user-initiated listing is ATTENDED (the seller asked for this item, live), so use the SHORT
+    # interactive jitter, and --block so the delay is slept server-side in ONE call (the LLM never idles
+    # it across turns, which burns the turn budget and risks ending mid-publish). The per-hour cap and
+    # quiet_hours floors are enforced identically in both modes — interactive only shortens the jitter.
+    # `python3 bin/pacing_gate.py reserve --marketplace <market> --kind publish --mode interactive --block`
     #   wait/quiet → skip this market this pass (leave eligible; it retries next maint pass), don't post.
-    #   go → wait the returned delay_sec, then publish.
+    #   go → publish immediately (--block already slept any jitter, so delay_sec=0 on return).
     # publish gate (approvals.steps.publish): auto → publish; confirm → confirm(preview) per recipe
     follow skills/listing-flows/<market>.md ; on login/field failure → notify + skip that market
     url = read live listing URL from the published page (browser DOM only — NEVER compose one)
@@ -161,7 +213,7 @@ for market in eligible:
         continue
     items.listing_urls[market] = url ; published.append(market)
 if published is empty:
-    items.status="draft" ; say "⚠️ Couldn't confirm a live listing on any platform — left as draft,
+    items.status="draft" ; say "⚠️ Couldn't confirm a live listing on any platform, left as draft;
         nothing was posted. I'll retry / flag for you."  ; session.active=false ; return
 items.status="live"
 if items.published_at is unset: items.published_at = <now ISO-8601>   # stale-listing clock (listing_health.py);
