@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""journal_reconcile.py — heal crash orphans left by an interrupted send (Fix A).
+"""journal_reconcile.py — heal interrupted-send orphans (Fix A), status-aware.
 
-A pass can crash AFTER a reply lands on the marketplace but BEFORE bin/journal_send.py commit folds
-it into the thread file (the Olaf "Reached max turns" split-brain). That leaves a PENDING intent in
-data/thread_outbox.jsonl with no matching outbound in the thread file.
+A pass can be interrupted between bin/journal_send.py `intent` and `commit`, leaving an un-acked
+record in data/thread_outbox.jsonl. The record's STATUS says which orphan it is, and reconcile heals
+each differently (the distinction the old single-status fold could not make — the vida silent-drop):
 
-This drains those orphans. Folding an intent that is actually STILL IN FLIGHT would re-create the Olaf
+  • sent_unverified — the browser send FIRED (mark-sent ran) but commit was lost (the Olaf "Reached
+    max turns" split-brain). The reply is probably live on the marketplace, so fold it as an
+    UNCONFIRMED row, ADVANCE the cursor (do not auto-resend), notify, ack, and return the thread in
+    `needs_verify` so the next pass re-checks the live chat.
+  • pending — the browser send NEVER fired. Folding a false outbound + advancing the cursor here is
+    exactly the vida silent drop, so reconcile folds NOTHING and advances NOTHING: it leaves the
+    (deduped) intent alive and returns the thread in `needs_resend` so the next pass / the daemon
+    sweeper RE-DRIVES the real send. The dedup key (thread+in_msg) keeps the re-drive idempotent.
+
+Folding an intent that is actually STILL IN FLIGHT would re-create the Olaf
 bug (cursor advanced + the row marked unconfirmed BEFORE the real send, so a later crash drops the
 reply). Two guards keep that from happening even under the concurrent supervisor (FB ∥ Carousell
 workers), where a normal pass holds a pending intent for its FULL pacing delay before sending:
@@ -179,21 +188,26 @@ def _notify_verify(thread_id: str) -> None:
 
 def _reconcile_one(intent: dict) -> str:
     """Heal one stale intent. Returns one of:
-      "reconciled" — folded an unconfirmed row, notified, and acked (a genuine crash orphan).
-      "skipped"    — nothing to fold: either a CONFIRMED commit for this intent already exists, OR the
-                     intent was already drained (a concurrent reconcile/commit acked it first). In both
-                     cases the racing pending record is left clean and NO false notify is fired.
+      "reconciled" — a SENT_UNVERIFIED orphan: the browser send fired but commit was lost, so we fold
+                     an unconfirmed row, advance the cursor (the reply likely landed — do not
+                     auto-resend), notify, and ack. The thread goes to `needs_verify`.
+      "resend"     — a PENDING orphan: the browser send NEVER fired. We fold NOTHING, advance NOTHING,
+                     and do NOT ack — the deduped intent stays alive so the next pass / the daemon
+                     sweeper re-drives the real send. The thread goes to `needs_resend`. (A false
+                     unconfirmed row + an advanced cursor here is exactly the vida silent-drop.)
+      "skipped"    — nothing to do: a CONFIRMED commit for this intent already exists, OR the intent
+                     was already drained (a concurrent reconcile/commit acked it first). No false
+                     notify is fired.
       "error"      — anything went wrong (fail-open: never raises).
-    The still-pending re-check + the already-committed check + the fold + the ack all run UNDER the
-    thread lock, so a commit OR a second reconcile holding the same lock cannot interleave between them
-    (closes both the commit/reconcile double-journal AND the reconcile/reconcile double-count+notify).
-    A notify is sent ONLY when this call's ack actually removed the record (ack -> {"acked": True}) —
-    if another process already drained it, we return "skipped" and fire no duplicate nudge."""
+    The still-open re-check + the already-committed check + the fold + the ack all run UNDER the thread
+    lock, so a commit OR a second reconcile holding the same lock cannot interleave between them. A
+    notify is sent ONLY when this call's ack actually removed the record."""
     try:
         thread_id = intent.get("thread_id")
         intent_id = intent.get("id")
         if not thread_id or not intent_id:
             return "error"
+        status = intent.get("status") or thread_outbox.STATUS_PENDING
         side = intent.get("side", "sell")
         path = journal_send.thread_file(thread_id, side)
         in_msg_id = intent.get("in_msg_id", "")
@@ -201,26 +215,32 @@ def _reconcile_one(intent: dict) -> str:
         stamp = datetime.now(timezone.utc).isoformat()
 
         with atomic_io.locked(path):
-            # Re-check the intent is STILL pending under the lock (mirrors journal_send.run_commit's
+            # Re-check the intent is STILL open under the lock (mirrors journal_send.run_commit's
             # under-lock _find_intent re-check): a concurrent reconcile or a commit may have folded +
-            # acked it in the window since we peeked. If it is gone, there is nothing to fold and the
+            # acked it in the window since we peeked. If it is gone, there is nothing to do and the
             # other actor already notified — drain nothing, fire nothing.
             if journal_send._find_intent(thread_id, intent_id) is None:
                 return "skipped"
             thread = journal_send._read_thread(path, thread_id)
             if _already_committed(thread, intent_id):
-                # commit already folded the confirmed outbound; this pending record is a race
-                # leftover (its ack is in flight). Drain it without an unconfirmed dup or a notify.
+                # commit already folded the confirmed outbound; this record is a race leftover (its
+                # ack is in flight). Drain it without an unconfirmed dup or a notify. Covers the
+                # belt-and-suspenders case where mark-sent was skipped but commit still ran.
                 thread_outbox.ack(intent_id)
                 return "skipped"
+            if status != thread_outbox.STATUS_SENT:
+                # PENDING — the send never fired. Leave the intent alive (do NOT ack), fold nothing,
+                # advance nothing; just flag the thread for re-drive. The dedup key (thread+in_msg)
+                # guarantees the re-drive reuses THIS record rather than stranding another copy.
+                return "resend"
+            # SENT_UNVERIFIED — the send fired but commit was lost: fold + advance cursor + verify.
             new_thread = _fold_unconfirmed(thread, intent_id=intent_id, in_msg_id=in_msg_id,
                                            out_text=out_text, now_iso=stamp)
             atomic_io.write_json(path, new_thread)
             acked = thread_outbox.ack(intent_id).get("acked", False)
         if not acked:
             # Another process drained this intent between our re-check and our ack — it already folded
-            # and notified. Do NOT fire a duplicate verify-notify. (The fold above is idempotent: the
-            # unconfirmed row is keyed by intent_id, so it added no duplicate.)
+            # and notified. Do NOT fire a duplicate verify-notify. (The fold above is idempotent.)
             return "skipped"
         _notify_verify(thread_id)
         return "reconciled"
@@ -242,30 +262,37 @@ def reconcile(grace_sec: float = GRACE_SEC) -> dict:
     so the still-pending intent cannot be that worker's in-flight send — and skipping it forever would
     freeze the cursor and let a later pass re-reply."""
     try:
-        stale = thread_outbox.peek(older_than_sec=grace_sec)["pending"]
+        # OPEN_STATUSES so we see BOTH pending (send never fired -> re-drive) and sent_unverified
+        # (send fired, commit lost -> fold + verify) orphans; _reconcile_one branches on status.
+        stale = thread_outbox.peek(older_than_sec=grace_sec,
+                                   statuses=thread_outbox.OPEN_STATUSES)["pending"]
     except (OSError, ValueError):
         # unreadable outbox → fail-open no-op
-        return {"reconciled": 0, "skipped": 0, "errors": 0, "needs_verify": []}
+        return {"reconciled": 0, "skipped": 0, "errors": 0, "needs_verify": [], "needs_resend": []}
     now = datetime.now(timezone.utc)
     reconciled = skipped = errors = 0
-    needs_verify: list[str] = []  # thread_ids the next buyer pass must re-check in-chat (Fix 3)
+    needs_verify: list[str] = []  # sent_unverified orphans the next pass must re-check in-chat (Fix 3)
+    needs_resend: list[str] = []  # pending orphans whose send never fired — the next pass re-drives
     for intent in stale:
         too_old = _intent_age_sec(intent, now) > MAX_INTENT_AGE_SEC
         if not too_old and _market_has_live_lease(intent.get("market")):
             skipped += 1  # a live worker owns this market — the intent is in-flight, not an orphan
             continue
         outcome = _reconcile_one(intent)
+        tid = intent.get("thread_id")
         if outcome == "reconciled":
             reconciled += 1
-            tid = intent.get("thread_id")
             if tid and tid not in needs_verify:
                 needs_verify.append(tid)
-        elif outcome == "skipped":   # already committed — drained without a fold/notify
+        elif outcome == "resend":    # pending orphan — never sent; re-drive it (no fold, no notify here)
+            if tid and tid not in needs_resend:
+                needs_resend.append(tid)
+        elif outcome == "skipped":   # already committed / already drained — no fold/notify
             skipped += 1
         else:
             errors += 1
     return {"reconciled": reconciled, "skipped": skipped, "errors": errors,
-            "needs_verify": needs_verify}
+            "needs_verify": needs_verify, "needs_resend": needs_resend}
 
 
 def main(argv: list[str]) -> int:

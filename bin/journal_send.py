@@ -141,14 +141,25 @@ def _read_thread(path: Path, thread_id: str) -> dict:
 
 
 def run_intent(thread_id: str, market: str, in_msg_id: str, text: str, side: str) -> dict:
-    """Enqueue the intended outbound BEFORE the browser send. Returns {"id": <intent_id>}."""
+    """Enqueue the intended outbound BEFORE the browser send. Deduped by (thread_id, in_msg_id): a
+    re-ask / re-drive of the same inbound message reuses the existing pending intent (so the returned
+    id is stable across retries). Returns {"id": <intent_id>, "deduped": <bool>}."""
     result = thread_outbox.enqueue(thread_id, market, text, in_msg_id,
                                    datetime.now(timezone.utc), side=side)
-    return {"id": result["id"], "thread_id": thread_id}
+    return {"id": result["id"], "thread_id": thread_id, "deduped": result.get("deduped", False)}
+
+
+def run_mark_sent(intent_id: str) -> dict:
+    """Record that the browser send FIRED — flip the intent pending -> sent_unverified (Track A2).
+    Called between send() and commit so a recovery path can tell "send fired, commit lost" from
+    "send never fired". A no-op if the intent is already sent/committed. Returns {"marked": <bool>}."""
+    return thread_outbox.mark_sent(intent_id)
 
 
 def _find_intent(thread_id: str, intent_id: str) -> dict | None:
-    pending = thread_outbox.peek(thread_id=thread_id)["pending"]
+    # Look across OPEN statuses (pending AND sent_unverified) so commit can still find an intent whose
+    # send already fired (status flipped to sent_unverified by run_mark_sent before this commit).
+    pending = thread_outbox.peek(thread_id=thread_id, statuses=thread_outbox.OPEN_STATUSES)["pending"]
     return next((r for r in pending if r.get("id") == intent_id), None)
 
 
@@ -225,7 +236,7 @@ def _resolve_side(ns: argparse.Namespace) -> str:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="journal_send.py", add_help=False)
-    parser.add_argument("command", choices=["intent", "commit"])
+    parser.add_argument("command", choices=["intent", "commit", "mark-sent"])
     parser.add_argument("--thread", default="", dest="thread")
     parser.add_argument("--market", default="")
     parser.add_argument("--in-msg", default="", dest="in_msg")
@@ -243,7 +254,11 @@ def _validate(ns: argparse.Namespace) -> str | None:
     Returns the resolved side for `intent` (which must know where to file before any record exists).
     For `commit` the side is OPTIONAL — the intent record is the source of truth — so this returns
     the raw requested side (sell|buy) or None when omitted; run_commit reconciles it against the
-    intent and errors on a contradiction."""
+    intent and errors on a contradiction. `mark-sent` needs only --intent (no thread/side)."""
+    if ns.command == "mark-sent":
+        if not ns.intent_id.strip():
+            raise ValueError("mark-sent requires --intent <intent_id>")
+        return None
     if not ns.thread.strip():
         raise ValueError(f"{ns.command} requires --thread <id>")
     if ns.command == "intent":
@@ -273,6 +288,8 @@ def main(argv: list[str]) -> int:
         if ns.command == "intent":
             result = run_intent(ns.thread.strip(), ns.market.strip(), ns.in_msg.strip(),
                                 ns.text, side)
+        elif ns.command == "mark-sent":
+            result = run_mark_sent(ns.intent_id.strip())
         else:
             result = run_commit(ns.thread.strip(), ns.intent_id.strip(), side,
                                 ns.status.strip() or None, ns.threads_dir.strip() or None)

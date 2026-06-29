@@ -46,6 +46,14 @@ VALID_SIDES = ("sell", "buy")
 DEFAULT_SIDE = "sell"
 MAX_NOW_DRIFT_SEC = 300  # --now is a narrow test seam: clamp it to wall clock (no time-travel)
 
+# Intent lifecycle: pending (intent journaled, send not yet fired) -> sent_unverified (the browser
+# send FIRED, commit not yet folded) -> [acked/removed] (commit confirmed it). The intermediate
+# 'sent_unverified' state is what lets a recovery path tell "send fired, commit lost" (cursor-advance
+# is correct) apart from "send never fired" (must re-drive) — see bin/journal_reconcile.py.
+STATUS_PENDING = "pending"
+STATUS_SENT = "sent_unverified"
+OPEN_STATUSES = (STATUS_PENDING, STATUS_SENT)  # work still in flight (not yet confirmed/acked)
+
 
 def data_dir() -> Path:
     """The data directory — relocatable via BAZAAR_DATA_DIR (tests isolate on it)."""
@@ -114,17 +122,17 @@ def parse_records(text: str | None) -> list[dict]:
     return records
 
 
-def select_pending(records: list[dict], thread_id: str | None,
-                   older_than_sec: float | None, now: datetime) -> list[dict]:
-    """Return a NEW list of pending records, filtered by thread_id and/or minimum age.
+def select_by_statuses(records: list[dict], statuses: tuple[str, ...], thread_id: str | None,
+                       older_than_sec: float | None, now: datetime) -> list[dict]:
+    """Return a NEW list of records whose status is in `statuses`, filtered by thread_id and/or age.
 
-    Only records still marked pending are returned (a non-pending status that somehow survived in the
-    file — e.g. a partially-written row — must not leak into commit/reconcile). A record with an
-    unparseable ts is treated as infinitely old (it cannot be timed, so a crash orphan must not hide
-    behind a bad timestamp). Never mutates the input."""
+    A record with a status outside `statuses` (e.g. a partially-written row, or a sent_unverified row
+    when only pending was asked for) is excluded. A record with an unparseable ts is treated as
+    infinitely old (it cannot be timed, so a crash orphan must not hide behind a bad timestamp). The
+    age is measured from `ts` (intent-creation time) uniformly for every status. Never mutates input."""
     out: list[dict] = []
     for r in records:
-        if r.get("status") != "pending":
+        if r.get("status") not in statuses:
             continue
         if thread_id is not None and r.get("thread_id") != thread_id:
             continue
@@ -135,6 +143,42 @@ def select_pending(records: list[dict], thread_id: str | None,
                 continue
         out.append(dict(r))
     return out
+
+
+def select_pending(records: list[dict], thread_id: str | None,
+                   older_than_sec: float | None, now: datetime) -> list[dict]:
+    """Pending-only view (status == 'pending'), filtered by thread_id and/or minimum age.
+    Thin wrapper over select_by_statuses — kept for callers that only want never-sent intents."""
+    return select_by_statuses(records, (STATUS_PENDING,), thread_id, older_than_sec, now)
+
+
+def find_pending_by_inbound(records: list[dict], thread_id: str, in_msg_id: str) -> dict | None:
+    """Return a COPY of the first PENDING record for (thread_id, in_msg_id), or None.
+
+    The dedup key for enqueue: a re-ask / re-drive of the SAME inbound message must REUSE the existing
+    pending intent rather than mint a second one (the two-stranded-copies bug). Matches status
+    'pending' ONLY — a 'sent_unverified' record means the browser send already fired, so a fresh
+    enqueue there is a deliberate resend (e.g. after a verify-miss) and must not collapse onto it.
+    Never mutates the input."""
+    for r in records:
+        if (r.get("status") == STATUS_PENDING and r.get("thread_id") == thread_id
+                and r.get("in_msg_id") == in_msg_id):
+            return dict(r)
+    return None
+
+
+def set_fields(records: list[dict], rec_id: str, **fields) -> tuple[list[dict], bool]:
+    """Return (new_records, found): a NEW list with `rec_id`'s fields overlaid (e.g. a status flip or
+    a text refresh). Never mutates the input list or any record in it."""
+    out: list[dict] = []
+    found = False
+    for r in records:
+        if r.get("id") == rec_id:
+            found = True
+            out.append({**r, **fields})
+        else:
+            out.append(dict(r))
+    return out, found
 
 
 def remove_id(records: list[dict], rec_id: str) -> tuple[list[dict], bool]:
@@ -206,22 +250,81 @@ def _with_lock(path: Path, fn):
 
 def enqueue(thread_id: str, market: str, text: str, in_msg_id: str, now: datetime,
             side: str = DEFAULT_SIDE, path: Path | None = None) -> dict:
-    """Append one pending intent under the lock. Returns {"enqueued": True, "id": ...}."""
+    """Record a pending intent BEFORE the browser send, deduped by (thread_id, in_msg_id).
+
+    If a PENDING intent for the same inbound message already exists, REUSE it (refresh `text` + `ts`
+    to the latest reply) rather than appending a duplicate — a re-ask or a re-drive of the same
+    message must never strand a second copy. The read + the reuse-or-append all run under the one
+    lock so a concurrent enqueue can't slip a duplicate in. Returns
+    {"enqueued": True, "id": <id>, "deduped": <bool>}."""
     path = path or outbox_path()
-    record = build_record(thread_id, market, text, in_msg_id, now.isoformat(), side=side)
-    _with_lock(path, lambda: _append_line(path, record))
-    return {"enqueued": True, "id": record["id"]}
+    now_iso = now.isoformat()
+
+    def _mutate():
+        records = parse_records(_read_text(path))
+        existing = find_pending_by_inbound(records, thread_id, in_msg_id)
+        if existing is not None:
+            updated, _ = set_fields(records, existing["id"], text=text, ts=now_iso)
+            _atomic_write(path, updated)
+            return {"enqueued": True, "id": existing["id"], "deduped": True}
+        record = build_record(thread_id, market, text, in_msg_id, now_iso, side=side)
+        _append_line(path, record)
+        return {"enqueued": True, "id": record["id"], "deduped": False}
+
+    return _with_lock(path, _mutate)
+
+
+def mark_sent(rec_id: str, now: datetime | None = None, path: Path | None = None) -> dict:
+    """Flip a PENDING intent to 'sent_unverified' and stamp `sent_ts` — the durable record that the
+    browser send FIRED (distinct from the intent merely being journaled). Returns {"marked": bool}.
+    Only a still-pending record is flipped; an unknown or already-sent id is a clean no-op."""
+    path = path or outbox_path()
+    now = now or datetime.now(timezone.utc)
+
+    def _mutate():
+        records = parse_records(_read_text(path))
+        target = next((r for r in records if r.get("id") == rec_id
+                       and r.get("status") == STATUS_PENDING), None)
+        if target is None:
+            return False
+        updated, _ = set_fields(records, rec_id, status=STATUS_SENT, sent_ts=now.isoformat())
+        _atomic_write(path, updated)
+        return True
+
+    return {"marked": bool(_with_lock(path, _mutate))}
+
+
+def mark_escalated(rec_id: str, now: datetime | None = None, path: Path | None = None) -> dict:
+    """Stamp an intent as surfaced-to-user (durable, exactly-once marker for the outbox sweeper — see
+    bin/agent_daemon.py). The record stays pending and visible; this only records that we have already
+    alarmed once, so re-drives (which bump `attempts`) can never race a second escalation. Mirrors
+    mark_sent: a clean no-op on an unknown id. Returns {"escalated": bool}."""
+    path = path or outbox_path()
+    now = now or datetime.now(timezone.utc)
+
+    def _mutate():
+        records = parse_records(_read_text(path))
+        if not any(r.get("id") == rec_id for r in records):
+            return False
+        updated, _ = set_fields(records, rec_id, escalated=True, escalated_ts=now.isoformat())
+        _atomic_write(path, updated)
+        return True
+
+    return {"escalated": bool(_with_lock(path, _mutate))}
 
 
 def peek(thread_id: str | None = None, older_than_sec: float | None = None,
-         now: datetime | None = None, path: Path | None = None) -> dict:
-    """Read-only snapshot of pending intents (optionally filtered by thread / age). Removes nothing."""
+         now: datetime | None = None, path: Path | None = None,
+         statuses: tuple[str, ...] = (STATUS_PENDING,)) -> dict:
+    """Read-only snapshot of intents in `statuses` (optionally filtered by thread / age). Removes
+    nothing. Default is pending-only (the legacy behavior); pass OPEN_STATUSES to also see
+    sent_unverified work in flight. The result key stays "pending" for backward compatibility."""
     path = path or outbox_path()
     now = now or datetime.now(timezone.utc)
 
     def _read():
         records = parse_records(_read_text(path))
-        return select_pending(records, thread_id, older_than_sec, now)
+        return select_by_statuses(records, statuses, thread_id, older_than_sec, now)
 
     pending = _with_lock(path, _read)
     return {"pending": pending, "count": len(pending)}
@@ -271,9 +374,18 @@ def _resolve_now(now_arg: str) -> datetime:
     return parsed
 
 
+# peek --status -> the status set to return (CLI default 'open' = all in-flight work, the most useful
+# human/sweeper view; the Python peek() default stays pending-only for legacy callers).
+_PEEK_STATUS_MAP = {
+    "pending": (STATUS_PENDING,),
+    "sent_unverified": (STATUS_SENT,),
+    "open": OPEN_STATUSES,
+}
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="thread_outbox.py", add_help=False)
-    parser.add_argument("command", choices=["enqueue", "peek", "ack", "fail"])
+    parser.add_argument("command", choices=["enqueue", "peek", "ack", "fail", "sent"])
     parser.add_argument("--thread", default="", dest="thread")
     parser.add_argument("--market", default="")
     parser.add_argument("--in-msg", default="", dest="in_msg")
@@ -281,6 +393,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--side", default=DEFAULT_SIDE)
     parser.add_argument("--id", default="", dest="rec_id")
     parser.add_argument("--older-than-sec", type=float, default=None, dest="older_than_sec")
+    parser.add_argument("--status", default="open", choices=list(_PEEK_STATUS_MAP))
     parser.add_argument("--now", default="")
     return parser.parse_args(argv[1:])
 
@@ -298,7 +411,7 @@ def _validate(ns: argparse.Namespace) -> None:
             raise ValueError("enqueue requires a non-empty --text")
         if ns.side not in VALID_SIDES:
             raise ValueError(f"--side must be one of {VALID_SIDES}, got {ns.side!r}")
-    elif ns.command in ("ack", "fail"):
+    elif ns.command in ("ack", "fail", "sent"):
         if not ns.rec_id.strip():
             raise ValueError(f"{ns.command} requires --id <id>")
 
@@ -317,9 +430,12 @@ def main(argv: list[str]) -> int:
                              now, side=ns.side)
         elif ns.command == "peek":
             result = peek(thread_id=ns.thread.strip() or None,
-                          older_than_sec=ns.older_than_sec, now=now)
+                          older_than_sec=ns.older_than_sec, now=now,
+                          statuses=_PEEK_STATUS_MAP.get(ns.status, OPEN_STATUSES))
         elif ns.command == "fail":
             result = fail(ns.rec_id.strip())
+        elif ns.command == "sent":
+            result = mark_sent(ns.rec_id.strip(), now)
         else:
             result = ack(ns.rec_id.strip())
     except (FileNotFoundError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:

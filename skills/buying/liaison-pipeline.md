@@ -112,24 +112,28 @@ at handover (`skills/buying/handover.md` carries `config.handover_disclosure`), 
 
 ## 6. Pace & send (account safety)
 Identical to the seller pipeline — reserve a slot from the deterministic pacing engine; **never
-self-count from the transcript**:
-`python3 bin/pacing_gate.py reserve --marketplace <market> --kind liaison --mode <interactive|unattended>`
+self-count from the transcript**. Use `--block` so the engine waits the anti-automation delay
+server-side (one call) instead of you idling it across turns:
+`python3 bin/pacing_gate.py reserve --marketplace <market> --kind liaison --mode <interactive|unattended> --block`
 - Pass `--mode interactive` only when a human is driving this session (the `/buy` console tells you
   to); an unattended daemon pass omits it (defaults to `unattended`). The mode changes **only the
   post-`go` jitter** — the hourly cap and `quiet_hours` apply identically in both.
-- `go` → **bracket the send so a crash can never split-brain the ledger** (a reply on the marketplace
-  with a stale cursor and no journaled outbound). Same discipline as the seller pipeline, but
-  `--side buy` (targets `data/buyer_threads/<id>.json`):
-  1. **Record the intent BEFORE the send:**
+- `go` → the engine has ALREADY waited the delay; send NOW. **Bracket the send so an interruption can
+  never split-brain the ledger or silently drop the reply.** Same discipline as the seller pipeline,
+  but `--side buy` (targets `data/buyer_threads/<id>.json`):
+  1. **Record the intent BEFORE the send** (deduped by thread + inbound, so a re-drive never strands a copy):
      `python3 bin/journal_send.py intent --side buy --thread <market>:<id> --market <market> --in-msg "<inbound_msg_id>" --text "<your reply>"`
      Capture the printed `id` as `<intent_id>`. (On INITIATE there is no inbound — pass the opening
      trigger as `--in-msg` so the cursor advances; the seed step set `source`/cursor already.)
-  2. Wait the returned `delay_sec` (small in interactive mode, longer when unattended; non-zero
-     either way — never an instant zero-delay send), then `type(message)` + `send()`.
-  3. **Commit immediately AFTER `send()` returns** (writes the thread file atomically):
+  2. `type(message)` + `send()` (the `--block` reserve above already waited; never fire a zero-delay send yourself).
+  3. **Mark the send fired, the instant `send()` returns and BEFORE the commit:**
+     `python3 bin/journal_send.py mark-sent --intent <intent_id>` (so recovery can tell "sent but
+     unjournaled" from "never sent").
+  4. **Commit immediately after** (writes the thread file atomically):
      `python3 bin/journal_send.py commit --side buy --thread <market>:<id> --intent <intent_id> [--status <new_status>]`
-- `wait` → at this marketplace's hourly cap; **do NOT send**; retry next pass.
-- `quiet` → inside `quiet_hours`; **queue, don't send.**
+- `wait` → at this marketplace's hourly cap; **do NOT send and do NOT record an intent**; retry next pass.
+- `quiet` → inside `quiet_hours`; **do NOT send and do NOT record an intent** — leave the cursor so
+  the next pass after quiet hours sends it cleanly.
 
 The cap is **per marketplace account** and atomic across concurrent passes, so buy and sell actions
 on one marketplace count against the same budget.
@@ -148,7 +152,8 @@ When OUR last message to a seller goes unanswered, `bin/followup_state.py` sched
 nudges (gentle escalation, ~1d then ~3d), then marks the seller not interested (~3d later). OFF unless
 `followup_enabled` (config) is on; driven by the buy pass only when `$BAZAAR_FOLLOWUP=1` (see the
 FOLLOW-UP MODE block in the buy prompt). A nudge reuses the EXACT §6 bracket (`journal_send.py intent
---side buy` → pace → `type`+`send()` → `journal_send.py commit --side buy`), then `python3
+--side buy` → `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →
+`journal_send.py commit --side buy`), then `python3
 bin/followup_state.py mark-nudge --thread <id> --side buy`. Re-read the tail first and skip the nudge
 if the seller has replied since the scan (handle their reply via §3-§7 instead). The not-interested
 drop never touches thread `status`, so a re-engaging seller is still handled normally. Do not chase a
@@ -157,9 +162,10 @@ thread that is `agreed`/`closed`/`escalated` (those are terminal for follow-up).
 ## ESCALATE (to the USER — shared)
 1. Post a brief holding reply to the seller ("Let me check on that and get back to you shortly!"),
    **bracketed exactly like a normal send (section 6)** — `journal_send.py intent --side buy` →
-   pace → `type`+`send()` → `journal_send.py commit --side buy --status escalated`. This makes the
-   holding reply + cursor advance atomic, so a crash mid-pass can never re-escalate (the buy-side
-   mirror of the Olaf failure). Reply naturally, no identity line, per `voice.md` Rule 3.
+   `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →
+   `journal_send.py commit --side buy --status escalated`. This makes the holding reply + cursor
+   advance atomic, so a crash mid-pass can never re-escalate (the buy-side mirror of the Olaf
+   failure). Reply naturally, no identity line, per `voice.md` Rule 3.
 2. The `commit --side buy --status escalated` in step 1 already set thread `status:"escalated"`
    **and** advanced the cursor (the holding reply *is* the handling) — do not re-advance or hand-edit
    the thread file.

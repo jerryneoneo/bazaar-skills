@@ -49,6 +49,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -287,6 +288,25 @@ def run_reserve(marketplace, kind, now, state_path, config_path, mode="unattende
             fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
 
+def _maybe_block(result):
+    """Track B1 — when --block is set, sleep a `go` decision's delay SERVER-SIDE (one CLI call) so the
+    LLM does NOT idle the delay across turns (which burns its finite turn budget and risks the pass
+    ending mid-send). The delay is clamped to HARD_DELAY_CEILING_SEC (already evaluate's own clamp, so
+    this is belt-and-suspenders). After sleeping, return delay_sec=0 + slept_sec so the caller sends
+    immediately. A non-go decision (wait/quiet) is returned UNTOUCHED — the caller still handles it.
+
+    The sleep runs AFTER run_reserve has released its lock (we never hold the pacing lock while
+    sleeping, which would stall every other marketplace's reservation). Pause stays responsive: the
+    PreToolUse pause guard still blocks the actual send, and the daemon SIGTERMs the whole pass tree
+    (killing this sleep) on /pause."""
+    if result.get("decision") != "go":
+        return result
+    delay = max(0.0, min(float(result.get("delay_sec", 0) or 0), float(HARD_DELAY_CEILING_SEC)))
+    if delay > 0:
+        time.sleep(delay)
+    return {**result, "delay_sec": 0, "slept_sec": round(delay, 1), "blocked": True}
+
+
 def run_status(marketplace, now, state_path, config_path):
     cfg = load_cfg(config_path)
     state = _read_state(state_path)
@@ -319,6 +339,9 @@ def _parse_args(argv):
     parser.add_argument("--marketplace", default="")
     parser.add_argument("--kind", default="action")
     parser.add_argument("--mode", choices=["interactive", "unattended"], default="unattended")
+    parser.add_argument("--block", action="store_true",
+                        help="sleep a 'go' decision's delay server-side, then return delay_sec=0 "
+                             "(so the caller doesn't idle the wait across LLM turns)")
     parser.add_argument("--now", default="")
     return parser.parse_args(argv[1:])
 
@@ -339,6 +362,8 @@ def main(argv):
         config_path = dd / "config.json"
         if ns.command == "reserve":
             result = run_reserve(marketplace, ns.kind.strip() or "action", now, state_path, config_path, ns.mode)
+            if ns.block:
+                result = _maybe_block(result)  # sleep a 'go' delay here (lock already released)
         else:
             result = run_status(marketplace, now, state_path, config_path)
     except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError) as exc:

@@ -361,6 +361,7 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     last_eval = time.monotonic()
     last_update = time.monotonic()   # upstream update-check throttle (not immediate)
     last_followup = time.monotonic()  # stale-chat follow-up check throttle (not immediate)
+    last_sweep = time.monotonic()    # outbox sweeper throttle (Track A5; not immediate)
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
     # Bug C6: sweep per-pass logs leaked by forced kills (preempt/deadline/watchdog skip run_pass's
@@ -514,6 +515,24 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                     last_buyer_pass = time.monotonic()
                     logging.info("launched buyer worker [%s] (%s live)", market, len(workers))
             last_buyer = time.monotonic()
+
+        # OUTBOX SWEEP (Track A5): re-drive any STRANDED never-fired send (status=pending in
+        # thread_outbox owned by no live worker) by launching a scoped buyer worker for its market,
+        # within free slots. Escalations the sweep enqueues are flushed by _drain_outbox at loop top.
+        # The deterministic backstop that makes a silent drop impossible even with no inbound mail.
+        if not paused and time.monotonic() - last_sweep >= cfg.get("outbox_sweep_poll_sec", 120):
+            redrive = ad.sweep_outbox(env, ns.dry_run, busy_markets=set(workers))
+            free = max_workers - len(workers)
+            for market in sorted(m for m in redrive if m in enabled and m not in workers)[:max(0, free)]:
+                seq += 1
+                holder = _holder(market, seq)
+                proc = _launch_buyer(market, env, {}, holder, ns.dry_run,
+                                     hint="re-driving a reply that never sent")
+                if proc is not None:
+                    workers[market] = {"proc": proc, "holder": holder, "started": time.monotonic()}
+                    last_buyer_pass = time.monotonic()
+                    logging.info("outbox sweep → re-drive buyer worker [%s]", market)
+            last_sweep = time.monotonic()
 
         # EXCLUSIVE passes: only when no market worker is live (they'd contend on a shared tab/account).
         if not paused and not workers and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
