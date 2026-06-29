@@ -84,6 +84,41 @@ but pinning the recipe keeps the buyer pass from silently failing if the DOM shi
 
 Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). `--dry-run` → log only.
 
+## Relist offer recipe (called by `skills/channel/relist-offer.md`)
+The Carousell **assistant** (`carousell_assistant`) proactively offers to relist / renew / bump a
+seller's listing, or asks "Is this still available?" (confirming refreshes it). This recipe reads the
+actual control, decides **free vs paid (fail-closed)**, and takes ONLY the free action. Inputs: the
+target `item_id` + its `listing_urls.carousell`.
+
+> **THE HARD RULE — never spend.** Never click a control that costs Carousell **coins** or money.
+> Carousell's paid promotion (**"Spotlight"**, **"Promote"**, a coin-priced "Bump") is OUT of scope,
+> always. Only a genuinely free relist / renew / "still available" confirmation may be clicked.
+
+1. Reach the relist control by EITHER path the assistant presented it on:
+   - in the assistant chat: `navigate("https://<host>/inbox/")` → open the `carousell_assistant`
+     conversation → find the offered action (a "Relist" / "List it again" / "Yes, still available"
+     button or link), **or**
+   - on the listing: `navigate(items.listing_urls.carousell)` → open the manage menu (`•••`) → look
+     for a free **"Relist"** / **"Renew"** option (NOT "Promote" / "Spotlight").
+2. **Read the control + any confirmation dialog before clicking.** Classify the action:
+   - `paid` if the button/dialog shows ANY of: a coin count or coin icon, a currency amount, the
+     words "coin(s)", "purchase", "buy", "Spotlight", "Promote", "Boost <price>", or a balance/top-up
+     prompt. **Return `paid` and click nothing.**
+   - `free` ONLY if the action is explicitly free: a plain "Relist" / "List again" / "Renew" or a
+     "Yes, it's still available" confirmation with **no charge anywhere** in the button or its
+     confirmation. 
+   - `unknown` if you cannot clearly confirm it is free (text unclear, dialog did not render, an
+     unexpected screen). **Return `unknown` and click nothing.**
+3. **Only on `free`** (and after the caller's `pacing_gate.py reserve`): click the free relist /
+   confirm control. If a coin / top-up / payment screen appears at ANY point after the click, **stop
+   immediately, dismiss it, and report `paid`** (do not proceed, do not confirm a purchase). If
+   Carousell responds "already relisted recently" / "you can relist again in N days", treat it as
+   **done** (the caller stamps the cooldown), not a failure.
+4. Return the decision (`free` acted / `paid` / `unknown`) to the caller. `--dry-run` → log the read
+   + the decision, click nothing.
+
+Logged-out/checkpoint → stop + escalate re-auth (no tight retry), same as the recipes above.
+
 ## Guardrails
 - Logged-out / checkpoint / verification → **stop and escalate** ("re-auth your Carousell"),
   no tight-loop retries.

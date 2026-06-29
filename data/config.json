@@ -35,6 +35,7 @@
   "stale_days": 7,
   "listing_health_interval_hours": 24,
   "rewarn_days": 14,
+  "relist_cooldown_days": 1,
   "checkout_disclosure": "Heads up: this sale is handled by Bazaar for the seller. You'll complete payment and delivery securely at checkout.",
   "handover_disclosure": "Quick note: I'm Bazaar, handling this purchase for the buyer. They'll sort payment and collection with you directly.",
   "approvals": {
@@ -49,6 +50,7 @@
       "above_list_bids": "escalate",
       "mark_sold": "confirm",
       "distribution": "confirm",
+      "free_relist": "auto",
       "buy_search": "auto",
       "buy_offer": "auto",
       "buy_accept": "auto",

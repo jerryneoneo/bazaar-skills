@@ -217,6 +217,14 @@ def test_setcommands_constraints():
     check("descriptions are 1-256 chars", ok_desc)
 
 
+def test_catchup_command_registered():
+    print("catchup is in the curated control-channel command set:")
+    by_name = {c["command"]: c for c in telegram.BOT_COMMANDS}
+    check("catchup present in BOT_COMMANDS", "catchup" in by_name)
+    check("catchup has a non-empty description",
+          bool(by_name.get("catchup", {}).get("description", "").strip()))
+
+
 def test_token_format():
     print("token-format pre-check (offline):")
     check("real-shaped token accepted",
@@ -296,6 +304,7 @@ if __name__ == "__main__":
     test_setcommands_registers()
     test_setcommands_idempotent()
     test_setcommands_constraints()
+    test_catchup_command_registered()
     test_token_format()
     test_verify()
     print()
