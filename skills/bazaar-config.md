@@ -30,6 +30,7 @@ Both are surfaced/edited from the `/bazaar` menu (`APPROVALS` anchor in
     "above_list_bids":     "escalate",
     "mark_sold":           "confirm",
     "distribution":        "confirm",
+    "free_relist":         "auto",
     "buy_search":          "confirm",
     "buy_offer":           "confirm",
     "buy_accept":          "confirm",
@@ -54,9 +55,9 @@ Each step value is one of:
 | `confirm` | Gate on `confirm()` (or a `notify(...)` with accept/decline); proceed only on yes. |
 | `escalate` | Never auto. Always `notify()` the seller and park until they choose. |
 
-### The fourteen steps
+### The fifteen steps
 
-Sell side (9):
+Sell side (10):
 
 | Key | Decision point | Where it's read |
 |---|---|---|
@@ -69,6 +70,7 @@ Sell side (9):
 | `above_list_bids` | An above-list / competitive-bid close | `skills/reply-pipeline.md` + `skills/channel/notifications.md` |
 | `mark_sold` | Run the take-down recipe after a deal | `skills/channel/notifications.md` (sale → done) |
 | `distribution` | Import an unmanaged listing / cross-list / set up a recommended platform | `skills/channel/distribution.md` (IMPORT, DISTRIBUTE) |
+| `free_relist` | Take a platform assistant's **free** relist/renew/bump offer (free actions only; paid is never taken) | `skills/channel/relist-offer.md` |
 
 Buy side (4):
 
@@ -96,6 +98,14 @@ reverts to the normal side gates (`buy_offer`/`buy_accept`, or `offers`/`buyer_r
 (it climbs to `walk_away` instead) — so both gates are enforced in code regardless of config; the
 config only controls *how* the edge case is surfaced.
 
+**The never-pay invariant (`free_relist`):** `free_relist` gates only a *free* platform action — it
+has **no paid path and no spend escalation**. Taking a relist/bump that costs coins or money is never
+autonomous and is not a config value: `skills/channel/relist-offer.md` + the per-market recipe
+classify the offer `free | paid | unknown` and act ONLY on `free`, failing CLOSED on any cost or
+ambiguity (the same money-guard discipline as the floor/budget gates, enforced in the recipe, not the
+config). So `free_relist` only ever decides whether a *free* relist runs silently (`auto`) or asks
+first (`confirm`); it can never authorise a spend.
+
 ## Presets
 
 The menu resolves a preset to a full `steps` map:
@@ -111,6 +121,7 @@ The menu resolves a preset to a full `steps` map:
 | above_list_bids | escalate | escalate | escalate |
 | mark_sold | confirm | confirm | confirm |
 | distribution | auto | confirm | confirm |
+| free_relist | auto | auto | confirm |
 | buy_search | auto | confirm | confirm |
 | buy_offer | auto | confirm | confirm |
 | buy_accept | auto | confirm | confirm |
@@ -164,6 +175,7 @@ buyer_replies       = "auto"
 above_list_bids     = "escalate"                          # always (close_gate bidding clause)
 mark_sold           = "confirm"
 distribution        = "confirm"                           # ask before importing / cross-listing
+free_relist         = "auto"                              # free + pure upside; never-pay guard is in code
 buy_search          = "confirm"                           # buyer-side gates: conservative if absent
 buy_offer           = "confirm"
 buy_accept          = "confirm"
@@ -171,10 +183,12 @@ above_budget        = "escalate"                          # always (mirror of ab
 takeover            = "confirm"                           # always (hard floor; never auto)
 ```
 
-> **Absent newer keys (`distribution`, `buy_search`, `buy_offer`, `buy_accept`, `above_budget`,
-> `takeover`):** if `approvals.steps` exists but has no entry for one of these, treat it as `"confirm"`
-> (and `above_budget` as `"escalate"`). The distribution, buyer, and inbox-sweep flows never auto-act
-> on a missing key — and `takeover` is never read as `auto` even if a stale config says so.
+> **Absent newer keys (`distribution`, `free_relist`, `buy_search`, `buy_offer`, `buy_accept`,
+> `above_budget`, `takeover`):** if `approvals.steps` exists but has no entry for one of these, treat
+> it as `"confirm"` (and `above_budget` as `"escalate"`, `free_relist` as `"auto"` — it gates only a
+> free action and the never-pay guard lives in the recipe regardless). The distribution, buyer, and
+> inbox-sweep flows never auto-act on a missing key — and `takeover` is never read as `auto` even if a
+> stale config says so.
 
 Legacy keys (`autonomy_mode`, `listing_autonomy`, `close_gate`) stay in `config.json` one release
 for back-compat, then can be dropped. The numeric negotiation knobs are **unrelated** to approvals and
@@ -314,6 +328,7 @@ item per pass, deduped so you are not nagged).
 | `stale_days` | `7` | days of no buyer inbound before a listing is "stale" |
 | `listing_health_interval_hours` | `24` | min gap before starting a new stale-listing episode (rate-limit) |
 | `rewarn_days` | `14` | min gap before re-warning the same listing |
+| `relist_cooldown_days` | `1` | min gap before relisting the SAME item again on one market when a platform assistant offers a **free** relist (`bin/relist_state.py`, `skills/channel/relist-offer.md`); `0` disables the cooldown |
 
 All keys are read with these defaults, so an install with no entries behaves as above; set a key to
 `0` (or `followup_enabled`/`listing_health_enabled` to `false`) to disable that behavior.

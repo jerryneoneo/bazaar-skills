@@ -321,12 +321,51 @@ def test_new_enquiry_fires_sell():
 
 
 def test_system_handle_ignored():
-    print("fresh unread SYSTEM handle (promo) → neither buy nor sell:")
+    print("fresh unread SYSTEM handle (promo) → neither buy nor sell nor platform offer:")
     out = inbox_scan.classify(
         _car([_row("carousell_assistant", "Back to School Savings!", True),
               _row("selltocarousell_mobiles", "Trade-In Discount", True)]), {}, {}, {})
     check("sell NOT flagged", out["sell_markets"].get("carousell") is False)
     check("buy empty", out["buy"] == [])
+    check("non-relist assistant promo → NOT a platform offer",
+          out.get("platform_offers", {}).get("carousell") is False)
+
+
+def test_assistant_relist_offer_flags_platform_offer():
+    print("fresh unread carousell_assistant RELIST offer → platform_offers True, NOT sell/buy:")
+    for snippet in ("Relist your Nintendo Switch to get more views?",
+                    "Your listing is getting old, list it again for free",
+                    "Is your iPhone 12 still available? Tap to renew",
+                    "Give your listing a free bump to reach more buyers"):
+        out = inbox_scan.classify(_car([_row("carousell_assistant", snippet, True)]), {}, {}, {})
+        check(f"platform offer flagged: {snippet[:32]!r}",
+              out["platform_offers"].get("carousell") is True)
+        check("sell NOT flagged (assistant is never a buyer)",
+              out["sell_markets"].get("carousell") is False)
+        check("buy empty", out["buy"] == [])
+
+
+def test_assistant_relist_offer_requires_unread():
+    print("a READ assistant relist offer (already seen) does NOT fire (untracked → needs unread):")
+    out = inbox_scan.classify(_car([_row("carousell_assistant", "Relist your item for free", False)]),
+                              {}, {}, {})
+    check("not a platform offer when read", out["platform_offers"].get("carousell") is False)
+
+
+def test_assistant_relist_offer_memo_suppresses_refire():
+    print("memo suppresses re-firing the SAME relist offer while it sits unread:")
+    snippet = "Relist your item for free?"
+    memo = {"carousell:carousell_assistant": {"snippet": snippet, "unread": True}}
+    out = inbox_scan.classify(_car([_row("carousell_assistant", snippet, True)]), {}, {}, memo)
+    check("already-seen offer does not re-fire", out["platform_offers"].get("carousell") is False)
+
+
+def test_sell_peek_shape_includes_platform_offers():
+    print("sell_peek() / classify() expose platform_offers in their contract:")
+    out = inbox_scan.classify(_car([_row("brandnew_buyer", "is this available?", True)]), {}, {}, {})
+    check("classify return has platform_offers key", "platform_offers" in out)
+    check("a pure buyer enquiry is not a platform offer",
+          out["platform_offers"].get("carousell") is False)
 
 
 def test_read_row_ignored():
@@ -614,6 +653,10 @@ if __name__ == "__main__":
     test_classify_multiple_matched_sell_threads()
     test_new_enquiry_fires_sell()
     test_system_handle_ignored()
+    test_assistant_relist_offer_flags_platform_offer()
+    test_assistant_relist_offer_requires_unread()
+    test_assistant_relist_offer_memo_suppresses_refire()
+    test_sell_peek_shape_includes_platform_offers()
     test_read_row_ignored()
     test_memo_suppresses_refire()
     test_buy_precedence_over_sell()

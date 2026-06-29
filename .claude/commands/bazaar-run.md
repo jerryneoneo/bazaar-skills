@@ -139,6 +139,12 @@ for id, sel in seller_config.marketplaces.items() if sel.enabled:    # e.g. fb, 
       # assist-mode offers + unknowns -> ESCALATE -> channel.notify (notifications.md)
    # Threads NOT in data/threads/ are untracked — left to the cadence-gated inbox SWEEP (§2b), which
    # classifies them and offers takeover. The hot loop only processes threads already managed here.
+   # FREE RELIST OFFER — the in-app assistant (carousell_assistant) offered to relist/renew/bump our
+   # OWN listing (a free visibility boost). inbox_scan flags it deterministically (platform_offers),
+   # distinct from buyer routing. Take it ONLY if free; never spend.
+   if python3 bin/inbox_scan.py platform-offers shows <id>:true:     # cheap, read-only, ~0 tokens
+      run skills/channel/relist-offer.md for <id>                    # free->relist+stamp+FYI; paid/unknown->skip
+      # (free_relist gate; per-item relist_cooldown_days; pacing; NEVER clicks a paid/coin control)
 
 # 2b. AUTONOMOUS DETECT — unmanaged LISTINGS (my-listings page) AND untracked INBOX CHATS (the chat
 #     list), both off the hot loop. Cadence-gated: at most ONE due market per pass, cursor

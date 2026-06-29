@@ -66,8 +66,33 @@ SELL_MEMO_PATH = DATA_DIR / "inbox_sell_state.json"
 
 LIAISE_STATES = {"liaising", "agreed"}
 ACTIVE_SELL_STATES = {"active"}
-# Marketplace system / promo accounts that send unread messages but are never actionable.
+# Marketplace system / promo accounts that send unread messages but are never a BUYER (never
+# mis-routed as an enquiry). Most are pure noise (promos); the per-market ASSISTANT_HANDLES below are
+# the exception — they proactively offer a FREE relist of the seller's own listings, which IS
+# actionable (routed to the relist handler, not ignored). A handle here never fires a sell/buy pass.
 SYSTEM_HANDLES = {"carousell_assistant", "selltocarousell_mobiles", "carousell"}
+
+# Per-market in-app ASSISTANT account that proactively offers to relist/renew/bump the seller's own
+# listings (a free visibility refresh). It stays in SYSTEM_HANDLES (never treated as a buyer); a
+# relist OFFER from it is routed to skills/channel/relist-offer.md instead of being ignored.
+# Marketplace-agnostic seam: register FB's "relist/renew" assistant etc. here when added.
+ASSISTANT_HANDLES = {"carousell": "carousell_assistant"}
+
+# A platform-assistant message OFFERING a (re)list / renew / bump / "still available?" refresh of the
+# seller's OWN listing — the free, pure-upside action the agent should take. DETECTION here is
+# deliberately LOOSE (catch any relist/renew/bump nudge); the FREE-vs-PAID decision is made
+# fail-closed in the per-market recipe (skills/listing-flows/<market>.md), NEVER from this snippet.
+RELIST_OFFER_RE = re.compile(
+    r"re-?list"
+    r"|list (?:it|this|them|your|again)"
+    r"|\brenew\b"
+    r"|\bbump\b"
+    r"|\bboost\b"
+    r"|\brefresh\b"
+    r"|still (?:selling|available|for sale)"
+    r"|keep (?:it|this|them|your)\b.{0,20}(?:active|listed|live)",
+    re.IGNORECASE,
+)
 
 # Only markets whose inbox rows are reliably enumerable per-thread via CDP. Others fall back to
 # buyer_peek's aggregate signal (see module docstring).
@@ -429,17 +454,26 @@ def classify(rows_by_market: dict, buy_index: dict, sell_index: dict, memo: dict
     `sell_threads` (Fix C) carries the matched SELL thread_id(s) per market — only TRACKED sell rows
     contribute an id (a brand-new enquiry flags the market but has no thread yet). A caller uses this
     to scope a worker to the one thread that actually has new mail (and stays conservative when the
-    market has 0 or >1 fresh threads). `sell_markets` keeps its original bool-per-market contract."""
+    market has 0 or >1 fresh threads). `sell_markets` keeps its original bool-per-market contract.
+
+    `platform_offers` carries, per market, True when a FRESH row from that market's in-app ASSISTANT
+    (ASSISTANT_HANDLES) is a relist/renew/bump OFFER (RELIST_OFFER_RE) — a free visibility refresh the
+    agent can take (routed to skills/channel/relist-offer.md). It is INDEPENDENT of sell/buy routing:
+    the assistant handle stays in SYSTEM_HANDLES, so it never flags a sell pass or a buyer enquiry —
+    only this signal. Non-relist assistant promos still match nothing and are ignored as before."""
     next_memo = dict(memo)
     buy: list = []
     sell_markets: dict = {}
     sell_threads: dict = {}
+    platform_offers: dict = {}
 
     for market, mdata in rows_by_market.items():
         if not mdata.get("found"):
             continue  # not scanned → omit; caller falls back to the aggregate probe
         sell_new = False
+        offer_new = False
         matched_threads: list = []
+        assistant_handle = ASSISTANT_HANDLES.get(market)
         for row in mdata.get("rows", []):
             handle = normalize_handle(row.get("handle", ""))
             if not handle:
@@ -466,13 +500,19 @@ def classify(rows_by_market: dict, buy_index: dict, sell_index: dict, memo: dict
                 # ONE active thread on this market (0 / >1 → flag the market but emit no hint).
                 if len(sell_ids) == 1:
                     matched_threads.append(sell_ids[0])
+            elif assistant_handle and handle == assistant_handle:
+                # The in-app assistant: a relist/renew OFFER is actionable; any other promo from it
+                # (e.g. "Back to School Savings!") matches nothing here and stays ignored.
+                if RELIST_OFFER_RE.search(row.get("snippet", "")):
+                    offer_new = True
             elif handle not in SYSTEM_HANDLES:
                 sell_new = True  # unknown non-system handle → a brand-new buyer enquiry (no thread id)
         sell_markets[market] = sell_new
         sell_threads[market] = matched_threads
+        platform_offers[market] = offer_new
 
     return {"buy": buy, "sell_markets": sell_markets, "sell_threads": sell_threads,
-            "next_memo": next_memo}
+            "platform_offers": platform_offers, "next_memo": next_memo}
 
 
 # --------------------------------------------------------------------------- scan (CDP)
@@ -532,7 +572,8 @@ def _peek(memo_path: Path) -> dict:
         _write_memo(memo_path, out["next_memo"])
         return out
     except Exception:  # last-resort fail-open — a peek must never crash its caller
-        return {"buy": [], "sell_markets": {}, "sell_threads": {}, "next_memo": {}}
+        return {"buy": [], "sell_markets": {}, "sell_threads": {}, "platform_offers": {},
+                "next_memo": {}}
 
 
 def buy_pending() -> dict:
@@ -563,19 +604,34 @@ def sell_threads_new() -> dict:
     return _peek(SELL_MEMO_PATH).get("sell_threads", {})
 
 
-def sell_peek() -> dict:
-    """C-followup — ONE SELL _peek, returning BOTH signals from a SINGLE memo advance:
-        {"sell_markets": {market: bool}, "sell_threads": {market: [thread_id, ...]}}
+def platform_offers_now() -> dict:
+    """ABSOLUTE, READ-ONLY platform-offer signal (classifies against an EMPTY memo, persists NOTHING)
+    so a pass can ask 'is a free relist offer waiting on this market right now?' without disturbing
+    the live SELL peek memo. {market: bool} for enumerable markets only. Mirrors sell_actionable_now's
+    memo-free contract. Fail-open to {} (no signal → the pass simply does no relist this cycle)."""
+    try:
+        enabled = [m for m in bp.enabled_markets() if m in ENUMERABLE_MARKETS]
+        rows = scan(enabled)
+        out = classify(rows, build_buy_index(), build_sell_index(), {})  # empty memo → absolute
+        return out.get("platform_offers", {})
+    except Exception:  # fail-open: no precise signal → caller takes no relist action this cycle
+        return {}
 
-    _peek ADVANCES the SELL memo as a side effect, so calling sell_markets_new() AND
-    sell_threads_new() back-to-back peeks TWICE: the second peek sees the already-advanced memo and
-    finds nothing fresh, nulling the Fix-C peek-thread hint. A caller that needs both (the daemon
-    poll path) calls THIS once and reuses the result for the freshness gate and the thread hint.
-    Fail-open: an older-shape classification that omits sell_threads yields {} for it (never crashes
-    the caller)."""
+
+def sell_peek() -> dict:
+    """C-followup — ONE SELL _peek, returning ALL sell-side signals from a SINGLE memo advance:
+        {"sell_markets": {market: bool}, "sell_threads": {market: [thread_id, ...]},
+         "platform_offers": {market: bool}}
+
+    _peek ADVANCES the SELL memo as a side effect, so calling the per-signal wrappers back-to-back
+    peeks repeatedly: the second peek sees the already-advanced memo and finds nothing fresh, nulling
+    the later signals. A caller that needs more than one (the daemon poll path) calls THIS once and
+    reuses the result for the freshness gate, the thread hint, and the platform-offer hint.
+    Fail-open: an older-shape classification that omits a key yields {} for it (never crashes)."""
     out = _peek(SELL_MEMO_PATH)
     return {"sell_markets": out.get("sell_markets", {}),
-            "sell_threads": out.get("sell_threads", {})}
+            "sell_threads": out.get("sell_threads", {}),
+            "platform_offers": out.get("platform_offers", {})}
 
 
 def sell_actionable_now() -> dict:
@@ -596,13 +652,19 @@ def sell_actionable_now() -> dict:
 # --------------------------------------------------------------------------- CLI (dry-run/debug)
 
 def main(argv: list) -> int:
-    """Read-only dry-run: scan + classify against an EMPTY memo (does not persist), so it prints what
-    is currently actionable without affecting the live peek memos."""
+    """Read-only signals (classify against an EMPTY memo, persist NOTHING — never disturbs the live
+    peek memos). Subcommands:
+        (none)            → full dry-run dump (buy / sell_markets / sell_threads / platform_offers)
+        platform-offers   → just {market: bool} of waiting free relist offers (machine-readable)"""
+    if len(argv) > 1 and argv[1] == "platform-offers":
+        print(json.dumps(platform_offers_now()))
+        return 0
     enabled = [m for m in bp.enabled_markets() if m in ENUMERABLE_MARKETS]
     rows = scan(enabled)
     out = classify(rows, build_buy_index(), build_sell_index(), {})
     print(json.dumps({"buy": out["buy"], "sell_markets": out["sell_markets"],
                       "sell_threads": out.get("sell_threads", {}),
+                      "platform_offers": out.get("platform_offers", {}),
                       "scanned": {m: len(v.get("rows", [])) for m, v in rows.items()}}, indent=2))
     return 0
 
