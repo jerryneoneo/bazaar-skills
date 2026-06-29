@@ -620,8 +620,204 @@ def test_followup_poll_sec_in_config():
     check("is a positive int", isinstance(cfg["followup_poll_sec"], int) and cfg["followup_poll_sec"] > 0)
 
 
+def test_plan_outbox_sweep_pure():
+    print("plan_outbox_sweep routes stranded pending intents to re-drive / escalate / leave:")
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+    redrive_age = (now - timedelta(seconds=300)).isoformat()   # past redrive_after, within escalate_after
+    very_old = (now - timedelta(seconds=2000)).isoformat()     # past escalate_after (1800)
+    fresh = (now - timedelta(seconds=10)).isoformat()
+    pending = [
+        {"id": "a", "thread_id": "fb:1", "market": "fb", "ts": redrive_age, "attempts": 0},     # re-drive
+        {"id": "b", "thread_id": "fb:2", "market": "fb", "ts": fresh, "attempts": 0},            # too fresh
+        {"id": "c", "thread_id": "cl:3", "market": "carousell", "ts": very_old, "attempts": 3},  # escalate
+        {"id": "d", "thread_id": "cl:4", "market": "carousell", "ts": very_old, "attempts": 9,
+         "escalated": True},                                                                     # already done
+        {"id": "e", "thread_id": "eb:5", "market": "ebay", "ts": very_old, "attempts": 0},       # leased -> skip
+        {"id": "f", "thread_id": "fb:6", "market": "fb", "ts": redrive_age, "attempts": 5},      # tries hit,
+    ]                                                                                            # too young: redrive
+    plan = agent_daemon.plan_outbox_sweep(pending, now, leased_markets={"ebay"},
+                                          redrive_after_sec=90, escalate_attempts=3,
+                                          escalate_after_sec=1800)
+    check("old low-attempt intent queued for re-drive", "a" in plan["redrive"].get("fb", []))
+    check("a fresh intent (< redrive_after) is left alone", "b" not in plan["redrive"].get("fb", []))
+    check("attempts AND age past the gates escalates exactly that intent",
+          [e["id"] for e in plan["escalate"]] == ["c"])
+    check("an already-escalated record is left alone (no re-drive, no re-alarm)",
+          "carousell" not in plan["redrive"] and all(e["id"] != "d" for e in plan["escalate"]))
+    check("a market with a live lease is skipped entirely", "ebay" not in plan["redrive"])
+    check("attempts hit but too young to give up → keep re-driving, don't escalate",
+          "f" in plan["redrive"].get("fb", []) and all(e["id"] != "f" for e in plan["escalate"]))
+
+
+def test_sweep_outbox_redrives_and_bumps_attempts():
+    print("sweep_outbox flags a stranded market for re-drive and bumps attempts (bounded loop):")
+    import os
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+    import thread_outbox as to
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            old = datetime.now(timezone.utc) - timedelta(seconds=300)
+            to.enqueue("fb:vida", "fb", "no defects, all brand new", "1:50 PM|defects?", old, side="sell")
+            markets = agent_daemon.sweep_outbox({}, False, busy_markets=set())
+            check("the stranded fb send is flagged for re-drive", "fb" in markets)
+            recs = to.peek(statuses=to.OPEN_STATUSES)["pending"]
+            check("intent still alive (not dropped)", len(recs) == 1)
+            check("attempts bumped to 1 (bounds the re-drive loop)", recs[0]["attempts"] == 1)
+        finally:
+            os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_sweep_outbox_dry_run_is_noop():
+    print("sweep_outbox is a no-op under --dry-run:")
+    check("dry-run returns no markets", agent_daemon.sweep_outbox({}, True, busy_markets=set()) == set())
+
+
+def test_outbox_sweep_poll_sec_in_config():
+    print("outbox_sweep_poll_sec has a sane positive default in load_config:")
+    cfg = agent_daemon.load_config()
+    check("outbox_sweep_poll_sec present", "outbox_sweep_poll_sec" in cfg)
+    check("default is a positive int",
+          isinstance(cfg["outbox_sweep_poll_sec"], int) and cfg["outbox_sweep_poll_sec"] > 0)
+
+
+def test_escalation_text_is_honest():
+    print("the outbox escalation states uncertainty, never the unverifiable 'send never fired':")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            agent_daemon._enqueue_outbox_escalation(
+                {"thread_id": "fb:vida-onepiece", "id": "x", "text": "hi", "attempts": 3}, {})
+            outbox = Path(d) / "channel_outbox.jsonl"
+            check("a notify was enqueued", outbox.exists())
+            recs = ([_json.loads(line) for line in outbox.read_text().splitlines() if line.strip()]
+                    if outbox.exists() else [])
+            txt = " ".join(r.get("text", "") for r in recs).lower()
+            check("names the thread", "fb:vida-onepiece" in txt)
+            check("does NOT assert the send never fired",
+                  "never fired" not in txt and "not a crash" not in txt)
+            check("frames it as unconfirmed / still verifying",
+                  "verifying" in txt and "may already have" in txt)
+            check("kind notify", any(r.get("kind") == "notify" for r in recs))
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_sweep_skips_intent_already_committed():
+    print("a pending intent whose reply the ledger already shows delivered is acked, never escalated"
+          " (the vida false-alarm regression):")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    from datetime import datetime, timedelta, timezone
+    import thread_outbox as to
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            # a long-stranded, max-attempts intent that WOULD otherwise escalate ...
+            old = datetime.now(timezone.utc) - timedelta(seconds=4000)
+            iid = to.enqueue("fb:vida-onepiece", "fb", "Still sorting out the details...",
+                             "4:29 PM|hi", old, side="sell")["id"]
+            for _ in range(3):
+                to.fail(iid)  # attempts -> 3 (at the escalate ceiling)
+            # ... but the thread ledger already carries the committed outbound out|<iid>.
+            threads = Path(d) / "threads"
+            threads.mkdir(parents=True, exist_ok=True)
+            (threads / "fb:vida-onepiece.json").write_text(_json.dumps({
+                "thread_id": "fb:vida-onepiece",
+                "cursor": {"last_handled_msg_id": "4:29 PM|hi"},
+                "transcript": [
+                    {"msg_id": "4:29 PM|hi", "dir": "in", "text": "hi"},
+                    {"msg_id": f"out|{iid}", "dir": "out", "text": "Still sorting out the details..."},
+                ],
+            }))
+            markets = agent_daemon.sweep_outbox({}, False, busy_markets=set())
+            check("no market re-driven (intent recognized as already delivered)", markets == set())
+            check("the stale intent was acked (dropped, not left pending)",
+                  to.peek(statuses=to.OPEN_STATUSES)["count"] == 0)
+            outbox = Path(d) / "channel_outbox.jsonl"
+            check("NO false-alarm notify was enqueued",
+                  not outbox.exists() or outbox.read_text().strip() == "")
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_sweep_does_not_escalate_before_age_floor():
+    print("even at max attempts, a young stranded intent is re-driven (recovery's chance), not escalated:")
+    import os as _os
+    import tempfile as _tf
+    from datetime import datetime, timedelta, timezone
+    import thread_outbox as to
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+            iid = to.enqueue("fb:young", "fb", "holding line", "1:00 PM|hi", now, side="sell")["id"]
+            for _ in range(4):
+                to.fail(iid)  # attempts -> 4 (>= ceiling)
+            # sweep 400s later: past redrive_after(90), well under escalate_after(1800)
+            markets = agent_daemon.sweep_outbox({}, False, busy_markets=set(),
+                                                now=now + timedelta(seconds=400))
+            check("re-driven (not escalated) because too young to give up", markets == {"fb"})
+            outbox = Path(d) / "channel_outbox.jsonl"
+            check("no escalation notice yet",
+                  not outbox.exists() or outbox.read_text().strip() == "")
+            recs = to.peek(statuses=to.OPEN_STATUSES)["pending"]
+            check("intent still pending, not marked escalated", recs and not recs[0].get("escalated"))
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_sweep_escalates_only_past_attempts_and_age():
+    print("once attempts AND the age floor are both met, escalate exactly once (honestly):")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    from datetime import datetime, timedelta, timezone
+    import thread_outbox as to
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
+            iid = to.enqueue("fb:stuck", "fb", "holding line", "1:00 PM|hi", now, side="sell")["id"]
+            for _ in range(3):
+                to.fail(iid)  # attempts -> 3
+            late = now + timedelta(seconds=2000)  # past escalate_after(1800)
+            markets = agent_daemon.sweep_outbox({}, False, busy_markets=set(), now=late)
+            check("not re-driven once escalated", "fb" not in markets)
+            outbox = Path(d) / "channel_outbox.jsonl"
+            check("an escalation notice was enqueued", outbox.exists())
+            recs = ([_json.loads(line) for line in outbox.read_text().splitlines() if line.strip()]
+                    if outbox.exists() else [])
+            check("the notice uses the honest wording", any("verifying" in r.get("text", "") for r in recs))
+            pend = to.peek(statuses=to.OPEN_STATUSES)["pending"]
+            check("intent marked escalated (durable exactly-once)",
+                  pend and pend[0].get("escalated") is True)
+            # a SECOND sweep must NOT escalate again (the escalated marker holds).
+            before = len(recs)
+            agent_daemon.sweep_outbox({}, False, busy_markets=set(), now=late + timedelta(seconds=200))
+            recs2 = ([_json.loads(line) for line in outbox.read_text().splitlines() if line.strip()]
+                     if outbox.exists() else [])
+            check("no second escalation on the next sweep", len(recs2) == before)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     print("agent_daemon tests\n")
+    test_plan_outbox_sweep_pure()
+    test_sweep_outbox_redrives_and_bumps_attempts()
+    test_sweep_outbox_dry_run_is_noop()
+    test_outbox_sweep_poll_sec_in_config()
+    test_escalation_text_is_honest()
+    test_sweep_skips_intent_already_committed()
+    test_sweep_does_not_escalate_before_age_floor()
+    test_sweep_escalates_only_past_attempts_and_age()
     test_buyer_peek_parses_success()
     test_buyer_peek_failopen_on_rc()
     test_buyer_peek_failopen_on_bad_json()

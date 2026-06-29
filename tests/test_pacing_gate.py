@@ -326,6 +326,68 @@ def test_reply_delay_max_clamped_below_grace():
         check("a within-ceiling max is left unchanged", cfg2["delay_max"] == 200.0)
 
 
+def test_maybe_block_sleeps_go_and_zeroes_delay():
+    print("_maybe_block (B1) sleeps a 'go' delay server-side, then returns delay_sec=0 + slept_sec:")
+    slept = []
+    saved = pg.time.sleep
+    pg.time.sleep = lambda s: slept.append(s)
+    try:
+        out = pg._maybe_block({"decision": "go", "delay_sec": 47.0, "count": 1})
+    finally:
+        pg.time.sleep = saved
+    check("slept the requested delay once", slept == [47.0])
+    check("delay_sec zeroed for the caller (already waited)", out["delay_sec"] == 0)
+    check("slept_sec records what was waited", out["slept_sec"] == 47.0)
+    check("blocked flag set", out.get("blocked") is True)
+    check("decision preserved", out["decision"] == "go")
+
+
+def test_maybe_block_leaves_wait_and_quiet_untouched():
+    print("_maybe_block never sleeps or alters a wait/quiet decision (the caller handles those):")
+    slept = []
+    saved = pg.time.sleep
+    pg.time.sleep = lambda s: slept.append(s)
+    try:
+        for dec in ("wait", "quiet"):
+            res = pg._maybe_block({"decision": dec, "delay_sec": 99})
+            check(f"{dec} returned untouched", res == {"decision": dec, "delay_sec": 99})
+    finally:
+        pg.time.sleep = saved
+    check("never slept for a non-go decision", slept == [])
+
+
+def test_maybe_block_clamps_to_ceiling():
+    print("_maybe_block clamps a runaway delay to HARD_DELAY_CEILING_SEC:")
+    slept = []
+    saved = pg.time.sleep
+    pg.time.sleep = lambda s: slept.append(s)
+    try:
+        out = pg._maybe_block({"decision": "go", "delay_sec": 99999})
+    finally:
+        pg.time.sleep = saved
+    check("slept at most the ceiling", slept == [float(pg.HARD_DELAY_CEILING_SEC)])
+    check("slept_sec reflects the clamp", out["slept_sec"] == float(pg.HARD_DELAY_CEILING_SEC))
+
+
+def test_cli_reserve_block_flag():
+    print("CLI reserve --block reports it waited (delay 0 here, so no real sleep) and zeroes delay_sec:")
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "config.json").write_text(json.dumps({
+            "max_actions_per_hour": 9, "reply_delay_sec": [0, 0],
+            "interactive_reply_delay_sec": [0, 0], "quiet_hours": [0, 0],
+        }))
+        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py"), "reserve",
+                "--marketplace", "fb", "--kind", "reply", "--block"]
+        out = subprocess.run(base, capture_output=True, text=True, env=env)
+        check("reserve --block exits 0", out.returncode == 0)
+        res = json.loads(out.stdout)
+        check("decision go", res["decision"] == "go")
+        check("blocked flag set", res.get("blocked") is True)
+        check("delay zeroed (the wait already happened server-side)", res["delay_sec"] == 0)
+        check("slept_sec present (0.0 with a zero configured delay)", res.get("slept_sec") == 0.0)
+
+
 def test_bad_input_rejected():
     print("input validation:")
     base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py")]
@@ -362,6 +424,10 @@ if __name__ == "__main__":
     test_cap_below_one_rejected()
     test_hard_ceiling_clamps_cap()
     test_reply_delay_max_clamped_below_grace()
+    test_maybe_block_sleeps_go_and_zeroes_delay()
+    test_maybe_block_leaves_wait_and_quiet_untouched()
+    test_maybe_block_clamps_to_ceiling()
+    test_cli_reserve_block_flag()
     test_bad_input_rejected()
     print()
     if _failures:

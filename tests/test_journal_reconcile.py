@@ -67,15 +67,22 @@ def _seed_thread(data_dir, sub, thread_id):
     return path
 
 
-def _enqueue_intent(data_dir, *, thread, market, in_msg, text, side, age_sec):
-    """Append a thread_outbox intent dated `age_sec` ago (so we control whether it is stale)."""
+def _enqueue_intent(data_dir, *, thread, market, in_msg, text, side, age_sec, sent=False):
+    """Append a thread_outbox intent dated `age_sec` ago (so we control whether it is stale).
+
+    sent=True flips it to 'sent_unverified' (the browser send FIRED but commit was lost — the Olaf
+    orphan that reconcile legitimately folds + asks the seller to verify). sent=False leaves it
+    'pending' (the send NEVER fired — reconcile must re-drive it, never fold a false outbound)."""
     ts = (datetime.now(timezone.utc) - timedelta(seconds=age_sec)).isoformat()
     env = _env(data_dir)
-    args = [sys.executable, str(ROOT / "bin" / "thread_outbox.py"),
-            "enqueue", "--thread", thread, "--market", market, "--in-msg", in_msg,
-            "--text", text, "--side", side, "--now", ts]
-    out = subprocess.run(args, capture_output=True, text=True, env=env)
-    return json.loads(out.stdout)["id"]
+    to_cli = [sys.executable, str(ROOT / "bin" / "thread_outbox.py")]
+    out = subprocess.run(to_cli + ["enqueue", "--thread", thread, "--market", market, "--in-msg",
+                                   in_msg, "--text", text, "--side", side, "--now", ts],
+                         capture_output=True, text=True, env=env)
+    rid = json.loads(out.stdout)["id"]
+    if sent:
+        subprocess.run(to_cli + ["sent", "--id", rid], capture_output=True, text=True, env=env)
+    return rid
 
 
 def _backdate_intent_ts(data_dir, age_sec):
@@ -99,7 +106,7 @@ def test_stale_intent_folded_unconfirmed_cursor_advanced_notify_acked():
     with tempfile.TemporaryDirectory() as d:
         path = _seed_thread(d, "threads", "fb:olaf-1")
         intent_id = _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                                    text="Recovered reply", side="sell", age_sec=120)
+                                    text="Recovered reply", side="sell", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)  # well past GRACE_SEC (no live lease) -> a crash orphan
         out = _run(_env(d))
         check("reconcile exits 0", out.returncode == 0)
@@ -131,6 +138,30 @@ def test_stale_intent_folded_unconfirmed_cursor_advanced_notify_acked():
         # Fix 3 — the thread is surfaced for active in-chat verification (the silent-drop guard).
         check("summary lists the thread in needs_verify",
               "fb:olaf-1" in summary.get("needs_verify", []))
+
+
+def test_pending_orphan_redriven_not_folded():
+    print("the vida case: a PENDING (never-sent) orphan is flagged for re-drive, NOT folded — the"
+          " cursor is left at the inbound and the intent stays alive so the next pass re-sends it:")
+    with tempfile.TemporaryDirectory() as d:
+        path = _seed_thread(d, "threads", "fb:vida")
+        _enqueue_intent(d, thread="fb:vida", market="fb", in_msg="1:50 PM|defects?",
+                        text="no defects, all brand new", side="sell", age_sec=120, sent=False)
+        _backdate_intent_ts(d, age_sec=10_000)  # past GRACE, no live lease, but the send NEVER fired
+        out = _run(_env(d))
+        check("reconcile exits 0", out.returncode == 0)
+        summary = json.loads(out.stdout)
+        check("NOT folded (reconciled 0)", summary.get("reconciled") == 0)
+        check("thread flagged in needs_resend", "fb:vida" in summary.get("needs_resend", []))
+        obj = json.loads(path.read_text())
+        check("no unconfirmed row folded (would be a false claim)",
+              not any(r.get("unconfirmed") for r in obj["transcript"]))
+        check("cursor NOT advanced (so the reply is re-driven, not suppressed)",
+              obj["cursor"]["last_handled_msg_id"] == "old|x")
+        ob = Path(d) / "thread_outbox.jsonl"
+        recs = to.parse_records(ob.read_text())
+        check("intent left alive for re-drive (not acked)", len(recs) == 1)
+        check("intent still pending", recs[0]["status"] == "pending")
 
 
 def test_reconcile_never_resends():
@@ -186,7 +217,7 @@ def test_buy_side_intent_targets_buyer_threads():
     with tempfile.TemporaryDirectory() as d:
         path = _seed_thread(d, "buyer_threads", "carousell:9")
         _enqueue_intent(d, thread="carousell:9", market="carousell", in_msg="2pm|hi",
-                        text="Recovered buy reply", side="buy", age_sec=120)
+                        text="Recovered buy reply", side="buy", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)  # past GRACE_SEC, no live lease -> a crash orphan
         out = _run(_env(d))
         check("exits 0", out.returncode == 0)
@@ -264,7 +295,7 @@ def test_no_live_lease_old_intent_is_folded():
         env = _env(d)
         path = _seed_thread(d, "threads", "fb:olaf-1")
         _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                        text="orphaned reply", side="sell", age_sec=120)
+                        text="orphaned reply", side="sell", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)  # well past GRACE — a real crash orphan
         # No lease held for market:fb -> eventually folded even though the lease check is the
         # primary guard (defense in depth: a crash orphan stays pending forever, GRACE catches it).
@@ -283,7 +314,7 @@ def test_stale_lease_does_not_protect_intent():
         env = _env(d)
         path = _seed_thread(d, "threads", "fb:olaf-1")
         _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                        text="orphan behind a dead lease", side="sell", age_sec=120)
+                        text="orphan behind a dead lease", side="sell", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)
         # A lease whose holder died long ago (heartbeat far older than its TTL) is stale = not live.
         old = (datetime.now(timezone.utc) - timedelta(seconds=10_000)).isoformat()
@@ -313,7 +344,7 @@ def test_reconcile_skips_already_committed_intent_no_unconfirmed_dup():
         # (msg_id "out|<intent_id>") into the thread file, but its ack has not yet drained the
         # pending intent — so reconcile sees the intent still pending.
         intent_id = _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                                    text="Yes, July 5 works!", side="sell", age_sec=120)
+                                    text="Yes, July 5 works!", side="sell", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)  # past GRACE, no live lease -> reconcile WILL pick it up
         dpath = Path(d) / "threads"
         dpath.mkdir(parents=True, exist_ok=True)
@@ -404,7 +435,7 @@ def test_crash_orphan_folded_past_hard_ceiling_despite_live_lease():
         env = _env(d)
         path = _seed_thread(d, "threads", "fb:olaf-1")
         _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                        text="crash orphan on a busy market", side="sell", age_sec=120)
+                        text="crash orphan on a busy market", side="sell", age_sec=120, sent=True)
         # Age the intent beyond the hard ceiling (a perpetually-busy market always has SOME worker,
         # so the live-lease guard would otherwise skip this real orphan forever, freezing the cursor).
         _backdate_intent_ts(d, age_sec=jr.MAX_INTENT_AGE_SEC + 60)
@@ -439,7 +470,7 @@ def test_second_reconcile_of_healed_intent_skips_no_double_notify():
     with tempfile.TemporaryDirectory() as d:
         path = _seed_thread(d, "threads", "fb:olaf-1")
         intent_id = _enqueue_intent(d, thread="fb:olaf-1", market="fb", in_msg="12:20 PM|hi",
-                                    text="Recovered reply", side="sell", age_sec=120)
+                                    text="Recovered reply", side="sell", age_sec=120, sent=True)
         _backdate_intent_ts(d, age_sec=10_000)  # past GRACE, no live lease -> a real orphan
         # First reconcile heals it: folds the unconfirmed row, notifies, acks.
         first = _run(_env(d))
@@ -475,6 +506,7 @@ def test_second_reconcile_of_healed_intent_skips_no_double_notify():
 if __name__ == "__main__":
     print("journal_reconcile tests\n")
     test_stale_intent_folded_unconfirmed_cursor_advanced_notify_acked()
+    test_pending_orphan_redriven_not_folded()
     test_reconcile_never_resends()
     test_fresh_intent_left_untouched()
     test_empty_outbox_is_noop()

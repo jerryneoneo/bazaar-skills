@@ -177,31 +177,44 @@ checkout page, not here (§3b close → checkout carries `config.checkout_disclo
 ## 5. Pace & send (account safety)
 Before sending, reserve a slot from the deterministic pacing engine — it is the single
 authority, atomic across concurrent passes. **Never self-count from the transcript** (you
-cannot see actions other passes took on this account):
-`python3 bin/pacing_gate.py reserve --marketplace <market> --kind reply --mode <interactive|unattended>`
+cannot see actions other passes took on this account). Reserve with `--block` so the engine waits
+the anti-automation delay **server-side in one call** instead of you idling it across turns (which
+burns your turn budget):
+`python3 bin/pacing_gate.py reserve --marketplace <market> --kind reply --mode <interactive|unattended> --block`
 - Pass `--mode interactive` only when a human is actively driving this session (the `/sell` or
   `/buy` console tells you to). An unattended daemon pass omits `--mode` (defaults to
   `unattended`). The mode changes **only the post-`go` jitter** — the hourly cap and `quiet_hours`
   are enforced identically in both modes, so it can never let you over-send or send during quiet
   hours.
-- `go` → **bracket the send so a crash can never split-brain the ledger** (a reply on the
-  marketplace with a stale cursor and no journaled outbound — the Olaf failure). Do it in this exact
-  order:
+- `go` → the engine has ALREADY waited the delay (with `--block` it returns `delay_sec:0` +
+  `slept_sec:<n>`); send NOW. **Bracket the send so an interruption can never split-brain the ledger
+  or silently drop the reply** (the Olaf and vida failures). Do it in this exact order:
   1. **Record the intent BEFORE the send** (deterministic Python, not a hand-edit):
      `python3 bin/journal_send.py intent --thread <market>:<id> --market <market> --in-msg "<inbound_msg_id>" --text "<your reply>"`
-     Capture the printed `id` as `<intent_id>`.
-  2. Wait the returned `delay_sec`, then `type(message)` + `send()`. The delay is small in interactive
-     mode (a few seconds, the natural cadence of a live chat) and longer when unattended (the
-     anti-automation jitter). **Even in interactive mode it is non-zero on purpose — wait it; never
-     fire an instant, zero-delay send (that's the automation tell).**
-  3. **Commit immediately AFTER `send()` returns** (this writes the thread file atomically):
+     Capture the printed `id` as `<intent_id>`. (It is deduped by thread + inbound message: re-asking
+     the same message reuses the same intent, so a re-drive never strands a second copy.)
+  2. `type(message)` + `send()`. Never fire a zero-delay send yourself — the `--block` reserve above
+     is what waited; do not skip it.
+  3. **Mark the send as fired, the instant `send()` returns and BEFORE the commit:**
+     `python3 bin/journal_send.py mark-sent --intent <intent_id>`. This records durably that the
+     browser send actually happened, so if the pass is interrupted before the commit, recovery can
+     tell "sent but not yet journaled" (verify in-chat) from "never sent" (re-drive). Do not skip it.
+  4. **Commit immediately after** (this writes the thread file atomically):
      `python3 bin/journal_send.py commit --thread <market>:<id> --intent <intent_id> [--status <new_status>]`
-- `wait` → at this marketplace's hourly cap; **do NOT send.** Leave the thread at its cursor
-  (idempotent) and tell the seller you are pacing; it retries next pass.
-- `quiet` → inside `quiet_hours`; **queue, don't send.**
+- `wait` → at this marketplace's hourly cap; **do NOT send and do NOT record an intent.** Leave the
+  thread at its cursor (idempotent) and tell the seller you are pacing; it retries next pass.
+- `quiet` → inside `quiet_hours`; **do NOT send and do NOT record an intent** — leave the thread at
+  its cursor so the next pass after quiet hours sends it cleanly. (Recording an intent you won't send
+  would strand it; the cursor already makes the message re-handled next pass.)
 
 The cap is enforced **per marketplace account** and shared across sell and buy work, so a
 buyer reply and a buy-side message on the same marketplace draw from one budget.
+
+**Speed (optional):** to find the message box / send control without a full `browser_snapshot` +
+vision round-trip on a routine reply, use the selector cache exactly like the listing flow
+(`skills/browser-actions.md`): `python3 bin/ui_cache.py get --market <market> --flow reply --step
+message_box` (and `--step send_button`), act + verify, and on a miss fall back to vision then
+`record` the freshly-found selector. It is a hint only; a miss is always safe.
 
 ## 6. Persist
 The bracket in §5 already persists. `bin/journal_send.py commit` writes the thread file
@@ -218,14 +231,23 @@ what crashed mid-pass and dropped the Olaf outbound. If you set additional field
 not cover (e.g. an `agent_note`), do that by re-reading and writing the file only AFTER `commit` has
 landed the send + cursor.
 
-**Recovered (`unconfirmed`) outbound rows.** When a pass is interrupted between `intent` and
-`commit`, `bin/journal_reconcile.py` folds the intended reply as an `unconfirmed:true` row, advances
-the cursor (so it is never blindly auto-resent), and returns the thread in its `needs_verify` list.
-The reply may or may not have actually sent. The buyer pass's FIRST STEP resolves these: open the
-live chat and, **only if the recovered reply is genuinely missing**, resend that exact text through
-the normal §5 bracket (which clears the split-brain by journaling a real outbound). If it is already
-present in the chat, do nothing — it sent. This closes the silent-drop hole without ever
-double-replying.
+**Interrupted sends — two cases, told apart by the `mark-sent` step.** When a pass is interrupted
+mid-bracket, `bin/journal_reconcile.py` heals the leftover intent by its status and returns it in one
+of two lists:
+- **`needs_verify` (status was `sent_unverified` — the send FIRED but the commit was lost).** Reconcile
+  folds the reply as an `unconfirmed:true` row and advances the cursor (the reply almost certainly
+  landed, so never blindly auto-resend). Resolve it: open the live chat and, **only if the recovered
+  reply is genuinely missing**, resend that exact text through the §5 bracket. If it is already there,
+  do nothing — it sent.
+- **`needs_resend` (status was `pending` — the send NEVER fired, the vida case).** Reconcile folds
+  NOTHING and leaves the cursor at the inbound, because the reply never went out. Resolve it: open the
+  live chat, **re-read it first** (the dedup key makes the re-drive reuse the same intent, so you
+  cannot strand a copy), and send the reply through the normal §5 bracket. The deterministic outbox
+  sweeper also re-drives these on its own cadence and escalates any that stay stuck — so a never-fired
+  send is recovered even if no new buyer message arrives.
+
+The buyer pass's FIRST STEP resolves BOTH lists before its normal sweep. Always re-read the chat
+before resending so you never double-reply.
 
 ## 7. Proactive follow-up (when a buyer went quiet)
 Reactive replies above handle a buyer who wrote to us. The **follow-up** path handles a buyer who did
@@ -233,8 +255,9 @@ NOT: when our last message goes unanswered, `bin/followup_state.py` schedules up
 (gentle escalation, ~1d then ~3d), then marks the buyer not interested (~3d later). It is OFF unless
 `followup_enabled` (config) is on, and is driven by the buyer pass only when `$BAZAAR_FOLLOWUP=1`
 (see the FOLLOW-UP MODE block in the buyer prompt). A nudge is **not** a new mechanism: compose a
-short friendly line and send it through the EXACT §5 bracket (`journal_send.py intent` → pace →
-`type`+`send()` → `journal_send.py commit`), then `python3 bin/followup_state.py mark-nudge --thread
+short friendly line and send it through the EXACT §5 bracket (`journal_send.py intent` →
+`pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →
+`journal_send.py commit`), then `python3 bin/followup_state.py mark-nudge --thread
 <id> --side sell`. Always re-read the tail first and skip the nudge if the buyer has replied since the
 scan (handle their reply normally instead). The not-interested **drop** is deterministic and never
 touches thread `status` — a re-engaging buyer is still answered by §1-§6 as usual.
@@ -242,10 +265,11 @@ touches thread `status` — a re-engaging buyer is still answered by §1-§6 as 
 ## ESCALATE (shared)
 1. Post a brief holding reply to the buyer ("Let me check on that and get right back
    to you!"), **bracketed exactly like a normal send (step 5)** — `journal_send.py intent` →
-   pace → `type`+`send()` → `journal_send.py commit --status escalated`. This is the precise
-   Olaf failure: a holding reply went out but the cursor never advanced because the pass crashed
-   before the hand-edit, so the next pass re-escalated. The bracket makes the holding reply +
-   cursor advance atomic. Reply naturally, no identity line, per `voice.md` Rule 3.
+   `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →
+   `journal_send.py commit --status escalated`. This is the precise Olaf failure: a holding reply
+   went out but the cursor never advanced because the pass crashed before the hand-edit, so the next
+   pass re-escalated. The bracket makes the holding reply + cursor advance atomic. Reply naturally,
+   no identity line, per `voice.md` Rule 3.
 2. The `commit --status escalated` in step 1 already set thread `status:"escalated"` **and** advanced
    the cursor (the holding reply *is* the handling) — do not re-advance or hand-edit the thread file.
 3. Append to `data/escalations.jsonl`:

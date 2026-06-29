@@ -178,6 +178,83 @@ def test_two_enqueues_dont_corrupt():
               [r["text"] for r in snap["pending"]] == ["first", "second"])
 
 
+def test_enqueue_dedups_by_thread_and_inmsg():
+    print("enqueue dedups by (thread_id, in_msg_id): a re-ask reuses the SAME pending intent:")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        first = json.loads(_run(["enqueue", "--thread", "fb:vida", "--market", "fb",
+                                 "--in-msg", "1:50 PM|defects?", "--text", "no defects"], env=env).stdout)
+        second = json.loads(_run(["enqueue", "--thread", "fb:vida", "--market", "fb",
+                                  "--in-msg", "1:50 PM|defects?", "--text", "no defects, all brand new"],
+                                 env=env).stdout)
+        check("re-enqueue reuses the same id", first["id"] == second["id"])
+        check("second reports deduped", second.get("deduped") is True)
+        snap = json.loads(_run(["peek"], env=env).stdout)
+        check("only ONE pending record (no stranded duplicate)", snap["count"] == 1)
+        check("text refreshed to the latest reply",
+              snap["pending"][0]["text"] == "no defects, all brand new")
+
+
+def test_enqueue_distinct_inmsg_not_deduped():
+    print("enqueue does NOT dedup distinct inbound messages on the same thread:")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        _run(["enqueue", "--thread", "fb:vida", "--market", "fb", "--in-msg", "i1", "--text", "a"], env=env)
+        _run(["enqueue", "--thread", "fb:vida", "--market", "fb", "--in-msg", "i2", "--text", "b"], env=env)
+        snap = json.loads(_run(["peek"], env=env).stdout)
+        check("two distinct inbound messages -> two records", snap["count"] == 2)
+
+
+def test_find_pending_by_inbound_matches_pending_only():
+    print("find_pending_by_inbound matches a PENDING record, never a sent_unverified one:")
+    pending = to.build_record("fb:v", "fb", "x", "i1", NOW_UTC.isoformat())
+    sent = {**to.build_record("fb:v", "fb", "y", "i2", NOW_UTC.isoformat()),
+            "status": "sent_unverified"}
+    records = [pending, sent]
+    check("finds the pending record by (thread, in_msg)",
+          (to.find_pending_by_inbound(records, "fb:v", "i1") or {}).get("id") == pending["id"])
+    check("does NOT match a sent_unverified record (a deliberate resend is allowed)",
+          to.find_pending_by_inbound(records, "fb:v", "i2") is None)
+    check("no match -> None", to.find_pending_by_inbound(records, "fb:v", "nope") is None)
+
+
+def test_mark_sent_flips_status_and_stamps():
+    print("mark_sent flips pending -> sent_unverified and stamps sent_ts:")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        rid = json.loads(_run(["enqueue", "--thread", "fb:t", "--market", "fb",
+                               "--in-msg", "i", "--text", "x"], env=env).stdout)["id"]
+        marked = json.loads(_run(["sent", "--id", rid], env=env).stdout)
+        check("sent reports marked", marked.get("marked") is True)
+        # default peek (pending only) no longer returns it; the open filter does.
+        pend = json.loads(_run(["peek", "--status", "pending"], env=env).stdout)
+        check("no longer pending", pend["count"] == 0)
+        openq = json.loads(_run(["peek", "--status", "open"], env=env).stdout)
+        check("still present as open work", openq["count"] == 1)
+        rec = openq["pending"][0]
+        check("status is sent_unverified", rec["status"] == "sent_unverified")
+        check("sent_ts stamped", bool(rec.get("sent_ts")))
+        miss = json.loads(_run(["sent", "--id", "nope"], env=env).stdout)
+        check("mark_sent of unknown id is a no-op", miss.get("marked") is False)
+
+
+def test_peek_status_filter():
+    print("peek --status selects pending | sent_unverified | open:")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        a = json.loads(_run(["enqueue", "--thread", "fb:a", "--market", "fb",
+                             "--in-msg", "i", "--text", "x"], env=env).stdout)["id"]
+        json.loads(_run(["enqueue", "--thread", "fb:b", "--market", "fb",
+                         "--in-msg", "i", "--text", "y"], env=env).stdout)
+        _run(["sent", "--id", a], env=env)  # fb:a -> sent_unverified
+        check("status=pending returns only the still-pending one",
+              json.loads(_run(["peek", "--status", "pending"], env=env).stdout)["count"] == 1)
+        check("status=sent_unverified returns only the sent one",
+              json.loads(_run(["peek", "--status", "sent_unverified"], env=env).stdout)["count"] == 1)
+        check("status=open returns both",
+              json.loads(_run(["peek", "--status", "open"], env=env).stdout)["count"] == 2)
+
+
 def test_bad_input_rejected():
     print("input validation:")
     bad = [
@@ -207,6 +284,11 @@ if __name__ == "__main__":
     test_ack_and_fail_mutate_status()
     test_corrupt_line_skipped_fail_open()
     test_two_enqueues_dont_corrupt()
+    test_enqueue_dedups_by_thread_and_inmsg()
+    test_enqueue_distinct_inmsg_not_deduped()
+    test_find_pending_by_inbound_matches_pending_only()
+    test_mark_sent_flips_status_and_stamps()
+    test_peek_status_filter()
     test_bad_input_rejected()
     print()
     if _failures:

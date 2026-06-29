@@ -89,10 +89,12 @@ def test_buyer_argv():
           "PRIORITISE that thread first" in prompt)
     check("peek-thread is NOT a hard 'only that thread' restriction (mis-route is worst)",
           "PRIORITY HINT" in prompt and "not a hard" in prompt.lower())
-    # Fix A regression guard (the contended edit): the per-send commit rule MUST survive Fix C's
-    # rewrite of the TURN BUDGET section — never weaken "commit after each send".
+    # Fix A regression guard (the contended edit): the per-send commit rule MUST survive — never
+    # weaken "never end with an un-committed send", and keep the new mark-sent step (Track A2) that
+    # lets recovery tell a never-fired send from a sent-but-unjournaled one.
     check("Fix A's per-send commit rule still present",
-          "after EACH send" in prompt and "journal_send.py commit" in prompt)
+          "un-committed send" in prompt and "journal_send.py commit" in prompt)
+    check("Track A2 mark-sent step present in the bracket", "journal_send.py mark-sent" in prompt)
     check("Fix A's journal_reconcile first-step still present", "journal_reconcile.py" in prompt)
 
 
@@ -128,6 +130,9 @@ def test_buyer_cap_hit_signal_mapping():
         harness_run.LOG = root / "logs" / "pass.log"
         harness_run._resolve_harness = lambda: get_harness("claude-code")
         harness_run._invocation = lambda h, s: (["true"], {})
+        # Isolate the outbox the completion gate (Track A3) peeks, so it sees an EMPTY outbox here
+        # (this test exercises only cap-hit classification, not the never-fired-send gate).
+        os.environ["BAZAAR_DATA_DIR"] = str(root / "data")
 
         class FakeRun:
             def __init__(self, rc):
@@ -168,6 +173,7 @@ def test_buyer_cap_hit_signal_mapping():
             harness_run._resolve_harness = saved_resolve
             harness_run._invocation = saved_invocation
             harness_run.subprocess.run = saved_run
+            os.environ.pop("BAZAAR_DATA_DIR", None)
 
 
 def test_caphit_per_pass_isolation_no_crosstalk():
@@ -185,6 +191,9 @@ def test_caphit_per_pass_isolation_no_crosstalk():
         harness_run.LOG = root / "logs" / "pass.log"
         harness_run._resolve_harness = lambda: get_harness("claude-code")
         harness_run._invocation = lambda h, s: (["true"], {})
+        # Isolate the outbox the completion gate (Track A3) peeks (empty here — this test exercises
+        # only cap-hit per-pass isolation, not the never-fired-send gate).
+        os.environ["BAZAAR_DATA_DIR"] = str(root / "data")
 
         class FakeRun:
             def __init__(self, rc):
@@ -235,6 +244,7 @@ def test_caphit_per_pass_isolation_no_crosstalk():
             harness_run._resolve_harness = saved_resolve
             harness_run._invocation = saved_invocation
             harness_run.subprocess.run = saved_run
+            os.environ.pop("BAZAAR_DATA_DIR", None)
 
 
 def test_caphit_log_sweep_removes_stale_only():

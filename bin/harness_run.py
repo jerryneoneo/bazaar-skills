@@ -40,6 +40,13 @@ try:
 except ImportError:
     channel_log = None
 
+try:
+    import thread_outbox  # noqa: E402  the intent log — the completion gate peeks it after a pass
+    import lease  # noqa: E402  per-market lease — guards a concurrent worker's in-flight intent
+except ImportError:  # pragma: no cover - both ship in bin/; guard keeps argv-only tests importable
+    thread_outbox = None
+    lease = None
+
 SELLER_DIR = Path(__file__).resolve().parent.parent
 LOG = SELLER_DIR / "logs" / "pass.log"
 
@@ -53,6 +60,16 @@ BUYER_BACKSTOP_TURNS = 50          # the hard --max-turns the harness passes (wa
 # When a pass is killed at the hard cap (rc!=0 AND the marker below in its log tail), run_pass returns
 # this DISTINCT code so callers can tell "capped, more work pending" from a generic failure (rc=1).
 CAP_HIT_SIGNAL = 42
+# Track A3 — completion gate. A gated pass (one that can send a marketplace message) must not END
+# owning a never-fired send. After the pass exits, run_pass peeks the thread_outbox for PENDING
+# (status=pending) intents in this pass's scope; if any remain un-fired it returns this DISTINCT code
+# so the daemon schedules a prioritized re-drive (the send is journaled but the browser send never
+# fired — the vida silent drop). sent_unverified intents are NOT flagged here: the send fired, so the
+# journal_reconcile verify path owns them, not the re-drive path.
+REDRIVE_SIGNAL = 43
+# Passes that can send to a marketplace (so a stranded never-fired send is possible). `maint` is a
+# background pass that sends only one-way completion notices (no inbound replies), so it is not gated.
+GATED_MODES = ("channel", "seller", "buyer", "buy")
 # Match the kill marker the harness writes to the log; keep this in lock-step with eval_checks'
 # MAX_TURNS_RE so a CLI-wording drift is a single-place fix.
 MAX_TURNS_MARKER = re.compile(r"reached max turns", re.IGNORECASE)
@@ -157,22 +174,25 @@ account-safety pacing. ONE step per pass so the bot stays responsive."""
 
 BUYER_PROMPT = """You are the Bazaar seller agent, running headless and unattended.
 
-FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any reply that a
-prior pass was INTERRUPTED on (the pass was killed — turn cap, restart — after recording the send but
-before journaling it; the reply may or may not have actually gone out). It is a cheap non-LLM call
-that never re-sends; it heals the ledger and returns JSON. If that JSON's `needs_verify` list is
-non-empty, those threads each have a recovered reply that MAY NOT HAVE SENT — before your normal
-sweep, for EACH such thread: open its live marketplace chat and check whether the recovered reply
-(the thread's last outbound row, marked `unconfirmed`) is actually the last message you sent there.
-If it IS present, it sent — do nothing (no resend). If it is MISSING, resend that exact text through
-the normal `journal_send.py intent` -> send -> `commit` bracket. Always re-read the chat before
-resending so you never post a duplicate. (This list is one-shot — reconcile won't re-surface it — so
-resolve it in THIS pass.)
+FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any reply a prior
+pass was INTERRUPTED on. It is a cheap non-LLM call that never re-sends; it returns JSON with TWO
+lists you must resolve THIS pass (both are one-shot — reconcile won't re-surface them), BEFORE your
+normal sweep:
+  • `needs_verify` — the send FIRED but the commit was lost; the thread's last outbound row is marked
+    `unconfirmed`. For EACH: open the live chat and check whether that reply is actually the last
+    message there. If present, it sent — do nothing. If MISSING, resend that exact text via the §5
+    bracket.
+  • `needs_resend` — the send NEVER fired (no false row was folded, the cursor was left at the
+    inbound). For EACH: open the live chat, RE-READ it, and send the reply via the §5 bracket. The
+    intent is deduped by thread+inbound, so re-driving cannot strand a duplicate.
+Always re-read the chat before resending so you never post a duplicate.
 
-JOURNAL DISCIPLINE (hard rule): after EACH send you MUST call `python3 bin/journal_send.py commit`
-BEFORE doing anything else — never advance to the next message or thread with an un-committed send.
-Every reply is bracketed `journal_send.py intent` (before the send) → send → `journal_send.py commit`
-(immediately after), per skills/reply-pipeline.md §5. Never hand-edit data/threads/<id>.json.
+JOURNAL DISCIPLINE (hard rule): every reply is bracketed `journal_send.py intent` (before the send) →
+`pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` (the instant send()
+returns) → `journal_send.py commit` (immediately after), per skills/reply-pipeline.md §5. The
+`mark-sent` step is REQUIRED — it is what lets recovery tell a sent-but-unjournaled reply from one
+that never fired. Never advance to the next message or thread with an un-committed send, and never
+hand-edit data/threads/<id>.json.
 
 Run ONE buyer-inbox watch pass per .claude/commands/sell-watch.md over your enabled
 seller_config.marketplaces: open the relevant inbox(es) (see COST DISCIPLINE for which) in the
@@ -266,15 +286,17 @@ of bazaar-run.md §2b, then stop:
 
 BUY_PROMPT = """You are the Bazaar BUYER agent (acquiring for the user), headless and unattended.
 
-FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to fold any crash orphans
-from a prior interrupted pass (a reply that landed on the marketplace but was never journaled). It is
-a cheap non-LLM call that never re-sends — it just heals the ledger and asks the user to verify.
+FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any message a prior
+pass was interrupted on. Cheap, non-LLM, never re-sends. Resolve its TWO one-shot lists THIS pass:
+`needs_verify` (the send fired but wasn't journaled — open the live chat and resend only if the
+`unconfirmed` reply is genuinely missing) and `needs_resend` (the send NEVER fired — re-read the chat
+and send it via the §6 bracket; the intent is deduped so you can't strand a duplicate).
 
-JOURNAL DISCIPLINE (hard rule): after EACH send you MUST call `python3 bin/journal_send.py commit
---side buy` BEFORE doing anything else — never advance to the next message or thread with an
-un-committed send. Every reply is bracketed `journal_send.py intent --side buy` (before the send) →
-send → `journal_send.py commit --side buy` (immediately after), per
-skills/buying/liaison-pipeline.md §6. Never hand-edit data/buyer_threads/<id>.json.
+JOURNAL DISCIPLINE (hard rule): every message is bracketed `journal_send.py intent --side buy`
+(before the send) → `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent`
+(the instant send() returns) → `journal_send.py commit --side buy` (immediately after), per
+skills/buying/liaison-pipeline.md §6. The `mark-sent` step is REQUIRED. Never advance to the next
+message or thread with an un-committed send, and never hand-edit data/buyer_threads/<id>.json.
 
 Do ONE buy-side step of bazaar-run.md §3 + .claude/commands/buy-run.md, then stop. $BAZAAR_BUY_PEEK_WANT
 names the actionable want; $BAZAAR_BUY_PEEK_TEXT is a hint. Load data/buyer_config.json.
@@ -312,8 +334,9 @@ now INBOUND (they replied since the scan), do NOT nudge — handle their reply n
 skills/reply-pipeline.md instead. Otherwise compose ONE short, friendly nudge (no em-dashes per
 skills/style.md; do NOT re-introduce yourself; nudge #1 lighter than #2, e.g. a soft 'just checking
 in' first, then a final 'still keen? no worries either way'). Send it bracketed EXACTLY like any reply
-(reply-pipeline.md §5): journal_send.py intent -> pacing RESERVE -> type+send -> journal_send.py
-commit. AFTER a successful commit run `python3 bin/followup_state.py mark-nudge --thread <thread_id>
+(reply-pipeline.md §5): journal_send.py intent -> pacing_gate.py reserve --block -> type+send ->
+journal_send.py mark-sent -> journal_send.py commit. AFTER a successful commit run `python3
+bin/followup_state.py mark-nudge --thread <thread_id>
 --side sell`. If pacing returns wait/quiet, do NOT send and do NOT mark (it retries next interval).
 One nudge per thread per pass; never nudge a thread whose tail is inbound."""
 
@@ -326,8 +349,9 @@ pass's marketplace. For each such thread: OPEN it and RE-READ its tail. If the l
 now INBOUND (they replied since the scan), do NOT nudge — handle their reply normally via
 skills/buying/liaison-pipeline.md instead. Otherwise compose ONE short, friendly nudge (no em-dashes
 per skills/style.md; do NOT re-introduce yourself; nudge #1 lighter than #2). Send it bracketed
-EXACTLY like any message (liaison-pipeline.md §6): journal_send.py intent --side buy -> pacing RESERVE
--> type+send -> journal_send.py commit --side buy. AFTER a successful commit run `python3
+EXACTLY like any message (liaison-pipeline.md §6): journal_send.py intent --side buy -> pacing_gate.py
+reserve --block -> type+send -> journal_send.py mark-sent -> journal_send.py commit --side buy. AFTER
+a successful commit run `python3
 bin/followup_state.py mark-nudge --thread <thread_id> --side buy`. If pacing returns wait/quiet, do
 NOT send and do NOT mark (it retries next interval). One nudge per thread per pass; never nudge a
 thread whose tail is inbound."""
@@ -564,6 +588,48 @@ def _is_cap_hit(rc: int, pass_output: str) -> bool:
     return bool(MAX_TURNS_MARKER.search(pass_output))
 
 
+def _undriven_intents(resource: str) -> list[dict]:
+    """The PENDING (never-fired) intents this pass's scope still owns after it exited.
+
+    A pending intent here means the send was journaled but the browser send never fired (the vida
+    silent drop) — the owning pass has exited, so it is stranded. Scoped to the marketplace `resource`
+    when set (each concurrent worker owns one market). LEASE-GUARDED: an intent whose market holds a
+    live (non-stale) lease is skipped — a concurrent worker is actively driving that market, so the
+    intent is in-flight (mid-pacing), not stranded. sent_unverified intents are excluded (the send
+    fired; the verify path owns them). Fail-open: any error returns [] so the gate never breaks a pass."""
+    if thread_outbox is None:
+        return []
+    try:
+        pending = thread_outbox.peek(statuses=(thread_outbox.STATUS_PENDING,))["pending"]
+    except (OSError, ValueError, KeyError):
+        return []
+    base = thread_outbox.data_dir()
+    out: list[dict] = []
+    for rec in pending:
+        market = rec.get("market")
+        if resource and market != resource:
+            continue
+        if market and lease is not None:
+            try:
+                if lease.status(base, f"market:{market}", ttl=lease.AGENT_MARKET_TTL_SEC).get("held"):
+                    continue  # a live worker owns this market — in-flight, not stranded
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # fail-open: an unreadable lease must not hide a real stranded send
+        out.append(rec)
+    return out
+
+
+def _record_redrive(mode: str, resource: str) -> None:
+    """Drop a per-resource re-drive breadcrumb so the daemon can see a gated pass ended owning a
+    never-fired send and schedule a prioritized re-drive. Atomic + fail-open (rc=43 is primary)."""
+    label = f"{mode}:{resource}" if resource else mode
+    try:
+        atomic_io.write_json(SELLER_DIR / "data" / "pass_state" / f"{label}.redrive.json",
+                             {"redrive": True, "ts": _utcnow(), "resource": resource})
+    except OSError:
+        pass
+
+
 def _record_cap_hit(mode: str, resource: str) -> None:
     """Drop a per-resource cap-hit breadcrumb so a caller (daemon/supervisor) can see a pass was
     killed at the cap and schedule a bounded continuation. Atomic + fail-open."""
@@ -621,6 +687,12 @@ def run_pass(mode: str, resource: str = "") -> int:
     if mode == "buyer" and _is_cap_hit(rc, pass_output):
         _record_cap_hit(mode, resource)
         return CAP_HIT_SIGNAL
+    # Track A3 — completion gate. A gated pass must not end owning a never-fired send: if it does,
+    # signal a prioritized re-drive (independent of rc — a stranded send is more urgent than the exit
+    # code). The lease guard inside _undriven_intents avoids racing a concurrent worker's in-flight send.
+    if mode in GATED_MODES and _undriven_intents(resource):
+        _record_redrive(mode, resource)
+        return REDRIVE_SIGNAL
     return rc
 
 

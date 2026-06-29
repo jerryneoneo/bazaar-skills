@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 SELLER_DIR = Path(__file__).resolve().parent.parent
@@ -67,8 +68,27 @@ TOKEN_DIRS = [SELLER_DIR, SELLER_DIR.parent]
 # "capped, more work pending" from a generic failure and run exactly one bounded continuation per
 # cap-hit, up to CONTINUATION_RETRY_CAP times, before ESCALATING (never silently dropping a backlog).
 import harness_run  # noqa: E402  CAP_HIT_SIGNAL single source of truth
+import lease  # noqa: E402  per-market lease — the outbox sweeper skips a market a live worker owns
+import thread_outbox  # noqa: E402  the send-intent log the outbox sweeper drains stranded sends from
 CAP_HIT_SIGNAL = harness_run.CAP_HIT_SIGNAL
+REDRIVE_SIGNAL = harness_run.REDRIVE_SIGNAL  # a gated pass ended owning a never-fired send
 CONTINUATION_RETRY_CAP = 2
+
+# Track A5 — the outbox sweeper. A still-pending send in thread_outbox that no live worker owns is
+# STRANDED. The sweeper re-drives it deterministically (no LLM to decide WHETHER to recover); a
+# re-drive is what triggers the recovery pass, which is the ONLY thing that can read the live chat and
+# tell "already delivered, just unjournaled" from "genuinely never sent". So the sweeper itself never
+# asserts a send failed — it re-drives, and only escalates (humbly, "still verifying") as a last resort.
+#   OUTBOX_REDRIVE_AFTER_SEC sits above a normal pacing/in-flight window so a mid-pacing send is never
+#     mistaken for stranded (the lease guard is the primary protection; this is the age backstop).
+#   OUTBOX_ESCALATE_ATTEMPTS / OUTBOX_ESCALATE_AFTER_SEC gate the user-facing escalation: we only ping
+#     once an intent has been re-driven enough times AND stayed stranded long enough that a recovery
+#     pass has genuinely had its chance (the vida false alarm fired ~26 min before recovery resolved
+#     it — the wall-clock floor would have suppressed it). Escalation is exactly-once via the durable
+#     `escalated` marker on the record (not the attempts counter), so re-drives can't race it.
+OUTBOX_REDRIVE_AFTER_SEC = 90
+OUTBOX_ESCALATE_ATTEMPTS = 3
+OUTBOX_ESCALATE_AFTER_SEC = 1800  # 30 min stranded before we ever surface it (recovery runs first)
 
 # Nightly self-eval subprocess timeouts. The deterministic layer is pure file I/O (fast); the LLM
 # judge runs up to MAX_JUDGE/BATCH_SIZE sonnet batches (see eval_judge.py), so it needs minutes, not
@@ -189,6 +209,10 @@ def load_config() -> dict:
         # not-interested drop (the actual 1d/3d/3d cadence + master toggle live in the followup_*
         # config keys, owned by followup_state.py). Cheap, file-only probe — idle cost stays ~zero.
         "followup_poll_sec": cfg.get("followup_poll_sec", 3600),
+        # Track A5 — outbox sweeper cadence: how often to check thread_outbox for a STRANDED
+        # never-fired send and re-drive it (cheap non-LLM peek; the actual re-drive is a scoped buyer
+        # pass). Well below force_buyer_sweep_hours so a stranded reply recovers in minutes, not hours.
+        "outbox_sweep_poll_sec": cfg.get("outbox_sweep_poll_sec", 120),
         # Phase 3: >1 opts into the concurrent supervisor (parallel sell-inbox workers across
         # marketplaces). Default 1 keeps the single-flight loop below — byte-identical behavior.
         # BAZAAR_MAX_WORKERS env overrides the file: an ops kill-switch to force single-flight
@@ -675,6 +699,200 @@ def reconcile_orphans(env: dict, dry_run: bool) -> None:
         logging.warning("journal_reconcile error (non-fatal): %s", exc)
 
 
+def _reply_committed(thread: dict, rec: dict) -> bool:
+    """PURE: True if the thread ledger already reflects this intent's reply — so the queued intent is
+    a STALE duplicate, not a lost send. Two deterministic signals:
+      • the committed outbound row `out|<intent_id>` is in the transcript (commit folds it with that
+        exact msg_id — see journal_send.py), or
+      • the cursor has reached/passed the inbound this intent answers (last_handled_msg_id == in_msg_id,
+        or last_handled_ts >= the intent's ts), meaning some reply handled it and the chat moved on.
+    Either way the reply is delivered+journaled; escalating it would be the vida false alarm."""
+    transcript = thread.get("transcript") or []
+    marker = f"out|{rec.get('id')}"
+    if any(isinstance(r, dict) and r.get("msg_id") == marker for r in transcript):
+        return True
+    cursor = thread.get("cursor") or {}
+    if rec.get("in_msg_id") and cursor.get("last_handled_msg_id") == rec.get("in_msg_id"):
+        return True
+    handled_ts = thread_outbox.parse_iso(cursor.get("last_handled_ts"))
+    intent_ts = thread_outbox.parse_iso(rec.get("ts"))
+    return handled_ts is not None and intent_ts is not None and handled_ts >= intent_ts
+
+
+def _intent_already_resolved(rec: dict) -> bool:
+    """IO + fail-open: read the intent's thread file and ask _reply_committed. ANY uncertainty
+    (missing file, unreadable, bad json) → False, so we never wrongly suppress a genuinely-stranded
+    send — only a ledger we can positively read as delivered suppresses the alarm."""
+    thread_id = rec.get("thread_id") or ""
+    if not thread_id:
+        return False
+    try:
+        path = thread_outbox.data_dir() / "threads" / f"{thread_id}.json"
+        if not path.exists():
+            return False
+        thread = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return _reply_committed(thread, rec)
+
+
+def plan_outbox_sweep(pending: list, now, leased_markets: set, redrive_after_sec: float,
+                      escalate_attempts: int, escalate_after_sec: float) -> dict:
+    """PURE (Track A5): decide what to do with each STRANDED still-pending send.
+
+    For a pending intent whose market holds NO live lease (a live worker = in-flight, skip), which has
+    aged past `redrive_after_sec` (so a normal pacing/in-flight wait is never mistaken for stranded),
+    and which has NOT already been escalated to the user:
+      • re-driven enough (attempts >= escalate_attempts) AND stranded long enough
+        (age >= escalate_after_sec) → ESCALATE once (humbly — recovery has had its chance), else
+      • RE-DRIVE its market (a re-drive triggers the recovery pass that can verify against the live chat).
+    An intent already carrying the durable `escalated` marker is left visible and never re-driven or
+    re-alarmed. Exactly-once lives on that marker, NOT the attempts counter, so re-drives (which bump
+    attempts) can't race the escalate decision. Returns
+    {"redrive": {market: [intent_id, ...]}, "escalate": [{thread_id, id, text, attempts}, ...]}.
+    Deterministic order (input order) so the planner is unit-testable."""
+    redrive: dict = {}
+    escalate: list = []
+    for rec in pending:
+        market = rec.get("market")
+        if market and market in leased_markets:
+            continue  # a live worker owns this market — the intent is in-flight, not stranded
+        if rec.get("escalated"):
+            continue  # already surfaced once — never re-alarm or hot-loop
+        ts = thread_outbox.parse_iso(rec.get("ts"))
+        age = (now - ts).total_seconds() if ts is not None else float("inf")
+        if age < redrive_after_sec:
+            continue  # still within a normal pacing/in-flight window
+        attempts = int(rec.get("attempts", 0) or 0)
+        if attempts >= escalate_attempts and age >= escalate_after_sec:
+            escalate.append({"thread_id": rec.get("thread_id", ""), "id": rec.get("id"),
+                             "text": rec.get("text", ""), "attempts": attempts})
+        else:
+            redrive.setdefault(market, []).append(rec.get("id"))  # keep re-driving until both gates pass
+    return {"redrive": redrive, "escalate": escalate}
+
+
+def _live_market_leases(markets) -> set:
+    """The subset of `markets` that currently hold a live (non-stale) lease — a worker is actively
+    driving them. Uses the supervisor's canonical 600s TTL so the window matches reconcile/supervisor
+    exactly. Fail-open: an unreadable lease is treated as not-live (the age backstop still guards)."""
+    live = set()
+    base = thread_outbox.data_dir()
+    for m in {x for x in markets if x}:
+        try:
+            if lease.status(base, f"market:{m}", ttl=lease.AGENT_MARKET_TTL_SEC).get("held"):
+                live.add(m)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return live
+
+
+def _enqueue_outbox_escalation(esc: dict, env: dict) -> None:
+    """Surface a long-stranded queued reply to the user (never silent) — HONESTLY. The sweeper cannot
+    read the live chat, so it must NOT assert the send failed: the reply may well already be sitting in
+    the chat (sent by a pass that died before journaling), and the recovery pass usually confirms that.
+    So the wording states uncertainty, not failure. Enqueues a control-channel notify on channel_outbox
+    (drained by the supervisor's _drain_outbox / the single-flight drain). Fail-open."""
+    thread_id = esc.get("thread_id") or "a chat"
+    text = (f"A queued reply on {thread_id} hasn't been confirmed delivered yet — it may already have "
+            f"sent (I'm still verifying it in the chat). I'll keep checking; please glance at that "
+            f"chat or re-send manually if it's urgent.")
+    try:
+        import channel_outbox
+        path = channel_outbox.data_dir() / "channel_outbox.jsonl"
+        channel_outbox.run_enqueue("notify", text, datetime.now(timezone.utc), path,
+                                   source="outbox-sweep")
+    except (OSError, ValueError) as exc:
+        logging.warning("outbox escalation enqueue failed (non-fatal): %s", exc)
+
+
+def sweep_outbox(env: dict, dry_run: bool, busy_markets: set | None = None, now=None) -> set:
+    """Deterministic, non-LLM backstop (Track A5): re-drive STRANDED never-fired sends and escalate
+    ones stuck past the attempt ceiling. Returns the set of markets to launch a scoped re-drive for
+    (the caller uses its own buyer-launch path). Bumps each handled intent's attempts (thread_outbox
+    .fail) so the loop is BOUNDED — a perpetually-failing send escalates once and stops hot-looping.
+    Fail-open everywhere: any error returns an empty set so the sweep never breaks the daemon loop."""
+    if dry_run:
+        return set()
+    try:
+        pending = thread_outbox.peek(statuses=(thread_outbox.STATUS_PENDING,))["pending"]
+    except (OSError, ValueError, KeyError):
+        return set()
+    if not pending:
+        return set()
+    now = now or datetime.now(timezone.utc)
+    # Ledger-resolution prefilter: drop intents the thread file already shows delivered+journaled
+    # (recovery committed it). Acking the stale record here is what stops the vida false alarm — the
+    # planner never sees a resolved intent, so it can't re-drive or escalate it.
+    survivors: list = []
+    resolved = 0
+    for rec in pending:
+        if _intent_already_resolved(rec):
+            try:
+                thread_outbox.ack(rec.get("id"))
+            except (OSError, ValueError):
+                pass
+            resolved += 1
+            continue
+        survivors.append(rec)
+    if not survivors:
+        if resolved:
+            logging.info("outbox sweep: %s stranded intent(s) already delivered — acked, no alarm",
+                         resolved)
+        return set()
+    leased = set(busy_markets or set()) | _live_market_leases({r.get("market") for r in survivors})
+    plan = plan_outbox_sweep(survivors, now, leased, OUTBOX_REDRIVE_AFTER_SEC,
+                             OUTBOX_ESCALATE_ATTEMPTS, OUTBOX_ESCALATE_AFTER_SEC)
+    for esc in plan["escalate"]:
+        _enqueue_outbox_escalation(esc, env)
+        try:
+            thread_outbox.mark_escalated(esc["id"])  # durable exactly-once marker (not the attempts race)
+        except (OSError, ValueError):
+            pass
+    for _market, ids in plan["redrive"].items():
+        for iid in ids:
+            try:
+                thread_outbox.fail(iid)  # bump attempts → bounded re-drive count toward the escalate gate
+            except (OSError, ValueError):
+                pass
+    redrive_markets = set(plan["redrive"])
+    if redrive_markets or plan["escalate"] or resolved:
+        logging.info("outbox sweep: re-drive markets=%s, escalate=%s, already-delivered=%s",
+                     sorted(redrive_markets), len(plan["escalate"]), resolved)
+    return redrive_markets
+
+
+def drain_channel_outbox(channel: dict, env: dict, dry_run: bool) -> None:
+    """Flush queued control-channel notices (channel_outbox) to the bound adapter, in order. The
+    single-flight loop has no background workers but components (e.g. the outbox sweeper) still
+    enqueue notices, so it must drain too. Telegram only (other adapters' notices wait). Fail-open."""
+    if dry_run or channel.get("adapter") != "telegram":
+        return
+    try:
+        out = subprocess.run([sys.executable, str(BIN / "channel_outbox.py"), "peek"],
+                             capture_output=True, text=True, env=env, timeout=15)
+        if out.returncode != 0:
+            return
+        pending = json.loads(out.stdout).get("pending", [])
+    except (subprocess.SubprocessError, ValueError):
+        return
+    for rec in pending:
+        cmd = [sys.executable, str(BIN / "telegram.py"), "send", "--text", rec.get("text", ""),
+               "--kind", rec.get("kind", "notify")]
+        if rec.get("ref"):
+            cmd += ["--ref", str(rec["ref"])]
+        try:
+            sent = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=25)
+        except subprocess.SubprocessError:
+            continue  # a poison notice is retried next drain; the rest still flush
+        if sent.returncode == 0:
+            try:
+                subprocess.run([sys.executable, str(BIN / "channel_outbox.py"), "ack", "--id", rec["id"]],
+                               capture_output=True, text=True, env=env, timeout=15)
+            except subprocess.SubprocessError:
+                pass
+
+
 def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
              extra_env: dict | None = None) -> int:
     """Invoke the LLM pass (run_pass.sh seller|buyer) under the single-flight lock.
@@ -965,6 +1183,7 @@ def main(argv) -> int:
         last_eval = time.monotonic()                           # self-eval check throttle (not immediate)
         last_update = time.monotonic()                          # upstream update-check throttle (not immediate)
         last_followup = time.monotonic()                        # stale-chat follow-up check throttle (not immediate)
+        last_sweep = time.monotonic()                           # outbox sweeper throttle (Track A5; not immediate)
         empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
         empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
         _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
@@ -1077,6 +1296,20 @@ def main(argv) -> int:
                 if action != "idle":
                     empty_peeks = 0
                 last_buyer = time.monotonic()
+
+            # OUTBOX SWEEP (Track A5): re-drive any STRANDED never-fired send (status=pending in
+            # thread_outbox that no live worker owns) — the deterministic backstop that makes a silent
+            # drop impossible even if no inbound mail triggers a buyer pass. Escalates ones stuck past
+            # the attempt ceiling (enqueued to channel_outbox; drained just below).
+            if not paused and time.monotonic() - last_sweep >= cfg["outbox_sweep_poll_sec"]:
+                for market in sorted(sweep_outbox(env, ns.dry_run, busy_markets=set())):
+                    reconcile_orphans(env, ns.dry_run)  # surfaces needs_resend; the pass then re-sends
+                    logging.info("outbox sweep → re-drive buyer pass [%s]", market)
+                    run_buyer_with_continuation(
+                        market, channel, env, ns.dry_run,
+                        extra_env={"BAZAAR_BUYER_PEEK_TEXT": "re-driving a reply that never sent"})
+                drain_channel_outbox(channel, env, ns.dry_run)  # deliver any sweep escalation
+                last_sweep = time.monotonic()
 
             # MAINTENANCE (§2b detect): drain an active distribution/inbox-takeover batch one step per
             # pass, or start a cadence-due my-listings SCAN and/or inbox SWEEP. Gated by cheap non-LLM

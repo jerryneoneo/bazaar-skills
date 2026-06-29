@@ -98,6 +98,56 @@ def test_intent_rejects_empty_text():
         check("empty text exits 2", out.returncode == 2)
 
 
+def test_intent_dedups_same_inbound():
+    print("two intents for the SAME (thread, in_msg) reuse one pending record (no stranded copy):")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        _, id1 = _intent(env, thread="fb:vida", market="fb",
+                         in_msg="1:50 PM|defects?", text="no defects")
+        _, id2 = _intent(env, thread="fb:vida", market="fb",
+                         in_msg="1:50 PM|defects?", text="no defects, all brand new")
+        check("same intent id returned (deduped)", id1 == id2)
+        import thread_outbox as to
+        recs = to.parse_records((Path(d) / "thread_outbox.jsonl").read_text())
+        check("exactly one pending record", len(recs) == 1)
+        check("text refreshed to the latest", recs[0]["text"] == "no defects, all brand new")
+
+
+def test_mark_sent_cli_flips_status():
+    print("journal_send mark-sent flips the intent to sent_unverified:")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        _, intent_id = _intent(env, thread="fb:olaf-1", market="fb", in_msg="i", text="Hi")
+        out = _run(["mark-sent", "--intent", intent_id], env=env)
+        check("mark-sent exits 0", out.returncode == 0)
+        check("reports marked", json.loads(out.stdout).get("marked") is True)
+        import thread_outbox as to
+        recs = to.parse_records((Path(d) / "thread_outbox.jsonl").read_text())
+        check("status now sent_unverified", recs[0]["status"] == "sent_unverified")
+        check("sent_ts stamped", bool(recs[0].get("sent_ts")))
+
+
+def test_commit_after_mark_sent_still_folds():
+    print("the full happy path intent -> mark-sent -> commit still folds + acks (commit finds the"
+          " sent_unverified intent):")
+    with tempfile.TemporaryDirectory() as d:
+        env = _env(d)
+        path = _seed_thread(d, "threads", "fb:olaf-1")
+        _, intent_id = _intent(env, thread="fb:olaf-1", market="fb",
+                               in_msg="12:20 PM|hi", text="Hello!")
+        _run(["mark-sent", "--intent", intent_id], env=env)  # send fired
+        commit = _run(["commit", "--thread", "fb:olaf-1", "--intent", intent_id, "--side", "sell"], env=env)
+        check("commit exits 0 after mark-sent", commit.returncode == 0)
+        check("commit reports committed", json.loads(commit.stdout).get("committed") is True)
+        obj = json.loads(path.read_text())
+        out_rows = [r for r in obj["transcript"] if r["dir"] == "out"]
+        check("outbound folded", any(r["text"] == "Hello!" for r in out_rows))
+        check("cursor advanced", obj["cursor"]["last_handled_msg_id"] == "12:20 PM|hi")
+        import thread_outbox as to
+        check("intent acked (outbox empty)",
+              to.parse_records((Path(d) / "thread_outbox.jsonl").read_text()) == [])
+
+
 # ── commit ──────────────────────────────────────────────────────────────────────────────
 
 def test_commit_folds_inbound_outbound_advances_cursor_acks():
@@ -389,6 +439,9 @@ if __name__ == "__main__":
     print("journal_send tests\n")
     test_intent_writes_pending_record_and_prints_id()
     test_intent_rejects_empty_text()
+    test_intent_dedups_same_inbound()
+    test_mark_sent_cli_flips_status()
+    test_commit_after_mark_sent_still_folds()
     test_commit_folds_inbound_outbound_advances_cursor_acks()
     test_commit_idempotent_no_dup_no_double_advance()
     test_outbound_msg_id_is_deterministic_from_intent()
