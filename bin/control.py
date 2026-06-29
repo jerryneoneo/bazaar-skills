@@ -56,7 +56,8 @@ _IO_ERRORS = (OSError, ValueError, TypeError)
 
 
 def _default_state() -> dict:
-    return {"paused": False, "since": None, "source": None, "reason": "", "corrections": []}
+    return {"paused": False, "since": None, "source": None, "reason": "",
+            "ack_sent": False, "corrections": []}
 
 
 def data_dir() -> Path:
@@ -121,12 +122,16 @@ def _write_state(new_state: dict) -> None:
 
 def pause(source: str = "cli", reason: str = "") -> dict:
     """Set paused. Idempotent: `since` is stamped only on the false->true edge, so re-pausing an
-    already-paused agent keeps the original pause time."""
+    already-paused agent keeps the original pause time. `ack_sent` is re-armed (set False) only on
+    that same edge so EXACTLY ONE pause confirmation is sent per episode (claim_pause_ack); a
+    re-pause of an already-paused agent preserves the flag and never re-acks."""
     current = load_state()
+    already = current.get("paused")
     new_state = {
         **current,
         "paused": True,
-        "since": current.get("since") if current.get("paused") else _now_iso(),
+        "since": current.get("since") if already else _now_iso(),
+        "ack_sent": current.get("ack_sent", False) if already else False,
         "source": source,
         "reason": reason or "",
     }
@@ -135,11 +140,33 @@ def pause(source: str = "cli", reason: str = "") -> dict:
 
 
 def resume(source: str = "cli") -> dict:
-    """Clear paused. Leaves the corrections queue intact so the resume pass can drain it."""
+    """Clear paused. Leaves the corrections queue intact so the resume pass can drain it. Resets
+    `ack_sent` so the NEXT pause episode re-arms its one-shot confirmation."""
     current = load_state()
-    new_state = {**current, "paused": False, "since": None, "source": source}
+    new_state = {**current, "paused": False, "since": None, "ack_sent": False, "source": source}
     _write_state(new_state)
     return new_state
+
+
+def claim_pause_ack() -> bool:
+    """One-shot gate for the single pause confirmation. Returns True (and durably stamps
+    `ack_sent=True`) EXACTLY ONCE per pause episode — the first call while paused with the flag
+    un-armed; every later call returns False until /resume re-arms it. Returns False when NOT paused.
+
+    This is what makes the '⏸ Paused…' confirmation immune to the self-kill race (the LLM pass that
+    sets the flag can be SIGTERM'd before it acks) and free of duplicates (N concurrent passes /
+    poll cycles): the ack rides this claim, sent by the non-LLM drain, never by a pass.
+
+    Cosmetic-only: it gates a message, never the pause itself — a lost/garbage write costs at most
+    one missing or one extra confirmation, never a stuck pause (load_state still reads NOT paused on
+    a bad file). The check-then-write is not atomic across processes, but — like the daemon RUN_LOCK
+    — it is only ever called from the single daemon/supervisor loop process, sequentially, so it is
+    not raced in practice (interactive console sessions don't run this sender at all)."""
+    current = load_state()
+    if not current.get("paused") or current.get("ack_sent"):
+        return False
+    _write_state({**current, "ack_sent": True})
+    return True
 
 
 def _build_target(scope: str | None, ref: str | None) -> dict | None:
@@ -221,6 +248,13 @@ def _cmd_correct(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mark_applied(ns: argparse.Namespace) -> int:
+    mark_applied(ns.ids)
+    print(json.dumps({"ok": True, "applied": ns.ids,
+                      "pending_corrections": len(pending_corrections())}))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="control.py", add_help=True)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -243,6 +277,14 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--scope", default="")
     co.add_argument("--ref", default="")
     co.set_defaults(func=_cmd_correct)
+
+    # mark-applied: the resume corrections recipe (skills/channel/corrections.md) calls this after
+    # writing a correction to durable state. It existed only as an importable function before; without
+    # the CLI the documented `python3 bin/control.py mark-applied <id>` errored, so corrections were
+    # applied but NEVER marked → re-applied or stranded pending forever.
+    ma = sub.add_parser("mark-applied")
+    ma.add_argument("ids", nargs="+")
+    ma.set_defaults(func=_cmd_mark_applied)
     return p
 
 

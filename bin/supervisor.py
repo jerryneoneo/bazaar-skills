@@ -24,6 +24,7 @@ import sys
 import time
 
 import agent_daemon as ad   # imported lazily by ad.main() → fully-initialized module, no cycle
+import channel_control      # is_pause_command (shared /pause matching rule) + the deterministic drain
 import channel_outbox       # single-writer control-channel queue (the cap-hit escalation enqueues here)
 import harness_run          # CAP_HIT_SIGNAL lives here (run_pass returns it on a turn-cap kill)
 import inbox_scan           # SELL peek probes (fail-open wrappers below) for the priority-hint thread
@@ -362,6 +363,10 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     last_update = time.monotonic()   # upstream update-check throttle (not immediate)
     last_followup = time.monotonic()  # stale-chat follow-up check throttle (not immediate)
     last_sweep = time.monotonic()    # outbox sweeper throttle (Track A5; not immediate)
+    was_paused = ad.control.is_paused()  # edge-trigger for the one-shot pause confirmation (below)
+    # Make a corrections-apply pass due IMMEDIATELY if any correction is already pending (e.g. one
+    # stranded by a prior resume that never applied it), not CORRECTIONS_RETRY_SEC from now.
+    last_corrections = time.monotonic() - channel_control.CORRECTIONS_RETRY_SEC
     logging.info("supervisor up · max_workers=%s · sell markets=%s · (channel/buy/maint exclusive)",
                  max_workers, enabled)
     # Bug C6: sweep per-pass logs leaked by forced kills (preempt/deadline/watchdog skip run_pass's
@@ -386,6 +391,39 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         _heartbeat(workers)  # lease heartbeats for live workers (distinct from the daemon heartbeat above)
         _drain_outbox(channel, env, ns.dry_run)   # flush queued background notices, in order
         paused = ad.control.is_paused()
+
+        # PAUSE = a hard stop: tear down any live buyer worker NOW, don't just stop launching new
+        # ones. The concurrent path's workers are async (Popen, not ad.run_pass), so they have no
+        # in-pass interrupt — this is their equivalent of the single-flight loop's mid-flight kill
+        # (agent_daemon.py:998). Reuses _preempt_all (kill tree → release lease → drop). Idempotent:
+        # `workers` is empty on the next paused tick, so this is a no-op until /resume relaunches.
+        if paused and workers:
+            logging.info("paused → preempting %s live buyer worker(s)", len(workers))
+            _preempt_all(workers)
+
+        # ONE-SHOT pause confirmation on the false→true edge — regardless of HOW the flag flipped
+        # (the /pause fast-path below, an LLM seller pass, or the CLI). The drain's catch-all claims
+        # the ack exactly once (control.claim_pause_ack), so this never duplicates and never waits
+        # for the next inbound message (the late-ack the incident showed). was_paused is seeded from
+        # the live flag at startup, so a restart INTO a paused state never re-acks.
+        if paused and not was_paused and not ns.dry_run:
+            subprocess.run([sys.executable, str(ad.BIN / "channel_control.py"), "drain"],
+                           env=env, capture_output=True, timeout=60)
+        was_paused = paused
+
+        # APPLY pending corrections (post-/resume, or any stranded one): the drain cleared the pause
+        # and acked, but applying a correction is state-routed LLM work — so force ONE channel pass
+        # (which runs skills/channel/corrections.md: apply each to durable state, mark-applied, and
+        # report what changed). This is what turns "▶️ Resuming — applying your corrections now" into
+        # an actual apply + a clear "here's what I did" follow-up, and it runs BEFORE the background
+        # gates so they read the corrected state. A channel pass is exclusive → tear down workers first.
+        if not ns.dry_run and channel_control.corrections_pass_due(
+                paused, len(ad.control.pending_corrections()), time.monotonic() - last_corrections):
+            if workers:
+                _preempt_all(workers)
+            logging.info("pending correction(s) → channel pass to apply + report")
+            ad.run_pass("seller", channel, env, ns.dry_run)
+            last_corrections = time.monotonic()
 
         # Keep notification-path (Meta) tabs hidden between passes so their OS push keeps firing
         # (a focused Meta tab delivers in-app instead). Dedicated warm Chrome → never the user's own.
@@ -432,7 +470,19 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
         peek = ad.channel_peek(channel, env, peek_timeout)
         if peek["pending"]:
             ad._send_typing(channel, env)
-            if paused:
+            # DETERMINISTIC /pause fast-path: an explicit /pause sets the flag, tears down workers,
+            # and lets the drain send the ONE confirmation — with NO LLM seller pass (which the
+            # mid-flight interrupt would SIGTERM before it could ack, the self-kill race). Only the
+            # explicit command matches (is_pause_command); fuzzy "stop" stays the LLM's job.
+            if not paused and channel_control.is_pause_command(peek.get("latest_text", "")):
+                logging.info("/pause at channel → set flag + preempt %s worker(s) + drain", len(workers))
+                ad.control.pause(source="telegram")
+                paused = True
+                _preempt_all(workers)
+                if not ns.dry_run:
+                    subprocess.run([sys.executable, str(ad.BIN / "channel_control.py"), "drain"],
+                                   env=env, capture_output=True, timeout=60)
+            elif paused:
                 if not ns.dry_run:
                     subprocess.run([sys.executable, str(ad.BIN / "channel_control.py"), "drain"],
                                    env=env, capture_output=True, timeout=60)

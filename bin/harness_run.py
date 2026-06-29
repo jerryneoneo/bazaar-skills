@@ -371,13 +371,12 @@ CORE_SKILLS = {
     "maint": ("skills/channel/notifications.md", "skills/channel/listing-health.md", "skills/style.md"),
 }
 
-# Courtesy pause line for the background passes: the PreToolUse hook (bin/hooks/pause_guard.py) is
-# the real, deterministic enforcement (it denies the reserve + browser mutations while paused), and
-# the daemon interrupts a running pass — this just lets a compliant pass narrate the pause cleanly
-# instead of being SIGTERM'd mid-sentence. Byte-stable → folded into the cached prefix.
-PAUSE_LINE = ("\n\nPAUSE: before any `bin/pacing_gate.py reserve` (i.e. before any marketplace send),"
-              " run `python3 bin/control.py is-paused`; if it exits 0 (paused), send a brief 'Paused"
-              " — holding here' line and STOP this pass. (The harness also blocks sends while paused.)")
+# NOTE: the old PAUSE_LINE (a per-pass "Paused — holding here" narration) was REMOVED — it was the
+# source of unbounded duplicate pause acks (every concurrent worker / poll cycle emitted its own).
+# Pause is now enforced deterministically without it: the PreToolUse hook (bin/hooks/pause_guard.py)
+# denies the pacing reserve + browser mutations while paused, the supervisor preempts live workers
+# and the single-flight loop interrupts a running pass, and the ONE confirmation is sent by the
+# non-LLM drain (bin/channel_control.py, gated by control.claim_pause_ack — exactly once per episode).
 
 
 def _browser_tools(suffixes: tuple[str, ...]) -> tuple[str, ...]:
@@ -447,7 +446,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # continuation). Don't bump it chasing rc=1; replies mark threads read, so partial progress
         # carries across passes.
         return PassSpec(
-            prompt=_scope_prefix(resource) + BUYER_PROMPT + FOLLOWUP_BRANCH_SELL + PAUSE_LINE,
+            prompt=_scope_prefix(resource) + BUYER_PROMPT + FOLLOWUP_BRANCH_SELL,
             model="sonnet", max_turns=BUYER_BACKSTOP_TURNS,
             allowed_tools=BASE_TOOLS + _browser_tools(BUYER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("buyer"),
@@ -458,7 +457,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # money lives in buyer_negotiate.py/budget_gate.py. Reuses the smaller buyer browser set.
         # Same backlog rationale as the buyer pass: 14 was too low and stranded liaison work (rc=1).
         return PassSpec(
-            prompt=_scope_prefix(resource) + BUY_PROMPT + FOLLOWUP_BRANCH_BUY + PAUSE_LINE,
+            prompt=_scope_prefix(resource) + BUY_PROMPT + FOLLOWUP_BRANCH_BUY,
             model="sonnet", max_turns=28,
             allowed_tools=BASE_TOOLS + _browser_tools(BUYER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("buy"),
@@ -472,7 +471,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # None → no --model flag), or to any model name to pin that. Full seller browser set stays.
         maint_model = os.environ.get("BAZAAR_MAINT_MODEL", "sonnet") or None
         return PassSpec(
-            prompt=_scope_prefix(resource) + MAINT_PROMPT + PAUSE_LINE, model=maint_model, max_turns=None,
+            prompt=_scope_prefix(resource) + MAINT_PROMPT, model=maint_model, max_turns=None,
             allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER),
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("maint"),
             prompt_cache_1h=True,

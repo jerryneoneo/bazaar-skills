@@ -282,6 +282,38 @@ def test_reap_watchdog_kill_clears_retry_counter():
         supervisor._confirm_dead = saved_confirm
 
 
+def test_preempt_on_pause():
+    print("PAUSE = hard stop: _preempt_all tears down a live buyer worker AND releases its"
+          " market lease (the concurrent path's equivalent of the single-flight mid-flight kill):")
+    import lease
+    saved_confirm = supervisor._confirm_dead
+    supervisor._confirm_dead = lambda *a, **k: None  # don't signal a real process group in a test
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BAZAAR_DATA_DIR"] = tmp
+        try:
+            base = lease.data_dir()
+            acq = lease.acquire(base, "market:fb", "h", "buyer", supervisor.LEASE_TTL_SEC)
+            check("lease acquired for the live worker", acq["acquired"] is True)
+            workers = {"fb": {"proc": _LiveProc(), "holder": "h", "started": 0.0}}
+            supervisor._preempt_all(workers)
+            check("worker removed from the live set", "fb" not in workers)
+            reacq = lease.acquire(base, "market:fb", "other", "buyer", supervisor.LEASE_TTL_SEC)
+            check("market lease released (re-acquirable by another holder)", reacq["acquired"] is True)
+        finally:
+            supervisor._confirm_dead = saved_confirm
+            os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_fast_pause_recognition():
+    print("safe /pause matching: ONLY the explicit command, never a 'stop'/'pause' substring"
+          " ('stop buying iphone' is a scoped correction, not a global halt):")
+    import channel_control as cc
+    for t in ("/pause", "/pause now", "  /pause  ", "/PAUSE"):
+        check(f"{t!r} -> pause command", cc.is_pause_command(t) is True)
+    for t in ("stop buying iphone", "pause the carousell chat", "stop", "please pause everything", ""):
+        check(f"{t!r} -> NOT a pause command", cc.is_pause_command(t) is False)
+
+
 def test_continuation_launch_none_rolls_back_budget():
     print("Bug C7: when a continuation launch FAILS (_launch_buyer returns None on a lease race /"
           " Popen OSError) the budget slot must NOT be spent — a later real cap-hit still gets the"
@@ -612,6 +644,8 @@ if __name__ == "__main__":
     test_reap_then_plan_no_double_gate()
     test_reap_natural_exit_no_continuation()
     test_reap_watchdog_kill_clears_retry_counter()
+    test_preempt_on_pause()
+    test_fast_pause_recognition()
     test_continuation_launch_none_rolls_back_budget()
     test_continuation_hint_does_not_double_advance_sell_memo()
     test_enabled_sell_markets()

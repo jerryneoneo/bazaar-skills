@@ -148,6 +148,54 @@ def test_cli_roundtrip():
         check("is-paused exits 1 when not paused", ip2.returncode == 1)
 
 
+def test_mark_applied_cli():
+    print("mark-applied CLI exists (the corrections recipe shells to it; it was missing before):")
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        base = [sys.executable, str(ROOT / "bin" / "control.py")]
+        co = subprocess.run(base + ["correct", "--text", "list kettle at 9 not 8", "--source", "telegram"],
+                            capture_output=True, text=True, env=env)
+        cid = json.loads(co.stdout)["id"]
+        ma = subprocess.run(base + ["mark-applied", cid], capture_output=True, text=True, env=env)
+        check("mark-applied exits 0", ma.returncode == 0)
+        check("mark-applied reports the id applied", json.loads(ma.stdout)["applied"] == [cid])
+        check("no pending corrections left", json.loads(ma.stdout)["pending_corrections"] == 0)
+        st = subprocess.run(base + ["status"], capture_output=True, text=True, env=env)
+        rec = [c for c in json.loads(st.stdout)["corrections"] if c["id"] == cid][0]
+        check("correction marked applied in state", rec["applied"] is True)
+
+
+def test_ack_sent_one_shot_claim():
+    print("ack_sent one-shot: claim_pause_ack succeeds EXACTLY once per pause episode; resume re-arms:")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate(tmp)
+        check("not paused -> claim returns False", control.claim_pause_ack() is False)
+        control.pause(source="telegram")
+        check("ack_sent armed (False) on the false->true edge", control.state()["ack_sent"] is False)
+        check("first claim succeeds", control.claim_pause_ack() is True)
+        check("ack_sent durably stamped True", control.state()["ack_sent"] is True)
+        check("second claim returns False (no duplicate ack)", control.claim_pause_ack() is False)
+        # re-pause of an already-paused agent preserves ack_sent (never re-acks mid-episode)
+        control.pause(source="telegram")
+        check("re-pause preserves ack_sent", control.state()["ack_sent"] is True)
+        check("claim after re-pause still False", control.claim_pause_ack() is False)
+        # resume re-arms the one-shot for the NEXT episode
+        control.resume(source="cli")
+        check("resume clears ack_sent", control.state()["ack_sent"] is False)
+        control.pause(source="telegram")
+        check("new pause episode re-arms the claim", control.claim_pause_ack() is True)
+
+
+def test_claim_pause_ack_tolerant_on_garbage():
+    print("ack_sent is cosmetic-only: a garbage file reads NOT paused and claim returns False"
+          " (can never strand the agent):")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate(tmp)
+        (Path(tmp) / "control.json").write_text("{not valid json")
+        check("garbage -> not paused", control.is_paused() is False)
+        check("garbage -> claim returns False", control.claim_pause_ack() is False)
+
+
 if __name__ == "__main__":
     print("control.py tests\n")
     test_default_when_absent()
@@ -157,7 +205,10 @@ if __name__ == "__main__":
     test_add_correction_unique_ids_and_target()
     test_mark_applied_idempotent()
     test_tolerant_on_garbage()
+    test_ack_sent_one_shot_claim()
+    test_claim_pause_ack_tolerant_on_garbage()
     test_cli_roundtrip()
+    test_mark_applied_cli()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

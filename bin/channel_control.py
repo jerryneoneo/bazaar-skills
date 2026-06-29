@@ -37,6 +37,12 @@ import control  # noqa: E402  the single owner of the pause flag + corrections q
 
 ACK_PAUSE = "⏸ Paused. I'll stop acting and wait. Send a correction, then /resume."
 ACK_RESUME = "▶️ Resuming — applying your corrections now."
+ACK_RESUME_CLEAN = "▶️ Resumed — nothing was queued, back to your inboxes now."
+
+# Bound how often a not-yet-applied correction re-forces a channel pass (the apply step is LLM/
+# state-routed, so it can't be done by this no-LLM drain). Small enough to feel prompt after a
+# /resume, large enough that a correction the LLM hasn't marked applied yet can't hot-loop passes.
+CORRECTIONS_RETRY_SEC = 120
 
 # Directories scanned for unambiguous correction targets, most-specific first. A correction whose
 # text contains a known ref/id is routed straight at that thread/want/item; otherwise target=None
@@ -82,7 +88,28 @@ def infer_target(text: str) -> dict | None:
 
 
 def _first_word(text: str) -> str:
-    return (text or "").strip().split(maxsplit=1)[0].lower()
+    parts = (text or "").strip().split(maxsplit=1)
+    return parts[0].lower() if parts else ""
+
+
+def is_pause_command(text: str) -> bool:
+    """True ONLY for the explicit `/pause` command token — the deterministic global stop. Never
+    matches a bare 'stop'/'pause' substring: 'stop buying iphone' is a SCOPED correction, not a
+    global halt (substring matching would freeze the whole agent on a correction). Fuzzy phrasing
+    stays the LLM's job. Shared by both daemon loops' channel-peek fast-path so the rule is
+    single-sourced and unit-testable. '/pause now' / ' /pause ' → True; 'stop' / 'pause it' → False."""
+    return _first_word(text) == "/pause"
+
+
+def corrections_pass_due(paused: bool, pending_count: int, elapsed_sec: float,
+                         retry_sec: float = CORRECTIONS_RETRY_SEC) -> bool:
+    """True when the daemon should force a CHANNEL pass to APPLY pending corrections. The drain
+    captures corrections + clears the pause, but applying them is state-routed LLM work it can't do
+    (skills/channel/corrections.md), and after a /resume nothing else triggers a channel pass — so
+    corrections were silently dropped. Fires while NOT paused with >=1 un-applied correction,
+    rate-limited so a correction the LLM hasn't marked applied yet can't hot-loop passes. Covers the
+    post-/resume case AND a correction stranded by a crash mid-apply. Pure -> unit-testable."""
+    return (not paused) and pending_count > 0 and elapsed_sec >= retry_sec
 
 
 def process_events(events: list[dict]) -> list[str]:
@@ -98,11 +125,17 @@ def process_events(events: list[dict]) -> list[str]:
         if kind == "command" and _first_word(text) == "/pause":
             reason = text.strip()[len("/pause"):].strip()
             control.pause(source="telegram", reason=reason)
-            acks.append(ACK_PAUSE)
+            # One ack per pause episode: a re-pause while already paused (or a 2nd /pause in the
+            # same batch) claims nothing → no duplicate (the 7x "holding here" spam this replaces).
+            if control.claim_pause_ack():
+                acks.append(ACK_PAUSE)
             continue
         if kind == "command" and _first_word(text) == "/resume":
             control.resume(source="telegram")
-            acks.append(ACK_RESUME)
+            # Honest ack: promise "applying now" ONLY when there's actually something queued. The
+            # apply itself is the LLM channel pass the daemon forces next (corrections_pass_due);
+            # this no-LLM drain just clears the flag + confirms.
+            acks.append(ACK_RESUME if control.pending_corrections() else ACK_RESUME_CLEAN)
             continue
         # Everything else while paused is captured as a steering note (nothing is lost).
         note = text if kind != "photo" else (text or "[photo]")
@@ -145,7 +178,14 @@ def drain(env: dict | None = None) -> int:
     acks = process_events(events)
     for ack in acks:
         _send(ack, env)
-    print(json.dumps({"drained": len(events), "acks": len(acks),
+    # Catch-all single confirmation: when the flag was flipped by something OTHER than a /pause event
+    # in this batch — the LLM seller pass (bazaar-run.md) or a loop's deterministic /pause fast-path —
+    # no ack was queued above, so the one-shot claim fires it here. Exactly once per episode (the claim
+    # self-dedups), and it does NOT depend on any pass surviving, so the self-kill race can't lose it.
+    edge_ack = control.claim_pause_ack()
+    if edge_ack:
+        _send(ACK_PAUSE, env)
+    print(json.dumps({"drained": len(events), "acks": len(acks) + (1 if edge_ack else 0),
                       "paused": control.is_paused()}))
     return 0
 
