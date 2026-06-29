@@ -62,7 +62,7 @@ Sell side (9):
 |---|---|---|
 | `listing_description` | Use the drafted description as-is vs show it for edit | `skills/channel/listing.md` (draft step) |
 | `listing_platforms` | Publish to the computed eligible platform set vs confirm the list | `skills/channel/listing.md` (PUBLISH) |
-| `price_floor` | Accept suggested list price + floor vs confirm them | `skills/channel/listing.md` (awaiting_price / awaiting_floor) |
+| `price_floor` | Accept suggested list price + floor vs confirm them | `skills/channel/listing.md` (awaiting_listing_inputs) |
 | `publish` | Click publish vs confirm a preview first | `skills/channel/listing.md` + `skills/listing-flows/*.md` |
 | `buyer_replies` | Send the composed answer to a question/shipping/availability | `skills/reply-pipeline.md` |
 | `offers` | Negotiate a below/at-list offer vs surface it | `skills/reply-pipeline.md` (price_offer branch) |

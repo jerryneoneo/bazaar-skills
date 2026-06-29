@@ -215,8 +215,30 @@ def test_fb_probe_noise_regex_matches_python_copy():
               bool(noise.search(text)) == bool(inbox_scan.FB_NOISE_RE.search(text)))
 
 
+def test_carousell_probe_alt_matches_any_tab():
+    print("carousell probe: a tab on ANY carousell page is found via url_match_alt, /inbox preferred:")
+    probe = buyer_peek.MARKET_PROBES["carousell"]
+    check("url_match_alt is the bare carousell host", probe.get("url_match_alt") == ["carousell."])
+
+    # A carousell tab parked on a listing page (no /inbox) is still found (the count badge is global),
+    # where today it read as "not open" and triggered a false "inbox unreadable" escalation.
+    listing = {"url": "https://www.carousell.sg/p/some-listing-123/", "webSocketDebuggerUrl": "ws://x"}
+    check("non-inbox carousell tab is matched via the alt",
+          buyer_peek._find_tab([listing], probe) is listing)
+
+    # When both an inbox tab and a listing tab are open, the /inbox tab wins (primary tried first).
+    inbox = {"url": "https://www.carousell.sg/inbox/", "webSocketDebuggerUrl": "ws://y"}
+    check("an open /inbox tab is preferred over a listing tab",
+          buyer_peek._find_tab([listing, inbox], probe) is inbox)
+
+    # No carousell tab at all → None (the buyer pass then navigates to open one; never escalates).
+    check("no carousell tab → None",
+          buyer_peek._find_tab([{"url": "https://www.facebook.com/marketplace/inbox"}], probe) is None)
+
+
 if __name__ == "__main__":
     print("buyer_peek precise-signal tests\n")
+    test_carousell_probe_alt_matches_any_tab()
     test_fb_probe_noise_regex_keeps_real_previews()
     test_fb_probe_noise_regex_still_drops_noise()
     test_fb_probe_noise_regex_matches_python_copy()

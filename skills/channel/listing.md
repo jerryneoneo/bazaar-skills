@@ -17,21 +17,30 @@ before each pass, covering the claude cold-start).
 
 ## `data/listing_session.json`
 ```json
-{ "active": true, "item_id": "<kebab>", "step": "awaiting_price",
+{ "active": true, "item_id": "<kebab>", "step": "awaiting_listing_inputs",
   "fields": { "title","category","category_tag","condition","attributes","photos":[],
               "comp_low","comp_med","comp_high","list_price","floor","size_bucket" },
   "updated_at": "<iso>" }
 ```
-`step` ∈ `identify → awaiting_price → awaiting_floor → awaiting_details → publishing → done`.
-One step per pass; write the session and return after each. (Item **size is auto-determined** at
-START and stated, not asked — a separate size question was removed; see `awaiting_floor`.)
+`step` ∈ `identify → awaiting_listing_inputs → publishing → done`.
+One step per pass; write the session and return after each. After the research, list price, floor,
+additional info, and delivery size are gathered in **ONE combined ask** (the seller answers all of
+it in a single message). Item **size is auto-determined** at START and stated for correction inside
+that combined ask, not asked as its own step; see `awaiting_listing_inputs`.
 
 ## Routing (every seller pass)
 Load `listing_session.json` **first**. If `active` and the new event is the seller's reply, apply it
 to the current `step` **for `session.item_id`** — that file is the source of truth for which item
 you're on. **Never ask the seller "which item is that for?" or re-identify the item while a session
 is active; re-asking is a persistence bug** (e.g. a bare "$20" answering the price step belongs to
-`session.item_id`, not a new item). If photos arrive with no active session AND the caption is not
+`session.item_id`, not a new item).
+**Legacy step compat (migration):** a session persisted by an older version may carry a `step` of
+`awaiting_price`, `awaiting_floor`, or `awaiting_details` (the pre-refactor names). Treat ANY of
+these as `awaiting_listing_inputs` and continue there — its handler re-asks only the still-missing
+required fields (list price, floor) and treats info as optional, so a stranded session resumes
+cleanly. Write the session back with the canonical `awaiting_listing_inputs` so the legacy name is
+migrated on first touch (never leave a session on a step name with no handler).
+If photos arrive with no active session AND the caption is not
 buy-intent, START. A photo whose caption asks to ACQUIRE the item ("get this", "want", "looking
 for", "find me", "under $X", "max", "budget", "bid", or a marketplace link to buy) is a BUY, not a
 listing — do NOT START here; the control-channel intent gate (bazaar-run.md §1) routes it to
@@ -40,9 +49,14 @@ description is a listing: START. Otherwise ignore (not a listing).
 
 ### START (photos, no active session, not buy-intent)
 ```
+# ACK FIRST — this is REQUIRED and must fire BEFORE the slow vision/comps work below, even if the
+# daemon already sent a generic intent line (that one-liner does NOT satisfy this per-flow ack; see
+# skills/voice.md Rule 2). Never go silent between the photo and the research. Keep it LLM-authored
+# and contextual, conveying: got the photo, researching the item + a fair price now, will message
+# back when done.
 say "📸 Got your photos! I'll identify the item, research a fair price, and get it ready for
-     <your enabled marketplaces>. I'll check the price with you, then publish, and message you at
-     each step. (I only ship, no meetups.)"
+     <your enabled marketplaces>, then check the price with you. I'll message you when I'm done.
+     (I only ship, no meetups.)"
      # <your enabled marketplaces> = the seller's ENABLED platforms named from
      # seller_config.marketplaces → marketplaces.json display_name (e.g. "Facebook Marketplace,
      # Carousell + eBay"). NEVER hardcode "FB + Carousell"; reflect what's actually enabled.
@@ -56,41 +70,52 @@ say "📸 Got your photos! I'll identify the item, research a fair price, and ge
          tighter range), issue them as PARALLEL calls in ONE turn — never back-to-back. Comps depend
          on the title from [vision] above, so [vision] runs first; the comp queries then fan out.
 say "🔎 Looks like a <title> (<condition>). Similar ones sell ~<low> to <high> <currency>."
-ask "What list price do you want? (suggested <med>)"     → step=awaiting_price
+# ONE combined ask — list price + floor + optional info + the stated (auto) size. The seller answers
+# all of it in a single message (e.g. "$12 listing, $10 floor, comes with dust jacket"). A bare
+# number is read as the list price. NEVER split these across passes.
+ask "To get it live, reply in one message:
+     1) List price? (I suggest <med>)
+     2) Your floor, the lowest you'd accept? 🔒 PRIVATE, never shown to buyers; I only ever quote
+        your list price.
+     3) Anything buyers should know (what's included / condition notes)? Optional, say 'skip'.
+     I'll set delivery size to <fields.size_bucket> (typical for a <title>); tell me if that's off."
+                                                          → step=awaiting_listing_inputs
 write listing_session ; return
 ```
 
-### awaiting_price → (seller replies a number)
+### awaiting_listing_inputs → (the seller's combined reply) ── parse, then PUBLISH (the one long step, fully messaged)
+> `approvals.steps.price_floor`: with `auto`, skip the price+floor part of the ask (use the
+> suggested median as `list_price` and a default floor ratio, still written ONLY to the floor file)
+> and parse only any additional info. With `confirm` (the `balanced` default), require both list
+> price and floor from the combined ask shown in START.
 ```
-fields.list_price = reply
-ask "🔒 Your lowest acceptable price? PRIVATE, never shown to buyers, never in any reply.
-     I'll only ever quote your <list_price>."          → step=awaiting_floor
-return
-```
-> `approvals.steps.price_floor`: with `auto`, you may skip these two asks and use the suggested
-> median as `list_price` and a default floor ratio (still written ONLY to the floor file). With
-> `confirm` (the `balanced` default), ask both as shown above.
-
-### awaiting_floor → (number)
-```
+# PARSE the seller's free-text reply for THREE things (often all in one message, e.g.
+# "$12 listing, $10 floor, comes with dust jacket"): list_price (required), floor (required),
+# additional_info (optional). Rules:
+#  - RESUMING a partial session (after a re-ask, or a migrated legacy session): if fields.list_price
+#    is ALREADY set and floor is missing, a bare number is the FLOOR (NOT a new list price); if floor
+#    is already set and list_price is missing, a bare number is the LIST PRICE. This takes precedence
+#    over the bare-number rule below — only when BOTH are still unset does a bare number default to
+#    the list price.
+#  - a bare number with no floor cue (BOTH still unset) → it's the list_price; floor still missing.
+#  - a number with a floor cue ("floor"/"lowest"/"min"), or a clear second number → that's the floor.
+#  - a bare size keyword (small|medium|large|bulky) anywhere → SIZE CORRECTION: set
+#    fields.size_bucket = that keyword (do NOT treat it as a price or as item details).
+#  - 'skip'/'none'/no info text → additional_info empty.
+#  - floor > list_price → ask the seller to confirm (a floor above list is unusual); stay in step, return.
+# MISSING-REQUIRED: if list_price OR floor is still missing after parsing, ack what you DID capture
+#   (NEVER echo the floor) and re-ask ONLY the missing field(s); keep step=awaiting_listing_inputs;
+#   write session ; return.
+fields.list_price = <parsed list price>
 write data/floors/<item_id>.json { item_id, list_price, floor, auto_counter_step,
-                                   auto_counter_rounds, currency }   # FLOOR goes ONLY here
-# Size is already auto-determined (fields.size_bucket from START's vision). STATE it, don't ask —
-# the seller can correct it; otherwise we proceed. (No fee preview here: shipping.py needs the
-# item record, which is written at PUBLISH; buyers are quoted the fee in-chat via shipping.py later.)
-say "📦 I'll set delivery size to **<fields.size_bucket>** (typical for a <title>) — reply
-     small / medium / large / bulky if that's off."
-ask "Anything buyers should know? (what's included / condition notes), or reply 'skip'."
-                                                          → step=awaiting_details
-return
-```
-
-### awaiting_details → (text or 'skip')  ── then PUBLISH (the one long step, fully messaged)
-```
-# SIZE CORRECTION: if the reply is just a size keyword (small|medium|large|bulky), it's correcting
-# the stated size, NOT item details → set fields.size_bucket = reply, re-ask the details question
-# once (step stays awaiting_details), and return. Otherwise treat the reply as details below.
-if not 'skip': append to data/qa_bank.jsonl {item_id,q:"details",a:<reply>,source:"frontloader"}
+                                   auto_counter_rounds, currency }   # FLOOR goes ONLY here, never echoed
+if additional_info given (not 'skip'): append to data/qa_bank.jsonl
+     {item_id,q:"details",a:<additional_info>,source:"frontloader"}
+# Size is already set (auto at START, or corrected from this reply). No fee preview here: shipping.py
+# needs the item record (written at PUBLISH); buyers are quoted the fee in-chat via shipping.py later.
+# IMMEDIATE ACK: the seller just answered, so they must hear back before any slow step. The "✅ All
+# set, publishing…" say below (right before the publish loop) is that acknowledgement; never go
+# silent after the seller replies.
 # description draft is gated by approvals.steps.listing_description: auto → use as drafted;
 # confirm → show the draft and let the seller edit before writing the item.
 write data/items/<item_id>.json (buyer-safe: title,category,category_tag,condition,list_price,

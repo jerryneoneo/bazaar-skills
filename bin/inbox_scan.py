@@ -86,6 +86,13 @@ _TS = re.compile(
 # lone-digit badge element. Fail-open to [] inside the page.
 CAROUSELL_ROW_ENUM_JS = r"""(() => {
   try {
+    // ABSTAIN off the inbox. buyer_peek's probe now matches any carousell tab (the count badge is
+    // global), but the conversation ROWS only exist on /inbox/ — on a listing/profile page the
+    // div[role="button"] rows are products, not chats, and their lone-number badges (price/qty) would
+    // read as bogus "unread". Returning a NON-LIST (not []) makes scan_market report found:False, so
+    // this market drops out of the PRECISE classifier and the caller falls back to the global count —
+    // which never strands a real unread (an empty-rows [] would instead assert "clear" and strand it).
+    if (!/\/inbox/.test(location.pathname)) return null;
     const rows = Array.from(document.querySelectorAll('div[role="button"]'))
       .filter(r => r.querySelector('img') && (r.textContent || '').trim().length > 6);
     return rows.slice(0, 40).map(r => {

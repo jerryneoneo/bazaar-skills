@@ -29,6 +29,15 @@ short acknowledgement** of what you're about to do, so the other side is never l
 waiting in silence. The ack must be **LLM-authored and contextual** to the moment, not a
 fixed/templated string. Then run the slow op and send the real answer.
 
+**Always respond before working — even on the control channel.** Open every command, question, or
+multi-step flow with this ack BEFORE you start the work; never go silent while you research,
+publish, or browse. A generic daemon/intent one-liner that may already have fired (e.g. "Let me
+take a look at those photos…") does **NOT** satisfy this: it is a cold-start bridge, not the
+flow's own acknowledgement, so send the substantive, task-scoped ack anyway (e.g. the listing
+photo ack in `skills/channel/listing.md` START). "Don't repeat a generic 'let me check' line"
+means don't send a SECOND generic one-liner — it never licenses skipping the real ack or going
+silent.
+
 Slow ops that require an ack first:
 - web/comps lookup and vision pricing (listing flow)
 - `bin/shipping.py` (delivery-fee calc)

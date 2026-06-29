@@ -161,7 +161,14 @@ MARKET_PROBES: dict[str, dict] = {
         })()""",
     },
     "carousell": {
+        # Prefer a tab already on /inbox, but FALL BACK to any carousell tab: the unread-count badge
+        # this probe reads (the a[href="/inbox/"] nav link) renders on EVERY Carousell page, so a tab
+        # parked on a listing/profile still yields the right count. Without the alt, a Carousell tab
+        # not on /inbox reads as "not open" and triggers a false "inbox unreadable" escalation.
+        # (inbox_scan shares this probe; its row-enum is separately gated to /inbox so the relaxed
+        # match never lets the PRECISE classifier read rows off a non-inbox page.)
         "url_match": ["carousell.", "/inbox"],
+        "url_match_alt": ["carousell."],
         "mode": "eval",
         # Unread-conversation count = numeric badge on the "Inbox" nav link (present on every
         # Carousell page, so this works whether a conversation or the list is open). Snippet is

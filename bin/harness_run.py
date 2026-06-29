@@ -96,9 +96,12 @@ BUYER_BROWSER = ("navigate", "navigate_back", "click", "type", "fill_form", "sel
 
 CHANNEL_PROMPT = """You are the Bazaar agent on the control channel, headless and unattended. Be
 RESPONSIVE — send a short progress message at each step; never go silent on a long task. The system
-ALREADY sent a one-line intent ack (e.g. 'Let me check your listings…') and a native 'typing…'
-indicator is showing — so do NOT repeat a 'let me check' line; go straight to the work and send
-PROGRESS + RESULTS as you go. Fire 'telegram.py typing' right before each message you send.
+may have already sent a GENERIC one-line intent ack (e.g. 'Let me check your listings…') and a
+native 'typing…' indicator is showing. That generic line does NOT replace a flow's own ack: still
+OPEN each command/flow with its short, contextual acknowledgement BEFORE any slow step (e.g. the
+listing photo ack), then send PROGRESS + RESULTS as you go. 'Don't repeat' means don't send a
+SECOND generic 'let me check' one-liner — it never means do the work in silence; always respond to
+the user before going off to work. Fire 'telegram.py typing' right before each message you send.
 
 Do ONE turn of the CONTROL CHANNEL phase (§1 of .claude/commands/bazaar-run.md) — BOTH sell and
 buy — then stop:
@@ -146,9 +149,17 @@ account-safety pacing. ONE step per pass so the bot stays responsive."""
 
 BUYER_PROMPT = """You are the Bazaar seller agent, running headless and unattended.
 
-FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to fold any crash orphans
-from a prior interrupted pass (a reply that landed on the marketplace but was never journaled). It is
-a cheap non-LLM call that never re-sends — it just heals the ledger and asks the seller to verify.
+FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any reply that a
+prior pass was INTERRUPTED on (the pass was killed — turn cap, restart — after recording the send but
+before journaling it; the reply may or may not have actually gone out). It is a cheap non-LLM call
+that never re-sends; it heals the ledger and returns JSON. If that JSON's `needs_verify` list is
+non-empty, those threads each have a recovered reply that MAY NOT HAVE SENT — before your normal
+sweep, for EACH such thread: open its live marketplace chat and check whether the recovered reply
+(the thread's last outbound row, marked `unconfirmed`) is actually the last message you sent there.
+If it IS present, it sent — do nothing (no resend). If it is MISSING, resend that exact text through
+the normal `journal_send.py intent` -> send -> `commit` bracket. Always re-read the chat before
+resending so you never post a duplicate. (This list is one-shot — reconcile won't re-surface it — so
+resolve it in THIS pass.)
 
 JOURNAL DISCIPLINE (hard rule): after EACH send you MUST call `python3 bin/journal_send.py commit`
 BEFORE doing anything else — never advance to the next message or thread with an un-committed send.
@@ -188,9 +199,14 @@ everything you have already sent via `python3 bin/journal_send.py commit` (per t
 rule above — never end a pass with an un-committed send), write your one-line summary, and STOP. The
 soft budget sits well below the hard cap so a clean stop almost always beats the cap. Partial
 progress is fine — every reply marks
-its thread read, so the next pass resumes where you left off. NEVER loop on a stuck step: if an inbox
-or thread won't open after ONE retry, escalate it over Telegram (skills/channel/notifications.md) and
-move on. Reserve your final turn for the summary and STOP as soon as the pass is complete."""
+its thread read, so the next pass resumes where you left off. NEVER loop on a stuck step. To OPEN a
+marketplace inbox, ALWAYS `navigate` to its inbox URL first — you drive a dedicated Chrome, so a
+marketplace tab not already being open is NORMAL: `navigate` opens it. A missing tab is NEVER an
+escalation and NEVER "inbox unreadable" — just navigate. Escalate over Telegram
+(skills/channel/notifications.md) ONLY when, AFTER navigating, the marketplace is logged-out /
+checkpoint / captcha (escalate "re-auth your <market>") or the inbox still won't render after
+ONE retry — then move on. Reserve your final turn for the summary and STOP as soon as the pass is
+complete."""
 
 MAINT_PROMPT = """You are the Bazaar agent doing cross-listing maintenance, headless and unattended.
 This is a BACKGROUND pass — do NOT poll the control channel or buyer inboxes for INBOUND messages
@@ -346,17 +362,6 @@ def _core_skills_block(mode: str) -> str | None:
     return "\n".join(parts) if parts else None
 
 
-def _seller_fast_step() -> str:
-    """awaiting_price/awaiting_floor are pure wizard turns → fast model + small turn cap so the next
-    question lands quickly. START/publish/anomaly stay on the strong model. Fail-open → ''."""
-    try:
-        s = json.loads((SELLER_DIR / "data" / "listing_session.json").read_text())
-    except (OSError, ValueError):
-        return ""
-    step = s.get("step", "") if s.get("active") else ""
-    return step if step in ("awaiting_price", "awaiting_floor") else ""
-
-
 def _scope_prefix(resource: str) -> str:
     """Phase-3 per-marketplace scoping. When the supervisor runs concurrent workers it scopes each
     to ONE marketplace; this prefix (in the uncached `-p` prompt, so the cached skills prefix stays
@@ -376,11 +381,12 @@ def _scope_prefix(resource: str) -> str:
 
 def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
     if mode in ("channel", "seller"):  # `seller` kept as the daemon-facing alias
+        # The combined awaiting_listing_inputs step writes the floor + item and runs the publish
+        # loop, so the channel pass always uses the strong default model + full turn budget. The old
+        # per-step fast/8-turn cap was REMOVED: it silently crashed when a seller over-answered a
+        # wizard step (e.g. giving price + floor together) — the reply landed with no response.
         model, max_turns = (None, None)
         tail_turns = channel_log.DEFAULT_MAX_TURNS if channel_log else 0
-        if _seller_fast_step():
-            model, max_turns = ("sonnet", 8)  # cheap wizard turn → fast + small cap
-            tail_turns = 6  # mid-wizard rarely needs deep history; spare the small turn cap
         # The recent-conversation tail goes in the (uncached) `-p` message ONLY — never in
         # system_prompt_append, which is the 1h-cached, byte-stable prefix. So a follow-up like
         # "do all tasks" resolves against what was just said, with ~zero cache impact.

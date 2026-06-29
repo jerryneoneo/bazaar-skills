@@ -568,8 +568,31 @@ def test_build_sell_index_only_active():
         check("sold NOT indexed", ("carousell", "wuzen22") not in idx)
 
 
+def test_carousell_row_enum_abstains_off_inbox():
+    print("carousell row-enum ABSTAINS off /inbox → scan_market found:False (caller uses the count):")
+    # The probe now matches any carousell tab (the count badge is global), but the conversation ROWS
+    # only exist on /inbox/. Off-inbox the JS returns a NON-LIST (null) so scan_market reports
+    # found:False — the market drops out of the PRECISE classifier and the caller falls back to the
+    # global count (an empty-rows [] would instead assert "clear" and could strand a real unread).
+    js = inbox_scan.CAROUSELL_ROW_ENUM_JS
+    check("row-enum JS gates on the /inbox pathname", "/\\/inbox/.test(location.pathname)" in js)
+    check("row-enum JS returns null (abstain) when off-inbox", "return null" in js)
+
+    saved = (inbox_scan.bp._find_tab, inbox_scan.bp.cdp_eval)
+    inbox_scan.bp._find_tab = lambda targets, probe: {"url": "https://www.carousell.sg/p/x-1/",
+                                                      "webSocketDebuggerUrl": "ws://x"}
+    inbox_scan.bp.cdp_eval = lambda ws, js: None  # JS abstained (off-inbox) → non-list
+    try:
+        out = inbox_scan.scan_market("carousell", [{"url": "https://www.carousell.sg/p/x-1/"}])
+        check("scan_market abstains (found False) on a non-list result", out["found"] is False)
+        check("no rows surfaced", out["rows"] == [])
+    finally:
+        inbox_scan.bp._find_tab, inbox_scan.bp.cdp_eval = saved
+
+
 if __name__ == "__main__":
     print("inbox_scan tests\n")
+    test_carousell_row_enum_abstains_off_inbox()
     test_is_fresh()
     test_is_fresh_tracked_snippet_change_overrides_read()
     test_normalize_snippet_key()
