@@ -59,6 +59,10 @@ request as the close point: go to **§3b Close** so the seller picks, send a che
 the chat over and arrange the meetup / payment / delivery themselves. Post the neutral holding
 line ("Let me sort the best way to get this to you, back shortly!"), and never agree to meet or
 transact offline yourself.
+*(Seller-side equivalent: when the **seller** volunteers offline terms over the control channel,
+that is them choosing "deal other ways" — it resolves the pending `close` to `manual` per
+`bazaar-run.md` §1 + `notifications.md` close → manual; it is never a new listing or a listing edit,
+and the volunteered address/payment is discarded, never stored.)*
 
 **availability** — two distinct shapes:
 - **"Still available?" / "in stock?" / "still for sale?"** (the classic opener): confirm warmly it's
