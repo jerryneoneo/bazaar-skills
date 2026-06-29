@@ -58,6 +58,7 @@ DEFAULT_STATE = {"adapter": "telegram", "chat_id": None, "update_offset": 0,
 # commands (/onboard, /start) are intentionally omitted to keep the menu clean.
 BOT_COMMANDS = [
     {"command": "status", "description": "What's live, open threads, and anything waiting on you"},
+    {"command": "catchup", "description": "Deep sweep every listing, inbox, and setup surface, then propose the work"},
     {"command": "list",   "description": "List a new item for sale"},
     {"command": "search", "description": "Find something to buy across your marketplaces"},
     {"command": "delist", "description": "Take down a live listing"},

@@ -55,6 +55,10 @@ is active at a time; guard before starting (never interrupt an in-flight wizard)
 ## Entry points
 - **`/bazaar-catchup`** (`.claude/commands/bazaar-catchup.md`) → start at **HEALTH**, `scope:"both"`.
   Forces an immediate full sweep of every enabled, logged-in marketplace now.
+- **`/catchup` on the control channel** (Telegram et al.) → the same start (HEALTH, `scope:"both"`).
+  The channel pass routes it (`bazaar-run.md` §1) and, because the sweep is turn-based, drives one
+  step per pass with the seller's mid-flow replies routed back via `bazaar-run.md` §0. Registered in
+  the Telegram "/" menu (`bin/telegram.py` `BOT_COMMANDS`).
 - It has **no autonomous cadence** of its own (decision: on-demand only). The daemon already sweeps one
   due market per pass via `bazaar-run.md` §2b; `/bazaar-catchup` is the manual "check all of it now".
   Wrap with `/loop` (e.g. `/loop /bazaar-catchup`) for a periodic digest if you want one.

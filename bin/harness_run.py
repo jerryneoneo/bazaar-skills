@@ -109,8 +109,9 @@ buy — then stop:
    pass (the daemon's deterministic drain normally handles the paused channel; if you are running,
    just acknowledge + stop). If NOT paused but there are pending corrections (applied:false), run
    skills/channel/corrections.md FIRST to apply them to durable state, then continue normal work.
-0. THEN read data/listing_session.json, data/distribution_session.json AND data/buy_session.json.
-   If ANY is active you are MID-FLOW: apply the user's latest reply to THAT session's current step.
+0. THEN read data/listing_session.json, data/distribution_session.json, data/buy_session.json AND
+   data/catchup_session.json. If ANY is active you are MID-FLOW: apply the user's latest reply to
+   THAT session's current step.
    NEVER re-ask which item/want it is — the session knows. Only treat a message as NEW when no
    session is active. If a RECENT CONTROL-CHANNEL CONVERSATION block is present below, READ it: it
    is what you and the user just said. A no-session message like 'do all', 'do all tasks', 'take
@@ -120,7 +121,9 @@ buy — then stop:
 1. run `python3 bin/telegram.py poll` (download photos with `bin/telegram.py getfile`).
 2. Route each event in order:
    - mid-flow reply → feed it to the active session (listing/distribution → listing.md /
-     distribution.md; buy → skills/buying/search.md or the buying answer handlers).
+     distribution.md; buy → skills/buying/search.md or the buying answer handlers; catchup →
+     skills/bazaar-catchup.md, applying the reply to catchup_session.json's current step — NEVER
+     re-sweep or re-ask what the digest already found).
    - FRESH message (no active session) → run the §1 FRESH-MESSAGE INTENT GATE, which now resolves a
      no-signal FOLLOW-UP (like 'do all'/'yes'/'the first one'/'take over all') against the RECENT
      CONTROL-CHANNEL CONVERSATION block instead of bouncing to 'let me check'. Otherwise classify
@@ -136,6 +139,11 @@ buy — then stop:
      /status → a summary (live items + open buyer threads; active wants + shortlists + open seller
      threads; escalations); if `bin/control.py status` shows paused, LEAD with "⏸ PAUSED since
      <since> (via <source>) — <N> correction(s) queued. Send /resume to continue." ;
+     /catchup (also /bazaar-catchup) → skills/bazaar-catchup.md, START at HEALTH with scope:"both":
+       a deep, read-only sweep of every listing + inbox + setup surface that reports ONE grouped
+       digest and proposes the work (acts on nothing during the sweep). It is turn-based/resumable in
+       data/catchup_session.json (one market or one question per pass), so ack the slow sweep first,
+       do ONE step, and let later passes continue it — the seller's reply routes back via step 0 ;
      /pause → `python3 bin/control.py pause --source telegram`, ack "⏸ Paused", take no further
        action this pass ; /resume → `python3 bin/control.py resume --source telegram`, then run
        skills/channel/corrections.md to apply pending corrections BEFORE resuming normal work.
@@ -214,7 +222,9 @@ This is a BACKGROUND pass — do NOT poll the control channel or buyer inboxes f
 notifications for work you finish this pass — a `say` is a one-way push (telegram.py send) that needs
 no polling, so 'quiet background pass' must NOT mean 'silently drop the success notice'. Do ONE step
 of bazaar-run.md §2b, then stop:
-0. If data/listing_session.json is active → do nothing (never interrupt an active listing); end.
+0. If data/listing_session.json OR data/catchup_session.json is active → do nothing (never interrupt
+   an active listing or an in-flight catch-up sweep — the catchup invariant is single-active-session);
+   end.
 1. Else if data/distribution_session.json is active → CONTINUE it per skills/channel/distribution.md:
    cross-list the session's current_item_id to its target market (ONE item this pass; honor
    max_actions_per_hour pacing + quiet_hours). Record a listing URL ONLY after bin/verify_listing_url.py

@@ -55,6 +55,13 @@ for e in events (in order):
                                  Send /resume to continue." then the usual summary.
                                 For the full deep sweep (every listing + marketplace + setup, with
                                 proposed work), point to /bazaar-catchup.
+                    /catchup -> skills/bazaar-catchup.md (also matches /bazaar-catchup and free-text
+                                "catch me up / what have I missed / sweep everything"): START at HEALTH
+                                with scope:"both". Deep, read-only sweep of every listing + inbox +
+                                setup surface; reports ONE grouped digest and PROPOSES the work, acting
+                                on nothing during the sweep. Turn-based/resumable in
+                                data/catchup_session.json (one market or one question per pass); ack the
+                                slow sweep first, do one step, let later passes continue it.
                     /pause   -> `python3 bin/control.py pause --source <adapter>`; ack "⏸ Paused…".
                                 The daemon holds all action passes and interrupts any running pass
                                 within ~one poll cadence; while paused, free-text you send is captured
@@ -137,7 +144,7 @@ for id, sel in seller_config.marketplaces.items() if sel.enabled:    # e.g. fb, 
 #     list), both off the hot loop. Cadence-gated: at most ONE due market per pass, cursor
 #     data/scan_state.json, cadence config.scan_interval_hours. Never interrupt an in-flight wizard.
 if no data/listing_session.json AND no data/distribution_session.json AND no data/buy_session.json
-   AND no data/inbox_detect_session.json is active:
+   AND no data/inbox_detect_session.json AND no data/catchup_session.json is active:
    d = python3 bin/inbox_detect.py due        # most-overdue market across the UNION of enabled sell+buy markets
    if d.due_market:
       m = d.due_market
