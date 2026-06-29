@@ -123,6 +123,14 @@ def test_stale_intent_folded_unconfirmed_cursor_advanced_notify_acked():
         notes = [json.loads(line) for line in chan.read_text().splitlines() if line.strip()]
         check("notify is a single record", len(notes) == 1)
         check("notify mentions verifying the recovered reply", "verify" in notes[0]["text"].lower())
+        # Fix 2 — the usual cause is a turn-cap continuation or a watchdog restart, not a crash, and
+        # the reply may never have sent: the wording must not over-alarm or assert it landed.
+        check("notify does NOT call it a crash", "crash" not in notes[0]["text"].lower())
+        check("folded row note reflects an interrupted (maybe-unsent) reply",
+              "interrupted" in rec[0].get("note", "").lower())
+        # Fix 3 — the thread is surfaced for active in-chat verification (the silent-drop guard).
+        check("summary lists the thread in needs_verify",
+              "fb:olaf-1" in summary.get("needs_verify", []))
 
 
 def test_reconcile_never_resends():

@@ -218,6 +218,15 @@ what crashed mid-pass and dropped the Olaf outbound. If you set additional field
 not cover (e.g. an `agent_note`), do that by re-reading and writing the file only AFTER `commit` has
 landed the send + cursor.
 
+**Recovered (`unconfirmed`) outbound rows.** When a pass is interrupted between `intent` and
+`commit`, `bin/journal_reconcile.py` folds the intended reply as an `unconfirmed:true` row, advances
+the cursor (so it is never blindly auto-resent), and returns the thread in its `needs_verify` list.
+The reply may or may not have actually sent. The buyer pass's FIRST STEP resolves these: open the
+live chat and, **only if the recovered reply is genuinely missing**, resend that exact text through
+the normal §5 bracket (which clears the split-brain by journaling a real outbound). If it is already
+present in the chat, do nothing — it sent. This closes the silent-drop hole without ever
+double-replying.
+
 ## 7. Proactive follow-up (when a buyer went quiet)
 Reactive replies above handle a buyer who wrote to us. The **follow-up** path handles a buyer who did
 NOT: when our last message goes unanswered, `bin/followup_state.py` schedules up to 2 gentle nudges

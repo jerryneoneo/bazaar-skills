@@ -22,8 +22,11 @@ For each intent that clears BOTH guards:
   1. Under atomic_io.locked(<threadfile>), fold the intended outbound into the thread file as an
      UNCONFIRMED row {"dir":"out","unconfirmed":true,"text":...,"ts":...,"note":"recovered after
      crash; verify it landed"}.
-  2. Advance the cursor past in_msg_id so the NEXT pass will not auto-resend.
-  3. Enqueue a bin/channel_outbox.py notify asking the seller to verify the reply actually sent.
+  2. Advance the cursor past in_msg_id so the NEXT pass will not blindly auto-resend, and return this
+     thread_id in the run's `needs_verify` list so the buyer pass actively re-checks the live chat and
+     re-sends ONLY if the recovered reply is genuinely missing (Fix 3 — closes the silent-drop hole
+     when the interruption landed BEFORE the send).
+  3. Enqueue a bin/channel_outbox.py notify telling the seller the reply may not have completed.
   4. Ack the intent (drain it from the outbox).
 
 It NEVER re-sends to the marketplace — it only journals + asks the human to verify. Fail-open
@@ -31,7 +34,8 @@ everywhere: a reconcile error must never break the caller (the daemon / the BUYE
 step), so a bad record is skipped and the run still exits 0 with a JSON summary.
 
 CLI:  python3 journal_reconcile.py [--grace-sec N]   (default GRACE_SEC=600)
-Output (stdout, JSON):  {"reconciled": <n>, "skipped": <n>, "errors": <n>}
+Output (stdout, JSON):  {"reconciled": <n>, "skipped": <n>, "errors": <n>, "needs_verify": [<thread_id>...]}
+(`needs_verify` lists the threads the next buyer pass must re-check in-chat and resend if missing.)
 """
 
 from __future__ import annotations
@@ -57,7 +61,12 @@ import thread_outbox  # noqa: E402
 # comfortably above that, so a normal in-flight pacing wait is NEVER mistaken for a crash orphan,
 # while a true crash orphan (pending forever) is still folded once it ages past the floor.
 GRACE_SEC = 600
-RECOVERED_NOTE = "recovered after crash; verify it landed"
+# The folded row's note + the channel notify deliberately avoid the word "crash": the usual cause is a
+# routine turn-cap continuation or a watchdog restart, NOT a crash, and the interruption can land
+# BEFORE the browser send (so the reply may never have gone out) — "interrupted / may not have
+# completed" is honest for all of those. The silent-drop guard (Fix 3) is carried by the `needs_verify`
+# thread_ids this run returns, which the buyer pass acts on immediately (see reconcile()'s docstring).
+RECOVERED_NOTE = "recovered after an interrupted pass; may not have completed — verify it sent in-chat"
 
 # MAX_INTENT_AGE_SEC: the hard age ceiling past which an intent is folded even if its market still
 # holds a LIVE lease. The live-lease guard alone would skip a real crash orphan FOREVER on a market
@@ -140,6 +149,13 @@ def _fold_unconfirmed(thread: dict, *, intent_id: str, in_msg_id: str, out_text:
     new_thread["transcript"] = transcript
     if in_msg_id:
         new_thread["cursor"] = {"last_handled_msg_id": in_msg_id, "last_handled_ts": now_iso}
+    # The cursor IS advanced (idempotency: a reply that actually landed must not be auto-resent). The
+    # silent-drop guard (Fix 3) for the case where the reply NEVER sent is NOT a persistent thread
+    # status — it is the `needs_verify` thread_id this run returns in its summary. The buyer pass runs
+    # this reconcile as its FIRST STEP, then immediately re-reads the live chat for each needs_verify
+    # thread and resends only if the recovered reply is genuinely missing. That signal is naturally
+    # one-shot (the intent is acked/drained here, so a later reconcile never re-emits it), so there is
+    # no lingering status to clear; the channel notify below is the human-visible backstop.
     new_thread["updated_at"] = now_iso
     return new_thread
 
@@ -147,8 +163,9 @@ def _fold_unconfirmed(thread: dict, *, intent_id: str, in_msg_id: str, out_text:
 def _notify_verify(thread_id: str) -> None:
     """Enqueue a control-channel notify asking the seller to verify the recovered reply landed.
     Fail-open: a notify failure must not abort the reconcile of this (or any other) orphan."""
-    text = (f"Recovered an in-flight reply on {thread_id} after a crash — please verify it actually "
-            f"sent.")
+    text = (f"A reply on {thread_id} was interrupted before it finished sending, so it may not have "
+            f"gone through. I'll re-check that chat on the next pass and resend if it's missing — "
+            f"feel free to verify it landed too.")
     try:
         subprocess.run(
             [sys.executable, str(Path(__file__).resolve().parent / "channel_outbox.py"),
@@ -227,9 +244,11 @@ def reconcile(grace_sec: float = GRACE_SEC) -> dict:
     try:
         stale = thread_outbox.peek(older_than_sec=grace_sec)["pending"]
     except (OSError, ValueError):
-        return {"reconciled": 0, "skipped": 0, "errors": 0}  # unreadable outbox → fail-open no-op
+        # unreadable outbox → fail-open no-op
+        return {"reconciled": 0, "skipped": 0, "errors": 0, "needs_verify": []}
     now = datetime.now(timezone.utc)
     reconciled = skipped = errors = 0
+    needs_verify: list[str] = []  # thread_ids the next buyer pass must re-check in-chat (Fix 3)
     for intent in stale:
         too_old = _intent_age_sec(intent, now) > MAX_INTENT_AGE_SEC
         if not too_old and _market_has_live_lease(intent.get("market")):
@@ -238,11 +257,15 @@ def reconcile(grace_sec: float = GRACE_SEC) -> dict:
         outcome = _reconcile_one(intent)
         if outcome == "reconciled":
             reconciled += 1
+            tid = intent.get("thread_id")
+            if tid and tid not in needs_verify:
+                needs_verify.append(tid)
         elif outcome == "skipped":   # already committed — drained without a fold/notify
             skipped += 1
         else:
             errors += 1
-    return {"reconciled": reconciled, "skipped": skipped, "errors": errors}
+    return {"reconciled": reconciled, "skipped": skipped, "errors": errors,
+            "needs_verify": needs_verify}
 
 
 def main(argv: list[str]) -> int:

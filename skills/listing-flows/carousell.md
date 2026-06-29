@@ -68,7 +68,11 @@ The **buyer-message** read path (distinct from "Read my listings"). Documented f
 but pinning the recipe keeps the buyer pass from silently failing if the DOM shifts.
 
 1. `navigate("https://<host>/inbox/")` — the Carousell Inbox (chat list); the unread count is the
-   nav badge the peek probe reads.
+   nav badge the peek probe reads. You drive a dedicated Chrome, so a Carousell tab not already being
+   open is NORMAL — this `navigate` OPENS one. A missing tab is NOT a failure and NOT "inbox
+   unreadable"; never escalate or tell the seller to open Chrome for it. Escalate ONLY if, after
+   navigating, Carousell is logged-out/checkpoint (→ "re-auth your Carousell") or the inbox still
+   won't render after one retry.
 2. `read_inbox()` → `[{thread_id, buyer_handle, item_hint, unread, last_snippet}]`. Namespace
    `thread_id` as **`carousell:<id>`** (the conversation/chat URL id if exposed, else a stable
    `buyer_handle + item_hint` key).

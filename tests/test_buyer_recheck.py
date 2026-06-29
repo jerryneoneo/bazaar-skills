@@ -180,8 +180,28 @@ def test_fb_scan_failure_keeps_count_fallback():
         restore()
 
 
+def test_carousell_non_inbox_tab_flagged_by_count():
+    print("carousell tab open on a non-inbox page → relaxed count reads the global badge, precise"
+          " abstains → still flagged unhandled (no false 'inbox unreadable'):")
+    # The relaxed probe now finds the off-inbox carousell tab and reads the global unread badge
+    # (count=2); the precise classifier abstains off /inbox (carousell absent from the signal), so the
+    # conservative count fallback flags it. Previously the probe found no tab (found:False) and the
+    # pass escalated "tab not open" instead of just reading the count / navigating.
+    restore = _patch(["carousell"], {"carousell": {"found": True, "count": 2, "snippet": "still avail?"}})
+    unpatch = _patch_precise({})  # carousell abstained off /inbox → absent from precise
+    try:
+        out = buyer_recheck.recheck()
+        check("carousell not 'unknown' (the tab WAS found via the alt)",
+              out["markets"]["carousell"]["unknown"] is False)
+        check("carousell flagged unhandled by the global count", out["markets"]["carousell"]["unhandled"] is True)
+        check("total unhandled 1", out["unhandled"] == 1)
+    finally:
+        unpatch(); restore()
+
+
 if __name__ == "__main__":
     print("buyer_recheck tests\n")
+    test_carousell_non_inbox_tab_flagged_by_count()
     test_clear_inboxes_zero_unhandled()
     test_unread_market_flagged()
     test_unreadable_market_conservative()

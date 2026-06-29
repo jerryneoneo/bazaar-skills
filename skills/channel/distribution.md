@@ -74,7 +74,8 @@ fine — scanning is not on the hot loop.
 
 ## IMPORT — bring one unmanaged listing under management (per queue entry)
 Pop the next `queue` entry with `decision == null`. Floor is **mandatory** (negotiation can't run
-without it), so this reuses `listing.md`'s `awaiting_floor` / `awaiting_size` sub-steps verbatim.
+without it), so this mirrors `listing.md`'s floor-write recipe (now folded into its
+`awaiting_listing_inputs` step) and asks the size as its own step below.
 ```
 ask (distribution gate) "📥 Found “<title>” (<price>) on <market> that I'm not managing.
      Manage it (I'll watch its chats + negotiate) and cross-list it elsewhere?"
@@ -96,7 +97,7 @@ ask "🔒 Your lowest acceptable price for “<title>”? PRIVATE, never shown t
                                                                   → step=awaiting_floor
 return
 ```
-### awaiting_floor → (number)  [reuses listing.md awaiting_floor]
+### awaiting_floor → (number)  [mirrors listing.md's floor write in awaiting_listing_inputs]
 ```
 write data/floors/<item_id>.json { item_id, list_price, floor, auto_counter_step,
                                    auto_counter_rounds, currency }   # FLOOR goes ONLY here
