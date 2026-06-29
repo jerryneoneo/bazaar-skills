@@ -457,6 +457,15 @@ def test_runner_refuses_unverified_harness():
     check("codex runtime refused with exit 3", refused)
 
 
+def test_no_pause_line_narration():
+    print("regression: PAUSE_LINE removed — no 'holding here' narration in any background pass prompt"
+          " (the unbounded duplicate-ack source; pause is enforced by the hook + preemption + drain):")
+    check("harness_run no longer defines PAUSE_LINE", not hasattr(harness_run, "PAUSE_LINE"))
+    for mode in ("buyer", "buy", "maint"):
+        prompt = harness_run.build_spec(mode).prompt
+        check(f"{mode} prompt carries no 'holding here' narration", "holding here" not in prompt.lower())
+
+
 if __name__ == "__main__":
     test_seller_argv()
     test_channel_argv()
@@ -475,6 +484,7 @@ if __name__ == "__main__":
     test_resource_scoping()
     test_daemon_pass_env_marker()
     test_no_secret_in_argv()
+    test_no_pause_line_narration()
     test_codex_stub()
     test_runner_refuses_unverified_harness()
     print()
