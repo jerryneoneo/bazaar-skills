@@ -26,7 +26,7 @@ Inputs: the item record `data/items/<item_id>.json` (buyer-safe) + its photo pat
 6. `type("description", item.description)` — honest, ship-P2P / delivery-quoted wording. **No meetup
    / local-pickup phrasing.**
 7. `type("price", item.list_price)` — use **Buy It Now / fixed price** (not auction); the negotiation
-   layer is Bazaar's, not eBay Best Offer. Leave Best Offer **off**.
+   layer is SELLY's, not eBay Best Offer. Leave Best Offer **off**.
    **Currency:** the price field / its currency selector must read `seller_config.currency` (SG site →
    SGD, not the global USD default). If eBay shows a currency dropdown next to price, `click` it and
    select `seller_config.currency`; `read` it back to confirm. If the regional site won't offer the
@@ -56,8 +56,8 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
 ## Guardrails
 - Logged-out / checkpoint / 2FA / captcha → **stop and escalate** ("re-auth your eBay"), no tight
   retry loop (account safety, `browser-actions.md`).
-- Never enable auction or eBay Best Offer — all haggling flows through Bazaar's negotiation engine.
+- Never enable auction or eBay Best Offer — all haggling flows through SELLY's negotiation engine.
 - **Currency:** list only in `seller_config.currency` (regional site → regional currency, e.g. SG →
   SGD). If it can't be set, escalate — never publish a price in the wrong currency (step 7).
-- Publish gating follows `config.approvals.steps.publish` (see `skills/bazaar-config.md`).
+- Publish gating follows `config.approvals.steps.publish` (see `skills/selly-config.md`).
 - `--dry-run`: log each verb above instead of executing.

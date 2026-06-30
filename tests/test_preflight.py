@@ -38,7 +38,7 @@ def test_platform_resolves():
     print("platform module:")
     plat = get_platform()
     check("has a name", bool(plat.name))
-    check("runtime_dir is a path", str(plat.runtime_dir()).endswith("bazaar-skills"))
+    check("runtime_dir is a path", str(plat.runtime_dir()).endswith("selly-agent"))
     hints = plat.path_hints()
     check("path_hints covers python3", "python3" in hints)
     check("supervisor kind set", plat.supervisor_kind() in ("launchd", "task-scheduler"))

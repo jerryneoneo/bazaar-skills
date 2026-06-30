@@ -8,7 +8,7 @@ happening (the daemon also fires an instant "👀 on it" ack before each pass).
 > Talks to the user via `channel.md` verbs; drives marketplaces via `browser-actions.md` (search,
 > read rows); the secret max budget goes via `bin/budget_gate.py` (written here, read only there).
 > Requires onboarding done (`data/buyer_config.json`). **Approvals** (`config.approvals.steps`, see
-> `skills/bazaar-config.md`): `buy_search` gates running a search (`auto` runs it, `confirm` confirms
+> `skills/selly-config.md`): `buy_search` gates running a search (`auto` runs it, `confirm` confirms
 > the parsed query/filters first); `above_budget` gates pursuing a listing priced above the secret max
 > (hard-floored to `confirm`/`escalate`, never `auto`). Eligible platforms are filtered by region (at
 > onboarding) and the want's category (here) per `skills/marketplaces.md`.
@@ -33,12 +33,12 @@ working copy of the item).
   "candidates":[ /* normalized candidate rows, see below */ ],
   "shortlist":["carousell:1444964225"], "chosen":["carousell:1444964225"],
   "thread_ids":["carousell:1444964225"],
-  "status":"liaising", "source":"bazaar", "created_at":"<iso>" }
+  "status":"liaising", "source":"selly", "created_at":"<iso>" }
 ```
 `status` ∈ `searching | shortlisted | liaising | agreed | bought | abandoned`. **No `max_budget`
 field — ever.** The ceiling lives only in `data/budgets/<want_id>.json`.
 
-> **`source`:** `"bazaar"` for a want created here via `/search`; `"imported"` for one created (or
+> **`source`:** `"selly"` for a want created here via `/search`; `"imported"` for one created (or
 > linked) by `skills/inbox-detect.md` when the user takes over chats they started by hand. An imported
 > want skips the search steps — it is seeded straight into `liaising` with pre-filled `thread_ids` and
 > a budget the takeover flow asks for. This want file stays the single source of truth either way.
@@ -62,7 +62,7 @@ message arrives with no active session, START — whether it is plain text ("I w
 for …", "find me …", "under $X") OR a photo with a buy-intent caption (a snapshot of an item the
 user says they want). When a photo is present, use it as visual context to parse the want (model,
 colour, condition); the photo is NOT a listing. Otherwise ignore (not a search). The control-channel
-intent gate (bazaar-run.md §1) guarantees only ONE of search.md / listing.md starts on any fresh
+intent gate (selly-run.md §1) guarantees only ONE of search.md / listing.md starts on any fresh
 message.
 
 ### START → understand (free-text want, no active session)
@@ -142,7 +142,7 @@ want.status = "liaising"
 say "Great, I'll reach out on <markets of chosen> and negotiate within your range. I'll ping you the
      moment a deal lands."   # voice.md ack; hands-free — the next ping is the struck deal
 # HANDOFF: the liaison engine (skills/buying/liaison-pipeline.md) opens each thread, makes the
-#   opening offer via bin/buyer_negotiate.py, and /bazaar-run's buy side polls these threads for
+#   opening offer via bin/buyer_negotiate.py, and /selly-run's buy side polls these threads for
 #   seller replies. Discovery is done.
 session.active=false (step=liaising)
 ```

@@ -1,20 +1,20 @@
 ---
-description: Bazaar — settings & capabilities menu (view/change interface, marketplaces, autonomy)
+description: SELLY — settings & capabilities menu (view/change interface, marketplaces, autonomy)
 ---
 
-# /bazaar — settings menu
+# /selly — settings menu
 
-The home menu: shows what Bazaar can do and your current setup, and lets you change any of it. It is
+The home menu: shows what SELLY can do and your current setup, and lets you change any of it. It is
 a thin router that **re-enters the onboarding anchor sections** (one source of truth per step) — it
 never duplicates their logic. Works on any adapter and any harness.
 
 Read first: `skills/channel/intro.md` (capabilities body), `skills/channel/onboarding.md` (anchors),
-`skills/channel/adapters.md`, `skills/marketplaces.md`, `skills/bazaar-config.md`.
+`skills/channel/adapters.md`, `skills/marketplaces.md`, `skills/selly-config.md`.
 
 ## Flow
 
 ```
-say  the CAPABILITIES body from skills/channel/intro.md (what Bazaar does)
+say  the CAPABILITIES body from skills/channel/intro.md (what SELLY does)
 
 # Current settings — read from config + seller_config + buyer_config + the registries (read-shims).
 load seller_config.json, buyer_config.json, config.json, data/marketplaces.json
@@ -52,10 +52,10 @@ ask  "What would you like to change?"
   pause        -> if NOT paused: run .claude/commands/pause.md (stop the agent so you can correct it).
                   if paused: run .claude/commands/resume.md (apply queued corrections, then continue).
   speed        -> goto skills/channel/onboarding.md#WAKE_SPEED   # Instant (notifications) vs Standard (poll)
-  catchup      -> run .claude/commands/bazaar-catchup.md (deep sweep of every listing, marketplace, and
+  catchup      -> run .claude/commands/selly-catchup.md (deep sweep of every listing, marketplace, and
                   setup surface; reports what's not attended to and proposes the work).
   health       -> run `python3 bin/healthcheck.py` (read-only: CDP, marketplace logins, daemon); report results.
-  reinstall    -> run .claude/commands/bazaar-install.md
+  reinstall    -> run .claude/commands/selly-install.md
   done/close   -> say "All set."
 loop back to the menu after a change (so several things can be tweaked in one sitting).
 ```
@@ -67,5 +67,5 @@ loop back to the menu after a change (so several things can be tweaked in one si
   uninstall → rewrite `seller_config.channel` → reinstall (the same dance `DAEMON.md` mandates for
   `/sell`); the `CHOOSE_INTERFACE` anchor handles this.
 - **Autonomy** changes write `config.approvals` *and* regenerate the harness permission layer via
-  `bin/install.py gen-settings --autonomy <level>` (both layers, per `skills/bazaar-config.md`).
+  `bin/install.py gen-settings --autonomy <level>` (both layers, per `skills/selly-config.md`).
 - Read-only by default: nothing changes until the user picks a branch and completes its sub-flow.

@@ -1,7 +1,7 @@
 # Migrations
 
-Idempotent upgrade steps run by `setup` (and `/bazaar-upgrade`) when a migration's version is newer
-than `~/.bazaar/.last-setup-version`. Mirrors gstack's migration runner.
+Idempotent upgrade steps run by `setup` (and `/selly-upgrade`) when a migration's version is newer
+than `~/.selly/.last-setup-version`. Mirrors gstack's migration runner.
 
 ## Convention
 
@@ -9,8 +9,8 @@ than `~/.bazaar/.last-setup-version`. Mirrors gstack's migration runner.
 - Each script MUST be **idempotent** (safe to run more than once) and **fail-open** where possible —
   a migration error should warn, not abort the whole setup.
 - `setup` runs every `v*.sh` whose version is `> last-setup-version`, in ascending version order,
-  then stamps `~/.bazaar/.last-setup-version` with the current `VERSION`.
-- Scripts run with the runtime dir as CWD and receive `BAZAAR_HOME` in the environment.
+  then stamps `~/.selly/.last-setup-version` with the current `VERSION`.
+- Scripts run with the runtime dir as CWD and receive `SELLY_HOME` in the environment.
 
 ## When to add one
 

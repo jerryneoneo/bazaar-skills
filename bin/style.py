@@ -8,9 +8,9 @@ derives the deterministic negotiation knobs read by bin/negotiate.py.
 Two concerns, one small domain module (mirrors floor_gate.py / budget_gate.py — cohesive, testable):
 
   • PROFILE  data/style.json  — voice + negotiation.sell_firmness + learning mode (committed default).
-  • LEARNING data/style_proposals.jsonl — append-only proposals from /pause corrections and /bazaar-eval
+  • LEARNING data/style_proposals.jsonl — append-only proposals from /pause corrections and /selly-eval
             tone findings. Nothing here ever rewrites the profile silently; the user applies a proposal
-            via `/bazaar -> style` (or `style.py apply`). `learning` ('off'|'suggest'|'auto') is the gate.
+            via `/selly -> style` (or `style.py apply`). `learning` ('off'|'suggest'|'auto') is the gate.
 
 Invariants live in skills/style.md (never leak floor/budget, never claim human, never em-dash, cheeky
 not abusive). This module only stores/validates/derives — it composes nothing.

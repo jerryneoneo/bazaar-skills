@@ -4,7 +4,7 @@ Two related, post-listing capabilities, one skill (they share the trigger points
 `bin/distribution.py` set logic, and the cross-list mechanism — they differ only in which set
 they act on):
 
-- **Detect & manage** — find listings the seller created **outside** Bazaar on a connected
+- **Detect & manage** — find listings the seller created **outside** SELLY on a connected
   marketplace, and bring them under management (import → ask floor + size → watched + negotiated)
   and cross-list them to the seller's other enabled marketplaces.
 - **Recommend** — suggest marketplaces the seller has NOT enabled but that suit an item
@@ -14,7 +14,7 @@ they act on):
 > per-site `skills/listing-flows/<market>.md` recipes; uses `bin/distribution.py` for the
 > deterministic "where can this item live" sets. Requires onboarding done.
 > **Approval:** every offer here reads `config.approvals.steps.distribution`
-> (`skills/bazaar-config.md`): `auto` acts on obvious candidates, `confirm` asks first (the
+> (`skills/selly-config.md`): `auto` acts on obvious candidates, `confirm` asks first (the
 > `balanced` default), `escalate` surfaces and parks. Cross-list publishing still honors
 > `approvals.steps.publish`; setup login still uses `confirm()` like onboarding.
 
@@ -37,9 +37,9 @@ This is turn-based and resumable, exactly like `listing.md`: one step per pass, 
 
 ## Entry points
 - **`/sell-detect`** (`.claude/commands/sell-detect.md`) → start **SCAN** across **all** enabled markets.
-- **autonomous cadence** (from `bazaar-run.md` §2b) → start **SCAN** for the **one** market that
+- **autonomous cadence** (from `selly-run.md` §2b) → start **SCAN** for the **one** market that
   `bin/scan_state.py due` reports overdue (cursor: `data/scan_state.json`, cadence
-  `config.scan_interval_hours`). This is how listings made **outside** Bazaar get detected without the
+  `config.scan_interval_hours`). This is how listings made **outside** SELLY get detected without the
   seller having to run `/sell-detect`; the loop scans one due market per pass and stamps it.
 - **post-publish** (from `listing.md` after an item goes live) → start **DISTRIBUTE** for that one
   item (recommend + cross-list). It does **not** trigger SCAN — detection is owned by the cadence above.
@@ -51,8 +51,8 @@ This is turn-based and resumable, exactly like `listing.md`: one step per pass, 
 
 ---
 
-## SCAN — find listings Bazaar isn't managing
-Scope: `/sell-detect` scans **all** enabled markets; the autonomous cadence (`bazaar-run.md` §2b)
+## SCAN — find listings SELLY isn't managing
+Scope: `/sell-detect` scans **all** enabled markets; the autonomous cadence (`selly-run.md` §2b)
 passes a **single** `market` — scan only that one. `markets = [market]` when scoped, else every
 enabled id.
 ```

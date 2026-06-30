@@ -17,7 +17,7 @@ Transcript: data/channel_transcript.jsonl, one JSON object per line:
         (enumerated-tasks|asked-question|sent-result|progress|escalation|intent); else null.
 
 Secrets never reach this file by construction (floors/budgets/addresses never enter message
-text — see .claude/commands/bazaar-run.md §Secrets). _scrub() is a belt-and-braces net that
+text — see .claude/commands/selly-run.md §Secrets). _scrub() is a belt-and-braces net that
 redacts any exact floor/budget value or address string that somehow slips through.
 
 Importable (telegram.py logs through it) and runnable for inspection:

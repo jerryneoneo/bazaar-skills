@@ -111,7 +111,7 @@ def test_concurrent_acquire_single_winner():
     print("INVARIANT: concurrent acquires of one resource → exactly one winner:")
     n = 12
     with tempfile.TemporaryDirectory() as d:
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "lease.py"), "acquire",
                 "--resource", "market:carousell", "--mode", "buyer",
                 "--ttl", str(TTL), "--now", NOW.isoformat()]
@@ -129,7 +129,7 @@ def test_concurrent_acquire_single_winner():
 def test_cli_roundtrip():
     print("CLI acquire → status → release:")
     with tempfile.TemporaryDirectory() as d:
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "lease.py")]
         common = ["--now", NOW.isoformat()]
         acq = subprocess.run(base + ["acquire", "--resource", "channel", "--holder", "S1"] + common,

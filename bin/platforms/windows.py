@@ -2,7 +2,7 @@
 
 Scope: "Mac now, Windows designed-for." The interactive flow works today; this module gives Windows
 a REAL always-on story (Task Scheduler `ONLOGON` jobs for the daemon + warm Chrome) behind the same
-Platform interface, so callers (install.py, preflight.py, bazaar-install.md) are unchanged.
+Platform interface, so callers (install.py, preflight.py, selly-install.md) are unchanged.
 
 Remaining Windows-specific work, flagged honestly (not silently missing):
   • bin/agent_daemon.py shells out to `run_pass.sh` (bash). Windows needs a `run_pass.ps1` (or Git
@@ -19,15 +19,15 @@ from pathlib import Path
 
 from .base import Platform
 
-DAEMON_TASK = "BazaarSkillsAgent"
-CHROME_TASK = "BazaarSkillsChrome"
+DAEMON_TASK = "SELLYSkillsAgent"
+CHROME_TASK = "SELLYSkillsChrome"
 
 
 class WindowsPlatform(Platform):
     name = "windows"
 
     def runtime_dir(self) -> Path:
-        return Path.home() / "bazaar-skills"  # no TCC on Windows; home root is fine
+        return Path.home() / "selly-agent"  # no TCC on Windows; home root is fine
 
     def is_tcc_blocked(self, path: Path) -> bool:
         return False  # Windows has no equivalent privacy gate on these folders

@@ -1,22 +1,24 @@
 ```
-██████╗  █████╗ ███████╗ █████╗  █████╗ ██████╗
-██╔══██╗██╔══██╗╚══███╔╝██╔══██╗██╔══██╗██╔══██╗
-██████╔╝███████║  ███╔╝ ███████║███████║██████╔╝
-██╔══██╗██╔══██║ ███╔╝  ██╔══██║██╔══██║██╔══██╗
-██████╔╝██║  ██║███████╗██║  ██║██║  ██║██║  ██║
-╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
-   s k i l l s · your personal P2P marketplace agent
+  ▟██▙     ▟██▙    ███████╗███████╗██╗     ██╗     ██╗   ██╗
+ ▟█████████████▙   ██╔════╝██╔════╝██║     ██║     ╚██╗ ██╔╝
+▐████  ███  ████▌  ███████╗█████╗  ██║     ██║      ╚████╔╝ 
+▐███████▄███████▌  ╚════██║██╔══╝  ██║     ██║       ╚██╔╝  
+ ▜█████████████▛   ███████║███████╗███████╗███████╗   ██║   
+   ▀▀▀▀▀▀▀▀▀▀▀     ╚══════╝╚══════╝╚══════╝╚══════╝   ╚═╝   
+                   your personal P2P marketplace agent
 ```
 
-# Bazaar Skills
+# SELLY
 
-_An open-source project by [Carousell](https://carousell.com)._
+_Sells Everything Local, Liaises for You — an open-source project by [Carousell](https://carousell.com)._
 
-**A personal agent that sells _and_ buys for you across informal P2P marketplaces — running inside your own Claude Code session, driving your real logged-in Chrome.**
+**A local agent wrapped around a tested money core.**
+
+A personal agent that sells _and_ buys for you across informal P2P marketplaces — running inside your own Claude Code session, driving your real logged-in Chrome.
 
 You chat with it on Telegram or the console. It lists your items on the marketplaces that fit your region, replies to buyers and sellers in a natural voice, and negotiates within limits you set — your lowest sell price and highest buy budget stay secret. Everything ships **P2P**, so every deal has one clear total: price + delivery.
 
-### Supported today (`v0.2.0`)
+### Supported today (`v0.3.0`)
 
 | | Now | On the roadmap |
 |---|---|---|
@@ -31,19 +33,19 @@ The architecture is channel-, OS-, harness-, and model-agnostic by design (adapt
 ## Quickstart
 
 ```bash
-git clone https://github.com/jerryneoneo/bazaar-skills.git ~/bazaar-skills && cd ~/bazaar-skills && ./setup
+git clone https://github.com/jerryneoneo/selly-agent.git ~/selly-agent && cd ~/selly-agent && ./setup
 ```
 
-`./setup` is an **idempotent installer**: it checks prerequisites, gates on Claude Code being signed in, installs global slash-command launchers (so `/bazaar`, `/sell`, `/buy` work from any project), **sets up the permissions that let the agent run autonomously without per-tool prompts**, and — on first run only — hands off to a guided, conversational onboarding. Re-run it any time (e.g. after `git pull`); it refreshes launchers, config, and permissions, then runs migrations.
+`./setup` is an **idempotent installer**: it checks prerequisites, gates on Claude Code being signed in, installs global slash-command launchers (so `/selly`, `/sell`, `/buy` work from any project), **sets up the permissions that let the agent run autonomously without per-tool prompts**, and — on first run only — hands off to a guided, conversational onboarding. Re-run it any time (e.g. after `git pull`); it refreshes launchers, config, and permissions, then runs migrations.
 
-> **Install location matters on macOS:** keep the runtime outside `~/Documents`, `~/Desktop`, and `~/Downloads` — macOS privacy (TCC) blocks background processes from reading those. `~/bazaar-skills` is the safe default, and `./setup` refuses a blocked path.
+> **Install location matters on macOS:** keep the runtime outside `~/Documents`, `~/Desktop`, and `~/Downloads` — macOS privacy (TCC) blocks background processes from reading those. `~/selly-agent` is the safe default, and `./setup` refuses a blocked path.
 
 Onboarding then walks you through: pick your **interface** (Telegram or console) → choose **marketplaces** for your region and log in (in your own Chrome — the agent never logs in for you) → set your **autonomy** level → optionally enable **buying**. When it finishes:
 
 - **Sell:** send `/sell-list` with a few photos. Vision IDs the item, pulls comps, drafts the listing; you set a public price and a **private floor**; it publishes to your enabled marketplaces and answers buyers from there.
 - **Buy:** send `/buy-search` and what you want. It searches your marketplaces, shortlists the best matches, then negotiates within your secret budget and coordinates the handover.
-- **Check in anytime:** run **`/bazaar-catchup`** for a full sweep of your listings, marketplaces, and setup — it reports everything waiting on you (unread buyers, decisions, drafts, logged-out marketplaces) and offers to handle each.
-- **Anything later:** open the **`/bazaar`** menu to change your interface, marketplaces, buying, autonomy, or persona.
+- **Check in anytime:** run **`/selly-catchup`** for a full sweep of your listings, marketplaces, and setup — it reports everything waiting on you (unread buyers, decisions, drafts, logged-out marketplaces) and offers to handle each.
+- **Anything later:** open the **`/selly`** menu to change your interface, marketplaces, buying, autonomy, or persona.
 
 ---
 
@@ -64,12 +66,21 @@ On macOS, `./setup` offers to install missing **Node** and **Google Chrome** for
 
 ## How it works
 
-Bazaar is an **agent** with two parts: a harness-agnostic **skill bundle** — the declarative selling/buying policy in [`skills/`](skills/) and `.claude/commands/` that the model reads and executes — driven by a resilient local **runtime** in [`bin/`](bin/): a single-flight launchd daemon with leasing, pacing, crash-safe journaling, and a watchdog that turns those playbooks into a worker that runs itself. (Claude Code is the swappable *harness* it runs inside — not what it is; see the support table above.)
+**SELLY** — **Sells Everything Local, Liaises for You** — is a local **agent** wrapped around a tested money core: **a declarative skill bundle the model executes, driven by an always-on runtime, with a deterministic core that owns every secret.** Three deliberately simple parts:
 
-The skill bundle itself is three layers, deliberately simple:
+- **Skill bundle** — the declarative selling/buying policy in [`skills/`](skills/) and `.claude/commands/` that the model reads and executes.
+- **Runtime** — a resilient local worker in [`bin/`](bin/): a single-flight launchd daemon with leasing, pacing, crash-safe journaling, and a watchdog that turns those playbooks into a worker that runs itself.
+- **Money core** — plain, tested Python that owns every secret (`bin/floor_gate.py`, `bin/shipping.py`); the only logic allowed to touch your floor or address.
+
+(Claude Code is the swappable *harness* it runs inside — not what it is; see the support table above.)
+
+The **skill bundle** is two layers:
 
 - **Channel** — how you talk to the agent. Adapter-agnostic flows (`skills/channel/*.md`) are written against a small set of abstract verbs, so Telegram and the console behave identically (and new channels drop in the same way).
 - **Browser** — how it acts on marketplaces. A shared action vocabulary (`skills/browser-actions.md`) plus per-site recipes (`skills/listing-flows/*.md`) drive your real Chrome session, so the agent acts as you with your existing logins.
+
+The **money core** is where the secrets stay:
+
 - **Deterministic money code** — the only logic that touches secrets is plain, tested Python with JSON in/out: `bin/floor_gate.py` (accept/counter/reject against your hidden floor) and `bin/shipping.py` (delivery fee + buyer total from your zone table). **Your floor and exact address never enter a prompt, reply, listing, or transcript** — buyers only ever see a delivery *fee*.
 
 You choose how hands-off it is. Onboarding sets an autonomy preset — `hands-free`, `balanced`, or `all-steps` — wiring both the business approval gates *and* the harness permission layer together, so an unattended run isn't blocked by per-tool prompts. An above-list or bidding close **always** asks you first.
@@ -88,7 +99,7 @@ For the full system design (the layers, the deterministic engines, the trust inv
 
 ### Listing to carousell.ai — distribution
 
-Alongside the marketplaces you post to by hand, Bazaar can publish your item to **carousell.ai**, a GEO-optimized, agent-discoverable storefront.
+Alongside the marketplaces you post to by hand, SELLY can publish your item to **carousell.ai**, a GEO-optimized, agent-discoverable storefront.
 
 - **More reach, faster sale** — your listing is found by buyers *and* buyer agents browsing carousell.ai, not just the few sites you cross-list to manually.
 - **One canonical page** that the agent keeps in sync as price and status change.
@@ -115,21 +126,21 @@ At close, the recommended path is a **carousell.ai checkout link** instead of ar
 
 ## Skills
 
-Bazaar is a suite of Claude Code slash-command skills. After install they work from any project.
+SELLY is a suite of Claude Code slash-command skills. After install they work from any project.
 
 **Setup & control**
 | Skill | What it does |
 |---|---|
-| `/bazaar` | Settings & capabilities menu — view/change interface, marketplaces, buying, autonomy, persona; check what needs you (`/bazaar-catchup`) or run a health check |
-| `/bazaar-install` | Guided onboarding (Stage 2; the installer hands off here on first run) |
-| `/bazaar-upgrade` | Update to the latest version (git pull → re-run setup → restart daemon) |
+| `/selly` | Settings & capabilities menu — view/change interface, marketplaces, buying, autonomy, persona; check what needs you (`/selly-catchup`) or run a health check |
+| `/selly-install` | Guided onboarding (Stage 2; the installer hands off here on first run) |
+| `/selly-upgrade` | Update to the latest version (git pull → re-run setup → restart daemon) |
 | `/pause` | Pause the agent mid-flight (stop acting; queue corrections) |
 | `/resume` | Resume the agent, applying any corrections left while paused |
 
 **Agent loops**
 | Skill | What it does |
 |---|---|
-| `/bazaar-run` | The unified agent loop — control channel + sell inboxes + buy threads in one pass |
+| `/selly-run` | The unified agent loop — control channel + sell inboxes + buy threads in one pass |
 | `/sell-run` | Seller-scoped loop (channel + buyer inboxes) |
 | `/buy-run` | Buyer-scoped loop (channel + seller-reply threads) |
 | `/sell-watch` | Buyer-side inbox watch loop across marketplaces |
@@ -152,9 +163,9 @@ Bazaar is a suite of Claude Code slash-command skills. After install they work f
 **Cross-cutting**
 | Skill | What it does |
 |---|---|
-| `/bazaar-catchup` | Deep sweep of every listing, marketplace, and setup surface — reports what needs you and proposes the work (acts on nothing itself) |
+| `/selly-catchup` | Deep sweep of every listing, marketplace, and setup surface — reports what needs you and proposes the work (acts on nothing itself) |
 | `/inbox-detect` | Review every marketplace inbox and offer to take over chats you started on your own |
-| `/bazaar-eval` | Evaluate recent conversations & passes, surface UX/behavior issues to fix |
+| `/selly-eval` | Evaluate recent conversations & passes, surface UX/behavior issues to fix |
 
 Under the hood these are backed by a library of skill modules in [`skills/`](skills/) — channel flows (`channel/`), browser actions, the reply/liaison negotiation pipelines, per-marketplace listing recipes (`listing-flows/`), the marketplace registry, and the voice/persona rules.
 
@@ -163,7 +174,7 @@ Under the hood these are backed by a library of skill modules in [`skills/`](ski
 ## Running it
 
 - **Always-on (recommended, macOS):** a launchd daemon wakes on a schedule and runs background passes (poll inboxes, reply, negotiate) with no session open. See **[DAEMON.md](DAEMON.md)** for day-to-day operations.
-- **Interactive:** keep a `/bazaar-run` session open (`/sell-run` or `/buy-run` for one side only). It runs the same loop in-session and acts while the session is alive.
+- **Interactive:** keep a `/selly-run` session open (`/sell-run` or `/buy-run` for one side only). It runs the same loop in-session and acts while the session is alive.
 
 Full manual runbook — every prerequisite, secret, and gotcha — is in **[SETUP.md](SETUP.md)**.
 
@@ -185,7 +196,7 @@ Full manual runbook — every prerequisite, secret, and gotcha — is in **[SETU
 python3 tests/test_floor_gate.py   # floor never leaks; a counter is always >= floor
 python3 tests/test_shipping.py     # buyer_total = price + fee; unserviceable -> decline; no address leak
 python3 tests/test_telegram.py     # keyboard/normalize/single-tenant; token safety
-python3 tests/test_triage.py       # the /bazaar-catchup sweep aggregates pending tasks; never reads a floor/budget
+python3 tests/test_triage.py       # the /selly-catchup sweep aggregates pending tasks; never reads a floor/budget
 ```
 
 Check the install is actually runnable any time — Chrome/CDP, marketplace logins, daemon (read-only, no secrets):

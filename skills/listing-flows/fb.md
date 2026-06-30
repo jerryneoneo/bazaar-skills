@@ -62,7 +62,7 @@ where `url` is each item's permalink (`/marketplace/item/<id>/`) — the dedupe 
 against managed items' `listing_urls`. Read-only; never edits or re-lists here.
 Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). `--dry-run` → log only.
 
-## Read buyer inbox recipe (called by `.claude/commands/sell-watch.md` / `bazaar-run.md` §2)
+## Read buyer inbox recipe (called by `.claude/commands/sell-watch.md` / `selly-run.md` §2)
 This is the **buyer-message** read path — distinct from "Read my listings" above. Without it the
 buyer pass calls `navigate(fb inbox)` with nowhere to go and silently fails, so unread FB buyer
 enquiries pile up (the cheap `bin/buyer_peek.py` probe sees the unread badge but the pass can't act).
@@ -133,5 +133,5 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
 - Logged-out / checkpoint / captcha → **stop and escalate** ("re-auth your FB"), do not retry
   in a loop (account safety, `browser-actions.md`).
 - Publish gating follows `config.approvals.steps.publish` (auto → `click("publish")`; confirm →
-  `confirm()` the rendered preview first). See `skills/bazaar-config.md`.
+  `confirm()` the rendered preview first). See `skills/selly-config.md`.
 - `--dry-run`: log each verb above instead of executing.

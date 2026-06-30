@@ -1,39 +1,39 @@
 #!/usr/bin/env bash
-# setup — Bazaar's idempotent, re-runnable installer (gstack-style ergonomics).
+# setup — SELLY's idempotent, re-runnable installer (gstack-style ergonomics).
 #
 # The one-paste install:
-#   git clone https://github.com/jerryneoneo/bazaar-skills.git ~/bazaar-skills && cd ~/bazaar-skills && ./setup
+#   git clone https://github.com/jerryneoneo/selly-agent.git ~/selly-agent && cd ~/selly-agent && ./setup
 #
 # Run it again any time (e.g. after `git pull`) — it's idempotent: it refreshes the global
 # launchers + config and runs any pending migrations, and only walks you through the conversational
 # onboarding on the FIRST run (when no data/seller_config.json exists yet).
 #
 # What it does, in order:
-#   1. prereqs + macOS TCC gate            5. global launchers (so /sell, /bazaar work anywhere)
+#   1. prereqs + macOS TCC gate            5. global launchers (so /sell, /selly work anywhere)
 #   2. pick the harness (Claude Code)      6. migrations + version stamp
 #   3. sign-in gate                        7. first run -> guided onboarding; re-run -> refresh + exit
-#   4. record home/host in ~/.bazaar
+#   4. record home/host in ~/.selly
 #
 # Flags (all optional; smart defaults so it never blocks in CI):
 #   --host <claude|claude-code|codex>   pick the harness (default: menu on a TTY, else claude-code)
 #   --autonomy <hands-free|balanced|all-steps>   record the autonomy preset (default: balanced)
 #   --no-install                        don't auto-install missing deps (Node/Chrome) via Homebrew
-#   --prefix | --no-prefix              prefix global launcher names with 'bazaar-' (default: no)
+#   --prefix | --no-prefix              prefix global launcher names with 'selly-' (default: no)
 #   --team | --no-team                  reserved for shared-repo auto-update (default: off)
 #   --yes                               non-interactive; take defaults, never prompt
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SELF_DIR"
-HANDOFF_PROMPT="follow .claude/commands/bazaar-install.md to set me up"
+HANDOFF_PROMPT="follow .claude/commands/selly-install.md to set me up"
 
-say()  { printf '\033[1;36mBazaar:\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mBazaar:\033[0m %s\n' "$*" >&2; exit 1; }
+say()  { printf '\033[1;36mSELLY:\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mSELLY:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31mSELLY:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 # Are we running inside an agent (Claude Code / Codex) rather than a person at a terminal? Such a
 # context has /dev/tty but no human to answer it: reads block, and an exec'd nested agent is invisible.
-in_agent()       { [ -n "${CLAUDECODE:-}" ] || [ -n "${AI_AGENT:-}" ] || [ -n "${BAZAAR_DAEMON_PASS:-}" ]; }
+in_agent()       { [ -n "${CLAUDECODE:-}" ] || [ -n "${AI_AGENT:-}" ] || [ -n "${SELLY_DAEMON_PASS:-}" ]; }
 can_attach_tty() { [ -t 0 ] && [ -t 1 ] && [ -e /dev/tty ] && ! in_agent; }   # a REAL interactive terminal
 
 # --- dependency auto-install helpers (macOS / Homebrew) --------------------------------------
@@ -46,7 +46,7 @@ brew_bin() {
 confirm_yes() {  # confirm_yes "question" -> 0 yes / 1 no; auto-yes with --yes; no real terminal -> no
   [ "$ASSUME_YES" = 1 ] && return 0
   can_attach_tty || return 1
-  printf '\033[1;36mBazaar:\033[0m %s [Y/n] ' "$1" >/dev/tty
+  printf '\033[1;36mSELLY:\033[0m %s [Y/n] ' "$1" >/dev/tty
   local ans=""; read -r ans </dev/tty || return 1
   case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
@@ -77,7 +77,7 @@ while [ $# -gt 0 ]; do
     *)            die "unknown flag: $1 (try --help)" ;;
   esac
 done
-[ -n "${BAZAAR_AGENT:-}" ] && [ -z "$HOST" ] && HOST="$BAZAAR_AGENT"  # back-compat env override
+[ -n "${SELLY_AGENT:-}" ] && [ -z "$HOST" ] && HOST="$SELLY_AGENT"  # back-compat env override
 
 # --- 1. OS + prereqs -------------------------------------------------------------------------
 case "$(uname -s)" in
@@ -109,8 +109,20 @@ if [ "$OS" = macos ]; then
   case "$SELF_DIR" in
     "$HOME/Documents"/*|"$HOME/Desktop"/*|"$HOME/Downloads"/*)
       die "This checkout is under a macOS privacy-protected folder ($SELF_DIR).
-       Move it somewhere like ~/bazaar-skills (launchd can't read ~/Documents) and re-run ./setup." ;;
+       Move it somewhere like ~/selly-agent (launchd can't read ~/Documents) and re-run ./setup." ;;
   esac
+fi
+
+# --- rebrand v0.3.0: migrate legacy ~/.bazaar -> ~/.selly (one-time, idempotent) -------------
+# Bazaar is now SELLY. Move the config dir BEFORE any selly-config read below so the user's
+# host/autonomy/prefix and update state survive the rename without re-onboarding. The launchd
+# labels, stale launchers, and runtime source tags are handled by migrations/v0.3.0.sh (step 6).
+if [ -d "$HOME/.bazaar" ] && [ ! -d "$HOME/.selly" ]; then
+  say "Bazaar is now SELLY — migrating ~/.bazaar -> ~/.selly…"
+  mv "$HOME/.bazaar" "$HOME/.selly" || warn "could not move ~/.bazaar (continuing)."
+  for pf in "$HOME/.selly/home" "$HOME/.selly/config.json"; do
+    [ -f "$pf" ] && sed -i.bak 's|bazaar-skills|selly-agent|g' "$pf" 2>/dev/null && rm -f "$pf.bak"
+  done
 fi
 
 # --- 2. pick the harness ---------------------------------------------------------------------
@@ -125,14 +137,14 @@ if [ -n "$HOST" ]; then
   [ -n "$HARNESS" ] || die "--host must be claude|claude-code|codex (got '$HOST')."
 elif [ "$ASSUME_YES" = 1 ] || ! can_attach_tty; then
   # No real terminal to answer the menu (CI, piped, or inside an agent) -> don't stall on /dev/tty.
-  HARNESS="$(python3 bin/bazaar-config get host 2>/dev/null || true)"
+  HARNESS="$(python3 bin/selly-config get host 2>/dev/null || true)"
   [ -n "$HARNESS" ] || HARNESS="claude-code"   # only verified runtime → safe non-interactive default
 else
   while :; do
     printf '\n'; say "Which agent runtime do you want to use?"
     printf '  1) Claude Code   %s  (supported today)\n' "$(present_label claude)"
     printf '  2) Codex         %s  (install/config only — runtime coming later)\n' "$(present_label codex)"
-    printf '\033[1;36mBazaar:\033[0m Enter 1 or 2 [default 1, 10s]: '
+    printf '\033[1;36mSELLY:\033[0m Enter 1 or 2 [default 1, 10s]: '
     choice=""; read -r -t 10 choice </dev/tty || true
     case "${choice:-1}" in
       1|"") HARNESS=claude-code ;;
@@ -167,21 +179,21 @@ done
 say "$AGENT is signed in."
 
 # --- 4. record home/host -------------------------------------------------------------------
-python3 bin/bazaar-config set home "$SELF_DIR"        >/dev/null
-python3 bin/bazaar-config set host "$HARNESS"         >/dev/null
-python3 bin/bazaar-config set autonomy "$AUTONOMY"    >/dev/null
-[ "$PREFIX" = 1 ] && python3 bin/bazaar-config set prefix true >/dev/null || python3 bin/bazaar-config set prefix false >/dev/null
-[ -n "$TEAM" ] && python3 bin/bazaar-config set team_mode "$([ "$TEAM" = 1 ] && echo true || echo false)" >/dev/null
+python3 bin/selly-config set home "$SELF_DIR"        >/dev/null
+python3 bin/selly-config set host "$HARNESS"         >/dev/null
+python3 bin/selly-config set autonomy "$AUTONOMY"    >/dev/null
+[ "$PREFIX" = 1 ] && python3 bin/selly-config set prefix true >/dev/null || python3 bin/selly-config set prefix false >/dev/null
+[ -n "$TEAM" ] && python3 bin/selly-config set team_mode "$([ "$TEAM" = 1 ] && echo true || echo false)" >/dev/null
 
 # --- 5. MCP config (no secrets) + autonomous-run permissions + global launchers --------------
 python3 bin/install.py gen-mcp --harness "$HARNESS" --dest "$SELF_DIR" >/dev/null || warn "gen-mcp failed (continuing)."
 # Ensure the harness permission allow-list for autonomous (unattended) runs is present. This is
 # idempotent and MERGES — it preserves any channel token already in settings.local.json. Without
-# it, an interactive /bazaar-run prompts on every tool. (The daemon's headless passes pass the same
-# tools via --allowedTools; the business-approval layer is set in onboarding / the /bazaar menu.)
+# it, an interactive /selly-run prompts on every tool. (The daemon's headless passes pass the same
+# tools via --allowedTools; the business-approval layer is set in onboarding / the /selly menu.)
 python3 bin/install.py gen-settings --harness "$HARNESS" --autonomy "$AUTONOMY" --dest "$SELF_DIR" >/dev/null \
   && say "Autonomous-run permissions ensured (autonomy: $AUTONOMY)." \
-  || warn "gen-settings failed (continuing) — set permissions later via /bazaar → autonomy."
+  || warn "gen-settings failed (continuing) — set permissions later via /selly → autonomy."
 PREFIX_FLAG=""; [ "$PREFIX" = 1 ] && PREFIX_FLAG="--prefix"
 LAUNCH_JSON="$(python3 bin/install.py gen-launchers --harness "$HARNESS" --dest "$SELF_DIR" $PREFIX_FLAG)" \
   && say "Installed global launchers → $(python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["skills_dir"])' <<<"$LAUNCH_JSON")" \
@@ -189,26 +201,26 @@ LAUNCH_JSON="$(python3 bin/install.py gen-launchers --harness "$HARNESS" --dest 
 
 # --- 6. migrations + version stamp -----------------------------------------------------------
 VER="$(cat "$SELF_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
-LAST="$(cat "$HOME/.bazaar/.last-setup-version" 2>/dev/null || echo "")"
+LAST="$(cat "$HOME/.selly/.last-setup-version" 2>/dev/null || echo "")"
 version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
 if [ -d "$SELF_DIR/migrations" ]; then
   for f in $(ls "$SELF_DIR"/migrations/v*.sh 2>/dev/null | sort -V); do
     mver="$(basename "$f" .sh)"; mver="${mver#v}"
     if [ -z "$LAST" ] || version_gt "$mver" "$LAST"; then
-      say "running migration $mver"; BAZAAR_HOME="$SELF_DIR" bash "$f" || warn "migration $mver failed (continuing)."
+      say "running migration $mver"; SELLY_HOME="$SELF_DIR" bash "$f" || warn "migration $mver failed (continuing)."
     fi
   done
 fi
-mkdir -p "$HOME/.bazaar"; printf '%s\n' "$VER" > "$HOME/.bazaar/.last-setup-version"
+mkdir -p "$HOME/.selly"; printf '%s\n' "$VER" > "$HOME/.selly/.last-setup-version"
 
 # --- 7. first run -> onboarding; re-run -> refresh + exit -------------------------------------
 if [ -f "$SELF_DIR/data/seller_config.json" ]; then
-  say "Bazaar v$VER refreshed (launchers + config). Already onboarded."
+  say "SELLY v$VER refreshed (launchers + config). Already onboarded."
   python3 bin/healthcheck.py 2>/dev/null || true   # report runnable state (read-only, no secrets)
-  say "  • change settings:  /bazaar      • update later:  /bazaar-upgrade"
+  say "  • change settings:  /selly      • update later:  /selly-upgrade"
   exit 0
 fi
-export BAZAAR_HARNESS="$HARNESS"
+export SELLY_HARNESS="$HARNESS"
 if can_attach_tty; then
   say "First-time setup — handing off to $AGENT for guided onboarding…"
   exec "$AGENT" "$HANDOFF_PROMPT"        # bare terminal: replace this process with the onboarding session
@@ -216,8 +228,8 @@ fi
 # Inside an agent / non-TTY: an exec'd nested session has no attachable TTY and would be invisible — the
 # onboarding the user expects never appears. Emit an explicit directive the calling agent (or user)
 # follows, then exit cleanly. The next session also self-heals (bin/hooks/onboarding_notice.py).
-say "Bazaar v$VER is installed (launchers, config, migrations done) — onboarding isn't finished yet."
+say "SELLY v$VER is installed (launchers, config, migrations done) — onboarding isn't finished yet."
 say "NEXT: $HANDOFF_PROMPT"
-say "  • In this Claude session: run /bazaar-install  (or just say: set me up)."
+say "  • In this Claude session: run /selly-install  (or just say: set me up)."
 say "  • In a plain terminal:     $AGENT \"$HANDOFF_PROMPT\""
 exit 0

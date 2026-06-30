@@ -3,7 +3,7 @@
 
     python3 tests/test_update_notice_hook.py
 
-Runs the hook as a real subprocess against a seeded, isolated BAZAAR_CONFIG_DIR (a fresh cached
+Runs the hook as a real subprocess against a seeded, isolated SELLY_CONFIG_DIR (a fresh cached
 update_check result, so no git/network is touched). Verifies: no-op for daemon passes, emits
 additionalContext when an update is available, stays silent with no update / a dismissed version.
 """
@@ -44,13 +44,13 @@ def _seed(cfg_dir, *, update_available, latest="9.9.9", declined_latest=None):
 
 
 def _run_hook(cfg_dir, *, daemon=False, data_dir=None):
-    env = {**os.environ, "BAZAAR_CONFIG_DIR": str(cfg_dir)}
+    env = {**os.environ, "SELLY_CONFIG_DIR": str(cfg_dir)}
     if data_dir is not None:
-        env["BAZAAR_DATA_DIR"] = str(data_dir)
+        env["SELLY_DATA_DIR"] = str(data_dir)
     if daemon:
-        env["BAZAAR_DAEMON_PASS"] = "1"
+        env["SELLY_DAEMON_PASS"] = "1"
     else:
-        env.pop("BAZAAR_DAEMON_PASS", None)
+        env.pop("SELLY_DAEMON_PASS", None)
     return subprocess.run([sys.executable, str(HOOK)],
                           input='{"hook_event_name":"SessionStart","source":"startup"}',
                           capture_output=True, text=True, env=env, timeout=30)
@@ -78,7 +78,7 @@ def test_emits_when_update_available():
         ctx = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
         check("hookEventName is SessionStart",
               payload.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart")
-        check("note offers /bazaar-upgrade", "/bazaar-upgrade" in ctx)
+        check("note offers /selly-upgrade", "/selly-upgrade" in ctx)
         check("note carries the version delta", "9.9.9" in ctx and "0.2.0" in ctx)
 
 

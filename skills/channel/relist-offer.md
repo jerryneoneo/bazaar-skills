@@ -8,7 +8,7 @@ then drops a short positive note on the control channel so the seller sees the a
 `skills/listing-flows/<market>.md` ("Relist offer recipe"); this skill is the shared decision +
 guardrail + notice.
 
-Triggered from the sell pass (`.claude/commands/bazaar-run.md` §2) when a platform relist offer is
+Triggered from the sell pass (`.claude/commands/selly-run.md` §2) when a platform relist offer is
 pending for an enabled market. Detection is deterministic: `bin/inbox_scan.py` flags
 `platform_offers[<market>]` when a fresh `carousell_assistant` (or other `ASSISTANT_HANDLES`) row
 matches a relist/renew/bump intent (`RELIST_OFFER_RE`). Other promo from the assistant is ignored.
@@ -46,7 +46,7 @@ relist control / confirmation and returns one of:
 **Only `free` proceeds.** `paid` and `unknown` → **skip silently** (step 5).
 
 ## 4. Free → take it (gated, paced, stamped)
-Read `mode = config.approvals.steps.free_relist` (default `auto`; see `skills/bazaar-config.md`):
+Read `mode = config.approvals.steps.free_relist` (default `auto`; see `skills/selly-config.md`):
 - `auto` → act. `confirm` → `confirm()` the one-line preview first, proceed only on yes.
   (`escalate` is not a meaningful value here — a free action never needs a money escalation; treat
   it as `confirm`.)
@@ -66,7 +66,7 @@ After the pass, if one or more listings were relisted for free, send **one** war
 the seller likes knowing the agent is actively working. Batch them into a single line; **never**
 message when nothing was relisted (no "I checked and skipped a paid one" noise).
 
-- When `$BAZAAR_RESOURCE` is set (you are one of several per-marketplace workers), **enqueue** it so
+- When `$SELLY_RESOURCE` is set (you are one of several per-marketplace workers), **enqueue** it so
   the supervisor is the single writer:
   `python3 bin/channel_outbox.py enqueue --kind notify --text "<notice>"`.
 - Otherwise send directly via `skills/channel/notifications.md` `notify`.

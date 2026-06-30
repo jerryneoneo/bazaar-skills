@@ -66,7 +66,7 @@ def _write_outputs(findings, candidates, report_text):
 def _render_report(findings, candidates, corpus, now) -> str:
     by_sev = {s: [f for f in findings if f.severity == s] for s in SEVERITIES}
     lines = [
-        "# Bazaar evaluation report", "",
+        "# SELLY evaluation report", "",
         f"- generated: {now.isoformat()}",
         f"- passes in scope: {len(corpus.pass_records)} · channel turns: {len(corpus.channel_turns)}",
         "- findings: " + ", ".join(f"{s}={len(by_sev[s])}" for s in SEVERITIES),
@@ -128,7 +128,7 @@ def cmd_run(args) -> int:
 
     # Learning loop (opt-in): tone/voice findings become reviewable style proposals. Fail-open and
     # gated by data/style.json `learning` (style.record_proposal skips when it is "off"). The user
-    # reviews + applies these via `/bazaar -> style`; nothing rewrites the persona silently here.
+    # reviews + applies these via `/selly -> style`; nothing rewrites the persona silently here.
     style_proposals = 0
     try:
         import style  # local bin/ module

@@ -6,7 +6,7 @@
 Focus: the deterministic DETECT core. The clock is the last buyer inbound (anchor fallback only when
 a buyer never wrote); eligibility excludes draft / live-but-unpublished (owned by triage); the warn
 ledger dedups the proactive ping. Suggestion composition is the MAINT LLM pass's job, not tested
-here. State isolated per test via tmp dirs / BAZAAR_DATA_DIR.
+here. State isolated per test via tmp dirs / SELLY_DATA_DIR.
 """
 
 import json
@@ -217,11 +217,11 @@ def test_run_start_writes_session():
 # ---- CLI smoke -------------------------------------------------------------
 
 def test_cli():
-    print("CLI: due/list/mark exit codes + JSON via BAZAAR_DATA_DIR:")
+    print("CLI: due/list/mark exit codes + JSON via SELLY_DATA_DIR:")
     with tempfile.TemporaryDirectory() as tmp:
         _write_json(tmp, "config.json", {"listing_health_enabled": True})
         _write_json(tmp, "items/silent.json", _item("silent", published_at=_ago(30)))
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         exe = [sys.executable, str(ROOT / "bin" / "listing_health.py")]
         p = subprocess.run(exe + ["due", "--now", NOW.isoformat()], capture_output=True, text=True, env=env)
         check("due exit 0", p.returncode == 0)

@@ -35,7 +35,7 @@ Same flow files run unchanged on Telegram, the Claude Code console, or Slack.
 
 Read `seller_config.json → channel.adapter`. Bind the verbs to that adapter for the whole run.
 **Discovery & binding** (which adapters the seller already has, and how to connect a fresh one) is
-the "probe & bind" contract in `skills/channel/adapters.md`; it runs only at onboarding / `/bazaar`,
+the "probe & bind" contract in `skills/channel/adapters.md`; it runs only at onboarding / `/selly`,
 never in the hot loop. The four adapters today: `console`, `telegram`, `imessage`, `whatsapp`.
 
 ### Telegram adapter (`bin/telegram.py`) — the first adapter

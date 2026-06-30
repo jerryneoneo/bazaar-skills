@@ -2,7 +2,7 @@
 """daemon_conflict.py — warn an interactive run when the always-on daemon would fight it.
 
 Telegram (and WhatsApp) are SINGLE-CONSUMER: getUpdates with an offset ACKs older updates, so a
-loaded daemon AND a hand-run /sell-run / /buy-run / /bazaar-run polling the same bot steal each
+loaded daemon AND a hand-run /sell-run / /buy-run / /selly-run polling the same bot steal each
 other's messages. This is the cheap, read-only pre-check the interactive loop runs at session start
 to catch that before it silently drops the seller's messages.
 
@@ -24,13 +24,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-AGENT_LABEL = "com.bazaarskills.agent"
+AGENT_LABEL = "com.selly.agent"
 # Remote channels with a single shared cursor/offset — two consumers steal each other's updates.
 SINGLE_CONSUMER = {"telegram", "whatsapp"}
 
 
 def _data_dir() -> Path:
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
 
 

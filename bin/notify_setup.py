@@ -6,7 +6,7 @@ Instant mode = wake the agent from OS push notifications instead of polling. It 
   2. Chrome notification permission for the push-capable markets (Meta: Facebook / Instagram), so
      those sites actually post OS notifications.
 
-This helper is used by the WAKE_SPEED onboarding step and `/bazaar -> speed`:
+This helper is used by the WAKE_SPEED onboarding step and `/selly -> speed`:
   status      -> {fda, python, instant_ready, markets:{...}}  (read-only detection)
   open-fda    -> open the System Settings Full Disk Access pane (the user toggles it; TCC can't be
                  granted programmatically)

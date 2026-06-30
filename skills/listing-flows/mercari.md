@@ -43,6 +43,6 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
 ## Guardrails
 - Logged-out / checkpoint / phone-verify → **stop and escalate** ("re-auth your Mercari"), no
   tight-loop retries.
-- Leave Smart Pricing / auto-offers **off** — pricing & negotiation are Bazaar's job.
-- Publish gating follows `config.approvals.steps.publish` (see `skills/bazaar-config.md`).
+- Leave Smart Pricing / auto-offers **off** — pricing & negotiation are SELLY's job.
+- Publish gating follows `config.approvals.steps.publish` (see `skills/selly-config.md`).
 - `--dry-run`: log each verb instead of executing.

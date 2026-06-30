@@ -1,14 +1,14 @@
 ---
-description: Bazaar Skills — the unified agent loop (channel + sell inboxes + buy threads)
+description: SELLY Skills — the unified agent loop (channel + sell inboxes + buy threads)
 ---
 
-# /bazaar-run — the one main loop
+# /selly-run — the one main loop
 
 One semi-attended loop that runs the whole agent. It watches the **control channel** (per
 `channel.adapter` — Telegram / iMessage / WhatsApp / console) for setup/listing/buying/decisions, and
 each pass it sweeps **both sides**: the **sell side** (buyer inboxes on every enabled marketplace) and
 the **buy side** (seller-reply threads for every want being pursued). Keep a session open (Claude Code
-or Codex); wrap with `/loop` for periodic polling (e.g. `/loop /bazaar-run`). Resumable and idempotent
+or Codex); wrap with `/loop` for periodic polling (e.g. `/loop /selly-run`). Resumable and idempotent
 on every side.
 
 Read first: `skills/channel/channel.md`, `skills/channel/notifications.md`, `skills/reply-pipeline.md`,
@@ -22,7 +22,7 @@ Load `data/config.json` (`approvals`, pacing). Load whichever side configs exist
 (sell side) and/or `data/buyer_config.json` (buy side). Bind the channel verbs to the shared
 `channel.adapter` (from either config — onboarding writes them consistently; any of `console`,
 `telegram`, `imessage`, `whatsapp` — see `skills/channel/adapters.md`). Apply the back-compat read-shims
-(`marketplaces` array→object in `skills/marketplaces.md`; `approvals`-absent in `skills/bazaar-config.md`).
+(`marketplaces` array→object in `skills/marketplaces.md`; `approvals`-absent in `skills/selly-config.md`).
 If **neither** side config exists → run `skills/channel/intro.md` (which leads into onboarding) and return.
 
 **Single-consumer guard (at session start):** run `python3 bin/daemon_conflict.py`. If it reports
@@ -54,8 +54,8 @@ for e in events (in order):
                                 "⏸ PAUSED since <since> (via <source>) — <N> correction(s) queued.
                                  Send /resume to continue." then the usual summary.
                                 For the full deep sweep (every listing + marketplace + setup, with
-                                proposed work), point to /bazaar-catchup.
-                    /catchup -> skills/bazaar-catchup.md (also matches /bazaar-catchup and free-text
+                                proposed work), point to /selly-catchup.
+                    /catchup -> skills/selly-catchup.md (also matches /selly-catchup and free-text
                                 "catch me up / what have I missed / sweep everything"): START at HEALTH
                                 with scope:"both". Deep, read-only sweep of every listing + inbox +
                                 setup surface; reports ONE grouped digest and PROPOSES the work, acting
@@ -258,7 +258,7 @@ channel cmds handled, per-market buyers handled/escalated, per-want sellers hand
 - `/sell-detect` — jump into distribution. `/sell-resolve` — console fallback for sell escalations.
 - `/inbox-detect` — sweep every inbox now, offer to take over chats the user started solo (both sides).
   `/buy-detect` — the same, buy-scoped (purchase chats only).
-- `/bazaar-catchup` — deep read-only sweep of every listing, marketplace, and setup surface; reports
+- `/selly-catchup` — deep read-only sweep of every listing, marketplace, and setup surface; reports
   one digest of what's not attended to and proposes the work (no acting during the sweep).
 
 Honor `--dry-run`: browser actions and channel sends are **logged**, not executed.

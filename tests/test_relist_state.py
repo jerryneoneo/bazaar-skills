@@ -5,8 +5,8 @@
 
 Focus: the deterministic cooldown decision + the atomic stamp. due() is True before any relist,
 False within `relist_cooldown_days`, True after it lapses; per-market keys are independent; a
-cooldown of 0 disables the gate; the CLI exits cleanly and round-trips via BAZAAR_DATA_DIR.
-State isolated per test via tmp dirs / BAZAAR_DATA_DIR.
+cooldown of 0 disables the gate; the CLI exits cleanly and round-trips via SELLY_DATA_DIR.
+State isolated per test via tmp dirs / SELLY_DATA_DIR.
 """
 
 import json
@@ -118,10 +118,10 @@ def test_run_due_default_cooldown_when_absent():
 # ---- CLI smoke -------------------------------------------------------------
 
 def test_cli():
-    print("CLI: due/mark exit codes + JSON via BAZAAR_DATA_DIR:")
+    print("CLI: due/mark exit codes + JSON via SELLY_DATA_DIR:")
     with tempfile.TemporaryDirectory() as tmp:
         _write_json(tmp, "config.json", {"relist_cooldown_days": 1})
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         exe = [sys.executable, str(ROOT / "bin" / "relist_state.py")]
         d = subprocess.run(exe + ["due", "--item", "abc", "--market", "carousell", "--now", NOW.isoformat()],
                            capture_output=True, text=True, env=env)

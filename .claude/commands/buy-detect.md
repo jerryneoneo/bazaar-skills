@@ -23,5 +23,5 @@ Notes:
   but only buyer-initiated threads are offered.
 - The offer to step in is gated by `config.approvals.steps.takeover` (a hard floor: `confirm` default,
   never `auto`). Honors `--dry-run`.
-- `/bazaar-run` (§2b) already sweeps inboxes on a cadence; `/buy-detect` forces an immediate buy-side
+- `/selly-run` (§2b) already sweeps inboxes on a cadence; `/buy-detect` forces an immediate buy-side
   sweep of all inboxes now.

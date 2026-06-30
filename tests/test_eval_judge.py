@@ -95,9 +95,9 @@ def _write_fake_claude(tmp, body):
 def _run_judge_with_fake(body, records):
     with tempfile.TemporaryDirectory() as tmp:
         fake = _write_fake_claude(tmp, body)
-        saved = {k: os.environ.get(k) for k in ("CLAUDE_BIN", "BAZAAR_HARNESS")}
+        saved = {k: os.environ.get(k) for k in ("CLAUDE_BIN", "SELLY_HARNESS")}
         os.environ["CLAUDE_BIN"] = str(fake)
-        os.environ["BAZAAR_HARNESS"] = "claude-code"
+        os.environ["SELLY_HARNESS"] = "claude-code"
         try:
             return eval_judge.judge(records, batch_size=8, max_judge=8)
         finally:

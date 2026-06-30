@@ -3,7 +3,7 @@
 
     python3 tests/test_daemon_conflict.py
 
-Covers the pure conflict decision and the fail-open bound_channel reader (temp BAZAAR_DATA_DIR).
+Covers the pure conflict decision and the fail-open bound_channel reader (temp SELLY_DATA_DIR).
 """
 
 import json
@@ -40,9 +40,9 @@ def test_assess():
 
 def test_bound_channel():
     print("bound_channel reads seller then buyer config (fail-open):")
-    orig = os.environ.get("BAZAAR_DATA_DIR")
+    orig = os.environ.get("SELLY_DATA_DIR")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         try:
             check("no config -> ''", dc.bound_channel() == "")
             (Path(tmp) / "buyer_config.json").write_text(json.dumps(
@@ -55,9 +55,9 @@ def test_bound_channel():
             check("corrupt seller_config -> falls through to buyer", dc.bound_channel() == "telegram")
         finally:
             if orig is None:
-                os.environ.pop("BAZAAR_DATA_DIR", None)
+                os.environ.pop("SELLY_DATA_DIR", None)
             else:
-                os.environ["BAZAAR_DATA_DIR"] = orig
+                os.environ["SELLY_DATA_DIR"] = orig
 
 
 def test_exit_code():

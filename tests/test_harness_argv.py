@@ -74,17 +74,17 @@ def test_buyer_argv():
     check("never loops on a stuck step (one retry then escalate)",
           "ONE retry" in prompt and "NEVER loop" in prompt)
     # Fix C: the soft turn budget — the prompt references the env knob so a cap-hit stays RARE.
-    check("references the soft-turn budget env var", "$BAZAAR_BUYER_SOFT_TURNS" in prompt)
+    check("references the soft-turn budget env var", "$SELLY_BUYER_SOFT_TURNS" in prompt)
     check("soft budget tells it to stop opening NEW threads + journal + summarise",
           "stop opening NEW threads" in " ".join(prompt.split()))
     # Bug C4: the stop trigger must be phrased RELATIVE to the variable, not a hardcoded turn number
-    # — an operator override of $BAZAAR_BUYER_SOFT_TURNS must stay consistent with the trigger.
+    # — an operator override of $SELLY_BUYER_SOFT_TURNS must stay consistent with the trigger.
     check("no hardcoded 'around turn ~25' (use the variable so an override stays consistent)",
           "turn ~25" not in prompt and "around turn 25" not in prompt)
     check("the stop trigger is phrased relative to the soft-turn budget var",
-          "approach $BAZAAR_BUYER_SOFT_TURNS" in " ".join(prompt.split()))
+          "approach $SELLY_BUYER_SOFT_TURNS" in " ".join(prompt.split()))
     # Fix C: the SCOPE priority hint — prioritise the peek-named thread, but only as a HINT.
-    check("SCOPE clause references the peek-thread env var", "$BAZAAR_BUYER_PEEK_THREAD" in prompt)
+    check("SCOPE clause references the peek-thread env var", "$SELLY_BUYER_PEEK_THREAD" in prompt)
     check("peek-thread is a PRIORITY hint, handled first",
           "PRIORITISE that thread first" in prompt)
     check("peek-thread is NOT a hard 'only that thread' restriction (mis-route is worst)",
@@ -99,20 +99,20 @@ def test_buyer_argv():
 
 
 def test_buyer_soft_turns_env_default():
-    print("buyer soft-turn budget env (default injected so $BAZAAR_BUYER_SOFT_TURNS resolves):")
+    print("buyer soft-turn budget env (default injected so $SELLY_BUYER_SOFT_TURNS resolves):")
     _argv, env = harness_run._invocation(get_harness("claude-code"), harness_run.build_spec("buyer"))
-    check("BAZAAR_BUYER_SOFT_TURNS defaulted to 30", env.get("BAZAAR_BUYER_SOFT_TURNS") == "30")
+    check("SELLY_BUYER_SOFT_TURNS defaulted to 30", env.get("SELLY_BUYER_SOFT_TURNS") == "30")
     # An operator/caller value must win over the default (revertible knob).
-    prev = os.environ.get("BAZAAR_BUYER_SOFT_TURNS")
-    os.environ["BAZAAR_BUYER_SOFT_TURNS"] = "20"
+    prev = os.environ.get("SELLY_BUYER_SOFT_TURNS")
+    os.environ["SELLY_BUYER_SOFT_TURNS"] = "20"
     try:
         _a2, env2 = harness_run._invocation(get_harness("claude-code"), harness_run.build_spec("buyer"))
-        check("explicit env wins over the default", env2.get("BAZAAR_BUYER_SOFT_TURNS") == "20")
+        check("explicit env wins over the default", env2.get("SELLY_BUYER_SOFT_TURNS") == "20")
     finally:
         if prev is None:
-            os.environ.pop("BAZAAR_BUYER_SOFT_TURNS", None)
+            os.environ.pop("SELLY_BUYER_SOFT_TURNS", None)
         else:
-            os.environ["BAZAAR_BUYER_SOFT_TURNS"] = prev
+            os.environ["SELLY_BUYER_SOFT_TURNS"] = prev
 
 
 def test_buyer_cap_hit_signal_mapping():
@@ -132,7 +132,7 @@ def test_buyer_cap_hit_signal_mapping():
         harness_run._invocation = lambda h, s: (["true"], {})
         # Isolate the outbox the completion gate (Track A3) peeks, so it sees an EMPTY outbox here
         # (this test exercises only cap-hit classification, not the never-fired-send gate).
-        os.environ["BAZAAR_DATA_DIR"] = str(root / "data")
+        os.environ["SELLY_DATA_DIR"] = str(root / "data")
 
         class FakeRun:
             def __init__(self, rc):
@@ -173,7 +173,7 @@ def test_buyer_cap_hit_signal_mapping():
             harness_run._resolve_harness = saved_resolve
             harness_run._invocation = saved_invocation
             harness_run.subprocess.run = saved_run
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_caphit_per_pass_isolation_no_crosstalk():
@@ -193,7 +193,7 @@ def test_caphit_per_pass_isolation_no_crosstalk():
         harness_run._invocation = lambda h, s: (["true"], {})
         # Isolate the outbox the completion gate (Track A3) peeks (empty here — this test exercises
         # only cap-hit per-pass isolation, not the never-fired-send gate).
-        os.environ["BAZAAR_DATA_DIR"] = str(root / "data")
+        os.environ["SELLY_DATA_DIR"] = str(root / "data")
 
         class FakeRun:
             def __init__(self, rc):
@@ -244,7 +244,7 @@ def test_caphit_per_pass_isolation_no_crosstalk():
             harness_run._resolve_harness = saved_resolve
             harness_run._invocation = saved_invocation
             harness_run.subprocess.run = saved_run
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_caphit_log_sweep_removes_stale_only():
@@ -328,7 +328,7 @@ def test_maint_argv():
     a = claude_argv("maint").argv
     prompt = a[2] if len(a) > 2 else ""
     # Tier 1d: maint is mechanical cross-listing, so it is right-sized to sonnet by default
-    # (was the strong DEFAULT model). Revertible via BAZAAR_MAINT_MODEL (see below).
+    # (was the strong DEFAULT model). Revertible via SELLY_MAINT_MODEL (see below).
     check("right-sized to sonnet by default", _flag_value(a, "--model") == "sonnet")
     check("full seller browser set", "mcp__playwright__browser_file_upload" in a)
     check("scan cadence + distribution drain", "inbox_detect.py due" in prompt and "distribution_session" in prompt)
@@ -340,10 +340,10 @@ def test_maint_argv():
 
 
 def test_followup_branch_in_buyer_and_buy():
-    print("follow-up branch rides the buyer/buy prompts, gated on $BAZAAR_FOLLOWUP:")
+    print("follow-up branch rides the buyer/buy prompts, gated on $SELLY_FOLLOWUP:")
     buyer = harness_run.build_spec("buyer").prompt
     check("buyer prompt has FOLLOW-UP MODE", "FOLLOW-UP MODE" in buyer)
-    check("buyer follow-up gated on the env flag", "$BAZAAR_FOLLOWUP=1" in buyer)
+    check("buyer follow-up gated on the env flag", "$SELLY_FOLLOWUP=1" in buyer)
     check("buyer follow-up marks the ledger", "followup_state.py mark-nudge" in buyer
           and "--side sell" in buyer)
     check("buyer follow-up re-reads the tail (skip if they replied)",
@@ -367,18 +367,18 @@ def test_maint_listing_health_step():
 
 
 def test_maint_model_env_override():
-    print("maint model override via BAZAAR_MAINT_MODEL:")
-    prev = os.environ.get("BAZAAR_MAINT_MODEL")
+    print("maint model override via SELLY_MAINT_MODEL:")
+    prev = os.environ.get("SELLY_MAINT_MODEL")
     try:
-        os.environ["BAZAAR_MAINT_MODEL"] = "opus"
+        os.environ["SELLY_MAINT_MODEL"] = "opus"
         check("env overrides the maint model", _flag_value(claude_argv("maint").argv, "--model") == "opus")
-        os.environ["BAZAAR_MAINT_MODEL"] = ""  # empty reverts to the strong DEFAULT (no --model flag)
+        os.environ["SELLY_MAINT_MODEL"] = ""  # empty reverts to the strong DEFAULT (no --model flag)
         check("empty value reverts to strong default", "--model" not in claude_argv("maint").argv)
     finally:
         if prev is None:
-            os.environ.pop("BAZAAR_MAINT_MODEL", None)
+            os.environ.pop("SELLY_MAINT_MODEL", None)
         else:
-            os.environ["BAZAAR_MAINT_MODEL"] = prev
+            os.environ["SELLY_MAINT_MODEL"] = prev
 
 
 def test_resource_scoping():
@@ -401,7 +401,7 @@ def test_resource_scoping():
 def test_daemon_pass_env_marker():
     print("daemon-pass env marker (so the SessionStart update hook no-ops in headless passes):")
     _argv, env = harness_run._invocation(get_harness("claude-code"), harness_run.build_spec("seller"))
-    check("BAZAAR_DAEMON_PASS=1 set on every headless pass", env.get("BAZAAR_DAEMON_PASS") == "1")
+    check("SELLY_DAEMON_PASS=1 set on every headless pass", env.get("SELLY_DAEMON_PASS") == "1")
 
 
 def test_no_secret_in_argv():
@@ -462,8 +462,8 @@ def test_codex_stub():
 
 def test_runner_refuses_unverified_harness():
     print("runner refuses unverified runtime:")
-    prev = os.environ.get("BAZAAR_HARNESS")
-    os.environ["BAZAAR_HARNESS"] = "codex"
+    prev = os.environ.get("SELLY_HARNESS")
+    os.environ["SELLY_HARNESS"] = "codex"
     refused = False
     try:
         harness_run._resolve_harness()
@@ -471,9 +471,9 @@ def test_runner_refuses_unverified_harness():
         refused = exc.code == 3
     finally:
         if prev is None:
-            os.environ.pop("BAZAAR_HARNESS", None)
+            os.environ.pop("SELLY_HARNESS", None)
         else:
-            os.environ["BAZAAR_HARNESS"] = prev
+            os.environ["SELLY_HARNESS"] = prev
     check("codex runtime refused with exit 3", refused)
 
 

@@ -137,7 +137,7 @@ def check_context_loss(corpus) -> list[Finding]:
                 evidence=(f'user: "{_clip(r.user_said)}" → agent: "{_clip(r.agent_considered)}"' +
                           (f' (prior [out]: "{_clip(r.prior_agent)}")' if r.prior_agent else "")),
                 suggestion=("Resolve no-signal follow-ups against the RECENT CONVERSATION block "
-                            "(bazaar-run.md FOLLOW-UP precedence-0): act on the enumerated tasks "
+                            "(selly-run.md FOLLOW-UP precedence-0): act on the enumerated tasks "
                             "instead of re-deriving state."),
                 target="bin/harness_run.py:CHANNEL_PROMPT", record_id=r.record_id, window=r.window_start))
     return findings

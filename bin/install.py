@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""install.py — the stateful half of the Bazaar installer (the only thing here that writes).
+"""install.py — the stateful half of the SELLY installer (the only thing here that writes).
 
-Automates the file-generation rows of SETUP.md §11 so bazaar-install.md never hand-edits JSON
+Automates the file-generation rows of SETUP.md §11 so selly-install.md never hand-edits JSON
 (the "missing comma" gotcha). Tokens are read from the ENVIRONMENT, never passed on argv (which
 would leak them in the process list) and never echoed back.
 
@@ -90,9 +90,9 @@ MCP_CONFIG = {
     }
 }
 
-# Marks a global launcher WE generated, so cleanup only ever removes Bazaar's own launchers and
+# Marks a global launcher WE generated, so cleanup only ever removes SELLY's own launchers and
 # never touches a sibling skill (gstack, etc.) sharing the same skills dir.
-LAUNCHER_MARKER = "<!-- bazaar-skills launcher (generated) -->"
+LAUNCHER_MARKER = "<!-- selly-agent launcher (generated) -->"
 
 
 def resolve_dest(ns, plat) -> Path:
@@ -160,37 +160,37 @@ def _command_description(path: Path) -> str:
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        return f"Bazaar /{path.stem} command"
+        return f"SELLY /{path.stem} command"
     if not lines or lines[0].strip() != "---":
-        return f"Bazaar /{path.stem} command"
+        return f"SELLY /{path.stem} command"
     for line in lines[1:]:
         if line.strip() == "---":
             break
         if line.startswith("description:"):
             return line.split(":", 1)[1].strip()
-    return f"Bazaar /{path.stem} command"
+    return f"SELLY /{path.stem} command"
 
 
 def _launcher_body(name: str, description: str, abs_dest: str) -> str:
-    """A thin global launcher: cd into the Bazaar runtime dir, then follow the real command spec.
-    Self-contained — works via the ~/.bazaar/home pointer OR the embedded absolute path fallback."""
+    """A thin global launcher: cd into the SELLY runtime dir, then follow the real command spec.
+    Self-contained — works via the ~/.selly/home pointer OR the embedded absolute path fallback."""
     return (
         f"---\nname: {name}\ndescription: {description}\n---\n{LAUNCHER_MARKER}\n\n"
-        f"You invoked the Bazaar **/{name}** command. Bazaar runs from its own runtime directory; "
+        f"You invoked the SELLY **/{name}** command. SELLY runs from its own runtime directory; "
         f"everything it needs (`data/`, `skills/`, `bin/`, `.claude/commands/`) is relative to that "
         f"dir, so you must work from there.\n\n"
-        f"1. Find the Bazaar home: read `~/.bazaar/home` if it exists, else use `{abs_dest}`.\n"
+        f"1. Find the SELLY home: read `~/.selly/home` if it exists, else use `{abs_dest}`.\n"
         f"2. `cd` into that directory.\n"
         f"3. Update check (quiet, throttled, fail-open): run `python3 bin/update_check.py check`. "
-        f"If it prints `\"should_prompt\": true`, tell the user in ONE short line that a newer Bazaar "
-        f"is available (use its `summary` field) and offer to run `/bazaar-upgrade`. If they "
+        f"If it prints `\"should_prompt\": true`, tell the user in ONE short line that a newer SELLY "
+        f"is available (use its `summary` field) and offer to run `/selly-upgrade`. If they "
         f"decline, run `python3 bin/update_check.py snooze`. Never block the command on this — "
         f"continue regardless of the result.\n"
         f"4. Then follow `.claude/commands/{name}.md` from there and do exactly what it says.\n"
     )
 
 
-def _is_bazaar_launcher(skill_md: Path) -> bool:
+def _is_selly_launcher(skill_md: Path) -> bool:
     try:
         return LAUNCHER_MARKER in skill_md.read_text()
     except OSError:
@@ -198,13 +198,13 @@ def _is_bazaar_launcher(skill_md: Path) -> bool:
 
 
 def _remove_launchers(skills_dir: Path, keep: set[str]) -> list[str]:
-    """Remove every Bazaar-generated launcher in skills_dir whose name isn't in `keep`. Marker-gated,
+    """Remove every SELLY-generated launcher in skills_dir whose name isn't in `keep`. Marker-gated,
     so a sibling skill (gstack, etc.) is never touched. Returns the names removed."""
     removed: list[str] = []
     if not skills_dir.is_dir():
         return removed
     for child in sorted(skills_dir.iterdir()):
-        if child.is_dir() and child.name not in keep and _is_bazaar_launcher(child / "SKILL.md"):
+        if child.is_dir() and child.name not in keep and _is_selly_launcher(child / "SKILL.md"):
             for p in sorted(child.rglob("*"), reverse=True):
                 p.unlink() if p.is_file() else p.rmdir()
             child.rmdir()
@@ -213,14 +213,14 @@ def _remove_launchers(skills_dir: Path, keep: set[str]) -> list[str]:
 
 
 def cmd_gen_launchers(ns, plat) -> int:
-    """Install thin global launchers for every Bazaar command into the harness's global skills dir,
-    so /bazaar, /sell, /buy, … work from any project. Idempotent: regenerates the current set and
-    removes stale Bazaar launchers (e.g. when the name prefix flips or a command is removed)."""
+    """Install thin global launchers for every SELLY command into the harness's global skills dir,
+    so /selly, /sell, /buy, … work from any project. Idempotent: regenerates the current set and
+    removes stale SELLY launchers (e.g. when the name prefix flips or a command is removed)."""
     dest = resolve_dest(ns, plat).resolve()
     harness = get_harness(ns.harness or None)
     skills_dir = harness.skills_dir()
     skills_dir.mkdir(parents=True, exist_ok=True)
-    prefix = "bazaar-" if ns.prefix else ""
+    prefix = "selly-" if ns.prefix else ""
 
     installed: list[str] = []
     for cmd in _command_files(dest):
@@ -231,8 +231,8 @@ def cmd_gen_launchers(ns, plat) -> int:
         (target / "SKILL.md").write_text(body)
         installed.append(name)
 
-    # Cleanup: drop any Bazaar-generated launcher no longer in the current set (marker-gated, so we
-    # never remove a non-Bazaar skill sharing this dir).
+    # Cleanup: drop any SELLY-generated launcher no longer in the current set (marker-gated, so we
+    # never remove a non-SELLY skill sharing this dir).
     removed = _remove_launchers(skills_dir, keep=set(installed))
 
     print(json.dumps({"harness": harness.name, "skills_dir": str(skills_dir),
@@ -241,7 +241,7 @@ def cmd_gen_launchers(ns, plat) -> int:
 
 
 def cmd_rm_launchers(ns, plat) -> int:
-    """Remove Bazaar's global launchers (uninstall). --all sweeps every known harness's skills dir
+    """Remove SELLY's global launchers (uninstall). --all sweeps every known harness's skills dir
     so launchers installed to multiple hosts are all cleaned up."""
     names = [d["name"] for d in detect_all()] if ns.all else [ns.harness or None]
     out = {}
@@ -324,12 +324,12 @@ def build_parser() -> argparse.ArgumentParser:
                             choices=["hands-free", "balanced", "all-steps"])
         sp.set_defaults(func=func)
     gl = sub.add_parser("gen-launchers", help="install global slash-command launchers into the "
-                        "harness skills dir so /bazaar, /sell, /buy work from any project")
+                        "harness skills dir so /selly, /sell, /buy work from any project")
     gl.add_argument("--dest", default="")
     gl.add_argument("--harness", default="", help="claude-code | codex (default: autodetect)")
-    gl.add_argument("--prefix", action="store_true", help="prefix launcher names with 'bazaar-'")
+    gl.add_argument("--prefix", action="store_true", help="prefix launcher names with 'selly-'")
     gl.set_defaults(func=cmd_gen_launchers)
-    rl = sub.add_parser("rm-launchers", help="remove Bazaar's global launchers (uninstall)")
+    rl = sub.add_parser("rm-launchers", help="remove SELLY's global launchers (uninstall)")
     rl.add_argument("--harness", default="", help="claude-code | codex (default: autodetect)")
     rl.add_argument("--all", action="store_true", help="sweep every known harness's skills dir")
     rl.set_defaults(func=cmd_rm_launchers)

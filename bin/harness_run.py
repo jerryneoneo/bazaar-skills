@@ -2,16 +2,16 @@
 """harness_run.py — invoke ONE headless pass through the harness seam (no hardcoded CLI).
 
 This is the agnostic replacement for the old Claude-only run_pass.sh/intent.sh bodies. It builds a
-harness-agnostic PassSpec per mode, asks the active harness (`$BAZAAR_HARNESS`, default claude-code)
+harness-agnostic PassSpec per mode, asks the active harness (`$SELLY_HARNESS`, default claude-code)
 to translate it into argv + env via `Harness.pass_argv`, then runs it.
 
-  harness_run.py channel         → drain the control channel, BOTH sides (bazaar-run §1). Alias: `seller`.
+  harness_run.py channel         → drain the control channel, BOTH sides (selly-run §1). Alias: `seller`.
   harness_run.py buyer           → one SELL-inbox watch pass (buyers messaging the seller; §2)
   harness_run.py buy             → one BUY-side step: search/liaise a want like an iPhone (§3)
   harness_run.py maint           → one cross-listing step: drain distribution / cadence-scan (§2b)
   harness_run.py intent "<msg>"  → ONE short MCP-less "what I'll do next" line (printed to stdout)
 
-These mirror the four phases of .claude/commands/bazaar-run.md so the always-on daemon drives the
+These mirror the four phases of .claude/commands/selly-run.md so the always-on daemon drives the
 whole agent, not just the channel + sell-inbox. (`buyer` = the seller's inbox; `buy` = acquiring for
 the user — distinct, despite the close names.)
 
@@ -55,7 +55,7 @@ LOG = SELLER_DIR / "logs" / "pass.log"
 # opening new threads near it) and a HARD backstop the harness enforces ABOVE it. Raising the cap
 # ALONE failed ~82% (eval): the pass just toured more inboxes. The soft budget is the real fix; the
 # raised backstop only gives a clean stop more headroom before the kill.
-BUYER_SOFT_TURNS_DEFAULT = 30      # $BAZAAR_BUYER_SOFT_TURNS — the self-governed soft budget
+BUYER_SOFT_TURNS_DEFAULT = 30      # $SELLY_BUYER_SOFT_TURNS — the self-governed soft budget
 BUYER_BACKSTOP_TURNS = 50          # the hard --max-turns the harness passes (was 40)
 # When a pass is killed at the hard cap (rc!=0 AND the marker below in its log tail), run_pass returns
 # this DISTINCT code so callers can tell "capped, more work pending" from a generic failure (rc=1).
@@ -111,7 +111,7 @@ SELLER_BROWSER = ("navigate", "navigate_back", "click", "type", "fill_form", "se
 BUYER_BROWSER = ("navigate", "navigate_back", "click", "type", "fill_form", "select_option",
                  "press_key", "wait_for", "snapshot", "tabs", "handle_dialog", "evaluate")
 
-CHANNEL_PROMPT = """You are the Bazaar agent on the control channel, headless and unattended. Be
+CHANNEL_PROMPT = """You are the SELLY agent on the control channel, headless and unattended. Be
 RESPONSIVE — send a short progress message at each step; never go silent on a long task. The system
 may have already sent a GENERIC one-line intent ack (e.g. 'Let me check your listings…') and a
 native 'typing…' indicator is showing. That generic line does NOT replace a flow's own ack: still
@@ -120,7 +120,7 @@ listing photo ack), then send PROGRESS + RESULTS as you go. 'Don't repeat' means
 SECOND generic 'let me check' one-liner — it never means do the work in silence; always respond to
 the user before going off to work. Fire 'telegram.py typing' right before each message you send.
 
-Do ONE turn of the CONTROL CHANNEL phase (§1 of .claude/commands/bazaar-run.md) — BOTH sell and
+Do ONE turn of the CONTROL CHANNEL phase (§1 of .claude/commands/selly-run.md) — BOTH sell and
 buy — then stop:
 0a. PAUSE CHECK — run `python3 bin/control.py status`. If paused: take NO marketplace action this
    pass (the daemon's deterministic drain normally handles the paused channel; if you are running,
@@ -139,7 +139,7 @@ buy — then stop:
 2. Route each event in order:
    - mid-flow reply → feed it to the active session (listing/distribution → listing.md /
      distribution.md; buy → skills/buying/search.md or the buying answer handlers; catchup →
-     skills/bazaar-catchup.md, applying the reply to catchup_session.json's current step — NEVER
+     skills/selly-catchup.md, applying the reply to catchup_session.json's current step — NEVER
      re-sweep or re-ask what the digest already found).
    - FRESH message (no active session) → run the §1 FRESH-MESSAGE INTENT GATE, which now resolves a
      no-signal FOLLOW-UP (like 'do all'/'yes'/'the first one'/'take over all') against the RECENT
@@ -156,7 +156,7 @@ buy — then stop:
      /status → a summary (live items + open buyer threads; active wants + shortlists + open seller
      threads; escalations); if `bin/control.py status` shows paused, LEAD with "⏸ PAUSED since
      <since> (via <source>) — <N> correction(s) queued. Send /resume to continue." ;
-     /catchup (also /bazaar-catchup) → skills/bazaar-catchup.md, START at HEALTH with scope:"both":
+     /catchup (also /selly-catchup) → skills/selly-catchup.md, START at HEALTH with scope:"both":
        a deep, read-only sweep of every listing + inbox + setup surface that reports ONE grouped
        digest and proposes the work (acts on nothing during the sweep). It is turn-based/resumable in
        data/catchup_session.json (one market or one question per pass), so ack the slow sweep first,
@@ -172,7 +172,7 @@ buy — then stop:
 listing_autonomy=auto_anomaly (publish without confirm; pause only on a real anomaly). Keep
 account-safety pacing. ONE step per pass so the bot stays responsive."""
 
-BUYER_PROMPT = """You are the Bazaar seller agent, running headless and unattended.
+BUYER_PROMPT = """You are the SELLY seller agent, running headless and unattended.
 
 FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any reply a prior
 pass was INTERRUPTED on. It is a cheap non-LLM call that never re-sends; it returns JSON with TWO
@@ -203,15 +203,15 @@ bin/shipping.py, answer from qa_bank, escalate unknowns to the seller over Teleg
 (skills/channel/notifications.md). Respect pacing/caps and per-thread cursors (idempotent).
 
 COST DISCIPLINE (a cheap non-LLM probe already detected new activity before launching you):
-$BAZAAR_BUYER_PEEK_TEXT hints which marketplace/snippet is new — go STRAIGHT to that
+$SELLY_BUYER_PEEK_TEXT hints which marketplace/snippet is new — go STRAIGHT to that
 marketplace's inbox and open only thread(s) with messages past their cursor. Handle ONLY the
 marketplace the peek points to; do NOT tour every marketplace in one pass (another pass picks up
 the rest). Do NOT browser_snapshot whole inbox pages when a targeted thread read suffices;
-snapshots are the single biggest cost per pass. If $BAZAAR_BUYER_PEEK_FORCED=1 this is a periodic
+snapshots are the single biggest cost per pass. If $SELLY_BUYER_PEEK_FORCED=1 this is a periodic
 safety-net sweep with NO specific signal — open only the single most-recently-active inbox,
 confirm nothing sits unread past its cursor, and stop; do NOT sweep all marketplaces.
 
-SCOPE (priority hint, not a hard restriction): if $BAZAAR_BUYER_PEEK_THREAD is set,
+SCOPE (priority hint, not a hard restriction): if $SELLY_BUYER_PEEK_THREAD is set,
 PRIORITISE that thread first (read its new messages past the cursor, reply via
 skills/reply-pipeline.md, commit) BEFORE touring any other thread. This is a PRIORITY HINT to put
 the thread that actually has new mail first; it is not a hard 'only that thread' rule. If other
@@ -221,8 +221,8 @@ does not name unless that thread genuinely has new mail (mis-routing a reply ont
 the worst outcome).
 
 TURN BUDGET (hard rule — your turn cap is finite and being killed mid-pass loses ALL progress and
-your summary): you have a SOFT budget of about $BAZAAR_BUYER_SOFT_TURNS turns. As you approach
-$BAZAAR_BUYER_SOFT_TURNS (leave yourself ~5 turns of headroom) stop opening NEW threads: journal
+your summary): you have a SOFT budget of about $SELLY_BUYER_SOFT_TURNS turns. As you approach
+$SELLY_BUYER_SOFT_TURNS (leave yourself ~5 turns of headroom) stop opening NEW threads: journal
 everything you have already sent via `python3 bin/journal_send.py commit` (per the JOURNAL DISCIPLINE
 rule above — never end a pass with an un-committed send), write your one-line summary, and STOP. The
 soft budget sits well below the hard cap so a clean stop almost always beats the cap. Partial
@@ -236,12 +236,12 @@ checkpoint / captcha (escalate "re-auth your <market>") or the inbox still won't
 ONE retry — then move on. Reserve your final turn for the summary and STOP as soon as the pass is
 complete."""
 
-MAINT_PROMPT = """You are the Bazaar agent doing cross-listing maintenance, headless and unattended.
+MAINT_PROMPT = """You are the SELLY agent doing cross-listing maintenance, headless and unattended.
 This is a BACKGROUND pass — do NOT poll the control channel or buyer inboxes for INBOUND messages
 (reading replies is the channel/buyer passes' job). You DO, however, send OUTBOUND completion
 notifications for work you finish this pass — a `say` is a one-way push (telegram.py send) that needs
 no polling, so 'quiet background pass' must NOT mean 'silently drop the success notice'. Do ONE step
-of bazaar-run.md §2b, then stop:
+of selly-run.md §2b, then stop:
 0. If data/listing_session.json is active, OR data/catchup_session.json is active AND recently updated
    (a live, advancing sweep) → do nothing (never interrupt an active listing or an in-flight catch-up
    sweep — the catchup invariant is single-active-session); end. A catchup session that is active but
@@ -265,7 +265,7 @@ of bazaar-run.md §2b, then stop:
 3. Else `python3 bin/inbox_detect.py due` (most-overdue market across the UNION of enabled sell+buy
    markets; cadence config.scan_interval_hours). If a market m is due, run BOTH detectors for m ONLY,
    then `python3 bin/scan_state.py mark --market m` (one stamp covers both detectors):
-     (i)  skills/channel/distribution.md SCAN — find listings made OUTSIDE Bazaar (unmanaged) → queue
+     (i)  skills/channel/distribution.md SCAN — find listings made OUTSIDE SELLY (unmanaged) → queue
           to manage + cross-list under the distribution gate.
      (ii) skills/inbox-detect.md SWEEP (scope=both) — review m's chat list for threads the user started
           on their OWN that are NOT yet tracked (absent from data/threads/ and data/buyer_threads/) and
@@ -286,7 +286,7 @@ of bazaar-run.md §2b, then stop:
    then run `python3 bin/listing_health.py mark --item <item_id>`, set the session active=false, STOP.
    If nothing is active or due in any step → end (no work)."""
 
-BUY_PROMPT = """You are the Bazaar BUYER agent (acquiring for the user), headless and unattended.
+BUY_PROMPT = """You are the SELLY BUYER agent (acquiring for the user), headless and unattended.
 
 FIRST STEP (before anything else): run `python3 bin/journal_reconcile.py` to heal any message a prior
 pass was interrupted on. Cheap, non-LLM, never re-sends. Resolve its TWO one-shot lists THIS pass:
@@ -300,8 +300,8 @@ JOURNAL DISCIPLINE (hard rule): every message is bracketed `journal_send.py inte
 skills/buying/liaison-pipeline.md §6. The `mark-sent` step is REQUIRED. Never advance to the next
 message or thread with an un-committed send, and never hand-edit data/buyer_threads/<id>.json.
 
-Do ONE buy-side step of bazaar-run.md §3 + .claude/commands/buy-run.md, then stop. $BAZAAR_BUY_PEEK_WANT
-names the actionable want; $BAZAAR_BUY_PEEK_TEXT is a hint. Load data/buyer_config.json.
+Do ONE buy-side step of selly-run.md §3 + .claude/commands/buy-run.md, then stop. $SELLY_BUY_PEEK_WANT
+names the actionable want; $SELLY_BUY_PEEK_TEXT is a hint. Load data/buyer_config.json.
 
 For the actionable want (data/wants/<id>.json):
 - status 'searching' → run skills/buying/search.md: search each enabled buy market
@@ -321,14 +321,14 @@ bin/buyer_negotiate.py) — NEVER put a number in a walk-away ('a bit more than 
 Respect pacing + per-thread cursors (idempotent). ONE step per pass."""
 
 # FOLLOW-UP BRANCH — appended to the buyer/buy prompts (byte-stable, so the 1h prompt cache is
-# unaffected). It only ACTS when $BAZAAR_FOLLOWUP=1 (the daemon sets it when followup_state.py reports
+# unaffected). It only ACTS when $SELLY_FOLLOWUP=1 (the daemon sets it when followup_state.py reports
 # due nudges); otherwise the model ignores it and runs the normal inbound body. A nudge is the SAME
 # action the pass already performs (open a tracked thread, compose, pace, journal bracket) — only the
 # trigger differs, so no new pass mode / tool surface is needed. The follow-up COUNT is derived from
 # the transcript tail by followup_state.py, so no special commit tagging is required here.
 FOLLOWUP_BRANCH_SELL = """
 
-FOLLOW-UP MODE (only when $BAZAAR_FOLLOWUP=1; otherwise IGNORE this whole section): some buyers went
+FOLLOW-UP MODE (only when $SELLY_FOLLOWUP=1; otherwise IGNORE this whole section): some buyers went
 quiet after our last message and are due a gentle nudge. FIRST run `python3 bin/followup_state.py due`
 and read `due_nudges` (rows: thread_id, marketplace, side, nudges_sent). Handle ONLY rows on THIS
 pass's marketplace. For each such thread: OPEN it and RE-READ its tail. If the last transcript row is
@@ -344,7 +344,7 @@ One nudge per thread per pass; never nudge a thread whose tail is inbound."""
 
 FOLLOWUP_BRANCH_BUY = """
 
-FOLLOW-UP MODE (only when $BAZAAR_FOLLOWUP=1; otherwise IGNORE this whole section): some sellers went
+FOLLOW-UP MODE (only when $SELLY_FOLLOWUP=1; otherwise IGNORE this whole section): some sellers went
 quiet after our last message and are due a gentle nudge. FIRST run `python3 bin/followup_state.py due`
 and read `due_nudges` (rows: thread_id, marketplace, side, nudges_sent). Handle ONLY rows on THIS
 pass's marketplace. For each such thread: OPEN it and RE-READ its tail. If the last transcript row is
@@ -358,7 +358,7 @@ bin/followup_state.py mark-nudge --thread <thread_id> --side buy`. If pacing ret
 NOT send and do NOT mark (it retries next interval). One nudge per thread per pass; never nudge a
 thread whose tail is inbound."""
 
-RESEARCH_PROMPT = """You are the Bazaar RESEARCH worker, running headless and DETACHED. You have NO
+RESEARCH_PROMPT = """You are the SELLY RESEARCH worker, running headless and DETACHED. You have NO
 browser and NO channel: you cannot message the seller or touch any marketplace. Your ONLY output is a
 single result file, written with the one Bash command you are allowed. Be fast and quiet.
 
@@ -473,7 +473,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # is plenty and far cheaper. BUYER_BACKSTOP_TURNS (50) is a BACKSTOP, not a workload bound:
         # eval found the buyer pass exhausting whatever cap it was given (14→28→40 all failed ~82% of
         # the time) by touring every inbox and looping on stuck navigation — so progress comes from
-        # BUYER_PROMPT's TURN BUDGET governor (a SOFT budget of $BAZAAR_BUYER_SOFT_TURNS at which it
+        # BUYER_PROMPT's TURN BUDGET governor (a SOFT budget of $SELLY_BUYER_SOFT_TURNS at which it
         # stops opening new threads, journals, and summarises; the peek-thread priority hint; one
         # retry then escalate), NOT from this number. The backstop is just above the soft budget so a
         # clean stop has headroom; a cap-hit is now RARE and NON-FATAL (run_pass detects it → Fix C
@@ -500,10 +500,10 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
     if mode == "maint":
         # Cross-listing is MECHANICAL (read listing URLs, drain the queue), so right-size it to
         # sonnet instead of the strong DEFAULT — a large saving on a background pass that does not
-        # need the deepest model. Gated behind BAZAAR_MAINT_MODEL so it reverts instantly if the
+        # need the deepest model. Gated behind SELLY_MAINT_MODEL so it reverts instantly if the
         # publish/verify path regresses: set it to "" (empty) to restore the strong DEFAULT (model
         # None → no --model flag), or to any model name to pin that. Full seller browser set stays.
-        maint_model = os.environ.get("BAZAAR_MAINT_MODEL", "sonnet") or None
+        maint_model = os.environ.get("SELLY_MAINT_MODEL", "sonnet") or None
         return PassSpec(
             prompt=_scope_prefix(resource) + MAINT_PROMPT, model=maint_model, max_turns=None,
             allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER),
@@ -536,19 +536,19 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         # Offline LLM-as-judge over eval records (bin/eval_judge.py). MCP-less + single-turn so it
         # carries no browser tools and can't act on the world; sonnet for nuance. Invoked as a library
         # by eval_judge (not via run_pass), so it stays out of PASS_MODES; the daemon runs it on the
-        # nightly eval when config.eval_judge_nightly is set, and /bazaar-eval always runs it.
+        # nightly eval when config.eval_judge_nightly is set, and /selly-eval always runs it.
         return PassSpec(prompt=msg, model="sonnet", max_turns=1, strict_mcp=True, mcp_servers={})
     raise ValueError(f"unknown mode: {mode}")
 
 
 def _resolve_harness():
-    """Active harness from $BAZAAR_HARNESS (default: autodetect, prefers signed-in). Refuse a
+    """Active harness from $SELLY_HARNESS (default: autodetect, prefers signed-in). Refuse a
     harness whose runtime isn't verified yet — honest scope beats a broken daemon."""
-    name = os.environ.get("BAZAAR_HARNESS") or None
+    name = os.environ.get("SELLY_HARNESS") or None
     harness = get_harness(name)
     if harness.name not in SUPPORTED_RUNTIME:
         sys.stderr.write(
-            f"bazaar: runtime not yet supported for harness '{harness.name}'. Only "
+            f"selly: runtime not yet supported for harness '{harness.name}'. Only "
             f"{sorted(SUPPORTED_RUNTIME)} is wired today (see ARCHITECTURE.md §2).\n")
         sys.exit(3)
     return harness
@@ -564,10 +564,10 @@ def _invocation(harness, spec: PassSpec):
     # Let an explicit env value win over the harness default (e.g. ENABLE_PROMPT_CACHING_1H=0).
     # Mark every headless pass so the SessionStart update-notice hook NO-OPs here — the daemon can't
     # act on an interactive prompt, and it has its own channel update notice (agent_daemon.py).
-    env = {**inv.env, **os.environ, "BAZAAR_DAEMON_PASS": "1"}
-    # Fix C: make $BAZAAR_BUYER_SOFT_TURNS resolve in the BUYER_PROMPT. Default it ONLY when no
+    env = {**inv.env, **os.environ, "SELLY_DAEMON_PASS": "1"}
+    # Fix C: make $SELLY_BUYER_SOFT_TURNS resolve in the BUYER_PROMPT. Default it ONLY when no
     # explicit value is set, so an operator/caller value (already merged via os.environ above) wins.
-    env.setdefault("BAZAAR_BUYER_SOFT_TURNS", str(BUYER_SOFT_TURNS_DEFAULT))
+    env.setdefault("SELLY_BUYER_SOFT_TURNS", str(BUYER_SOFT_TURNS_DEFAULT))
     return argv, env
 
 
@@ -690,9 +690,9 @@ def run_pass(mode: str, resource: str = "") -> int:
     harness = _resolve_harness()
     argv, env = _invocation(harness, build_spec(mode, resource=resource))
     if resource:
-        # Pass the scoped marketplace to the skills (they read $BAZAAR_RESOURCE to know which
+        # Pass the scoped marketplace to the skills (they read $SELLY_RESOURCE to know which
         # marketplace + which tab is theirs). Empty resource → unscoped, env unchanged (legacy path).
-        env = {**env, "BAZAAR_RESOURCE": resource}
+        env = {**env, "SELLY_RESOURCE": resource}
     LOG.parent.mkdir(parents=True, exist_ok=True)
     label = f"{mode}:{resource}" if resource else mode
     # Bug C1 — PER-PASS output isolation. The claude subprocess writes to its OWN file (keyed by
@@ -778,7 +778,7 @@ def main(argv: list[str]) -> int:
         if mode in PASS_MODES:
             return run_pass(mode, resource)
     except UnknownHarness as exc:
-        sys.stderr.write(f"bazaar: {exc}\n")
+        sys.stderr.write(f"selly: {exc}\n")
         return 3
     sys.stderr.write(f"unknown mode: {mode}\n")
     return 2

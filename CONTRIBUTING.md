@@ -1,12 +1,12 @@
-# Contributing to Bazaar Skills
+# Contributing to SELLY Skills
 
-Thanks for your interest in improving Bazaar Skills! This is an early-stage open-source project, and contributions — bug reports, fixes, new marketplace recipes, docs — are all welcome.
+Thanks for your interest in improving SELLY Skills! This is an early-stage open-source project, and contributions — bug reports, fixes, new marketplace recipes, docs — are all welcome.
 
 ## Dev setup
 
 ```bash
-git clone https://github.com/jerryneoneo/bazaar-skills.git ~/bazaar-skills
-cd ~/bazaar-skills
+git clone https://github.com/jerryneoneo/selly-agent.git ~/selly-agent
+cd ~/selly-agent
 ./setup            # idempotent; installs launchers, then guided onboarding on first run
 ```
 

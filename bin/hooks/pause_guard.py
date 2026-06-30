@@ -77,12 +77,12 @@ def main() -> int:
     if tool == "Bash":
         command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
         if RESERVE_MARKER in command:
-            _deny("Bazaar is paused — refusing to reserve a send slot until /resume.")
+            _deny("SELLY is paused — refusing to reserve a send slot until /resume.")
         return 0
 
     # Browser MUTATION tools (explicit set) are denied; read-only browser tools fall through.
     if tool in MUTATING_BROWSER_TOOLS:
-        _deny("Bazaar is paused — refusing to act on a marketplace until /resume.")
+        _deny("SELLY is paused — refusing to act on a marketplace until /resume.")
     return 0
 
 

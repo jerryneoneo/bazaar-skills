@@ -30,7 +30,7 @@ Usage:
     listing_health.py reset --item <id>               -> drop a ledger entry (re-engaged / manual)
 
 Exit codes: 0 ok · 2 bad input · 3 config/data missing or invalid. Never reads a secret.
-Data dir relocatable via BAZAAR_DATA_DIR; items dir via BAZAAR_ITEMS_DIR (match delist_item.py).
+Data dir relocatable via SELLY_DATA_DIR; items dir via SELLY_ITEMS_DIR (match delist_item.py).
 """
 
 from __future__ import annotations
@@ -55,12 +55,12 @@ LIVE_STATUS = "live"
 
 
 def data_dir() -> Path:
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
 
 
 def _items_dir(base: Path) -> Path:
-    override = os.environ.get("BAZAAR_ITEMS_DIR")
+    override = os.environ.get("SELLY_ITEMS_DIR")
     return Path(override) if override else base / "items"
 
 

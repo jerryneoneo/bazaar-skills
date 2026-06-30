@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""update_notice.py — SessionStart hook: surface "a Bazaar update is available" to the user.
+"""update_notice.py — SessionStart hook: surface "a SELLY update is available" to the user.
 
-Fires when a Claude Code session starts in the Bazaar runtime dir. It runs the throttled, read-only
-update_check and, if a newer Bazaar is available upstream (and not already dismissed for this
-version), injects a one-line note telling the agent to offer /bazaar-upgrade. This is the interactive
+Fires when a Claude Code session starts in the SELLY runtime dir. It runs the throttled, read-only
+update_check and, if a newer SELLY is available upstream (and not already dismissed for this
+version), injects a one-line note telling the agent to offer /selly-upgrade. This is the interactive
 half of the auto-update-check; the always-on daemon has its own channel notice (agent_daemon.py).
 
-NO-OP for the daemon's headless `claude -p` passes — they set BAZAAR_DAEMON_PASS=1 (harness_run.py),
+NO-OP for the daemon's headless `claude -p` passes — they set SELLY_DAEMON_PASS=1 (harness_run.py),
 can't act on an interactive prompt, and must never have every pass nagged. Hooks get the event JSON
 on stdin (so stdin/stdout are pipes in BOTH modes — tty detection can't tell them apart; the env
 marker is the reliable signal).
@@ -30,7 +30,7 @@ BIN = Path(__file__).resolve().parent.parent
 
 def main() -> int:
     # Never run inside the daemon's headless passes (they can't act on it and would see it every pass).
-    if os.environ.get("BAZAAR_DAEMON_PASS"):
+    if os.environ.get("SELLY_DAEMON_PASS"):
         return 0
     try:
         sys.stdin.read()  # consume the hook event JSON (we don't need its fields)
@@ -45,8 +45,8 @@ def main() -> int:
     if not info.get("should_prompt"):
         return 0
     summary = info.get("summary") or f"v{info.get('current', '?')} -> v{info.get('latest', '?')}"
-    note = (f"A Bazaar update is available ({summary}). Proactively tell the user in one short line "
-            f"and offer to run /bazaar-upgrade now. If they decline, run "
+    note = (f"A SELLY update is available ({summary}). Proactively tell the user in one short line "
+            f"and offer to run /selly-upgrade now. If they decline, run "
             f"`python3 bin/update_check.py snooze` so it stops asking about this version.")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                              "additionalContext": note}}))

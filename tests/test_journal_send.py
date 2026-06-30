@@ -39,7 +39,7 @@ def check(name, condition):
 
 
 def _env(data_dir):
-    return {**os.environ, "BAZAAR_DATA_DIR": str(data_dir)}
+    return {**os.environ, "SELLY_DATA_DIR": str(data_dir)}
 
 
 def _run(args, env=None):
@@ -375,7 +375,7 @@ def test_commit_acks_intent_under_the_thread_lock():
     js_mod = importlib.import_module("journal_send")
     with tempfile.TemporaryDirectory() as d:
         env = _env(d)
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             _seed_thread(d, "threads", "fb:olaf-1")
             # Enqueue an intent in-process so the same process state is observable under the lock.
@@ -405,7 +405,7 @@ def test_commit_acks_intent_under_the_thread_lock():
             check("intent already acked before the lock was released",
                   observed["pending_while_locked"] == 0)
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_commit_then_reconcile_yields_one_outbound_no_unconfirmed():

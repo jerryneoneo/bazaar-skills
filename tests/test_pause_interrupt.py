@@ -53,13 +53,13 @@ def _write_sleeper(tmp, marker, seconds=15):
 def test_paused_flag_terminates_running_pass():
     print("MID-FLIGHT: a pause set during a running pass terminates it (<=10s) + frees the lock:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         marker = Path(tmp) / "started"
         fake = _write_sleeper(tmp, marker, seconds=15)
         orig_lock = agent_daemon.RUN_LOCK
         agent_daemon.RUN_LOCK = Path(tmp) / ".daemon.runlock"
-        env = {**os.environ, "CLAUDE_BIN": str(fake), "BAZAAR_HARNESS": "claude-code",
-               "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "CLAUDE_BIN": str(fake), "SELLY_HARNESS": "claude-code",
+               "SELLY_DATA_DIR": tmp}
         channel = {"adapter": "console", "detail": {}}  # no telegram side-effects during the test
         result = {}
 
@@ -87,12 +87,12 @@ def test_paused_flag_terminates_running_pass():
 
 
 def _run_daemon_once(data_dir):
-    # Pin single-flight (BAZAAR_MAX_WORKERS=1): these boundary checks assert the single-flight
+    # Pin single-flight (SELLY_MAX_WORKERS=1): these boundary checks assert the single-flight
     # loop's pause/gate log lines, which differ from the concurrent supervisor's. The deployed
     # config may set max_concurrent_workers>1, so pin the path the assertions below were written
     # for rather than depending on the live config value.
-    env = {**os.environ, "BAZAAR_DATA_DIR": data_dir, "TELEGRAM_BOT_TOKEN": "123:FAKE",
-           "BAZAAR_HARNESS": "claude-code", "BAZAAR_MAX_WORKERS": "1"}
+    env = {**os.environ, "SELLY_DATA_DIR": data_dir, "TELEGRAM_BOT_TOKEN": "123:FAKE",
+           "SELLY_HARNESS": "claude-code", "SELLY_MAX_WORKERS": "1"}
     out = subprocess.run(
         [sys.executable, str(ROOT / "bin" / "agent_daemon.py"), "--once", "--dry-run",
          "--peek-timeout", "0"],
@@ -134,7 +134,7 @@ def _run_hook(tmp, tool_name, command=""):
                           "tool_input": {"command": command} if command else {"ref": "x"}})
     out = subprocess.run([sys.executable, str(ROOT / "bin" / "hooks" / "pause_guard.py")],
                          input=payload, capture_output=True, text=True,
-                         env={**os.environ, "BAZAAR_DATA_DIR": tmp})
+                         env={**os.environ, "SELLY_DATA_DIR": tmp})
     return out.stdout.strip()
 
 
@@ -150,7 +150,7 @@ def _is_deny(stdout):
 def test_hook_denies_only_when_paused():
     print("BACKSTOP: pause_guard denies mutation tools + reserve only while paused:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         # Not paused → allow everything (no output).
         check("not paused: click allowed", not _is_deny(_run_hook(tmp, "mcp__playwright__browser_click")))
         check("not paused: reserve allowed",
@@ -202,7 +202,7 @@ def test_supervisor_exits_clean_on_source_change():
             cfg = {"buyer_poll_sec": 300, "buy_poll_sec": 600, "maint_poll_sec": 600,
                    "eval_poll_sec": 3600, "force_buyer_pass_every": 3, "force_buyer_sweep_hours": 2}
             channel = {"adapter": "console", "detail": {}}  # no telegram side-effects
-            env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+            env = {**os.environ, "SELLY_DATA_DIR": tmp}
 
             class NS:
                 dry_run = True

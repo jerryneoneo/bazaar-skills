@@ -1,9 +1,22 @@
 # Changelog
 
-All notable changes to Bazaar Skills are recorded here. Format loosely follows
+All notable changes to SELLY Skills are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com); versions track the root `VERSION` file.
 
 ## [Unreleased]
+
+## [0.3.0] — Rebrand: Bazaar → SELLY
+
+### Changed
+- **Project renamed Bazaar → SELLY, end to end.** Repository/dir `bazaar-skills → selly-agent`;
+  slash commands `/bazaar* → /selly*` (hard cutover — the old commands are removed, not aliased);
+  environment variables `BAZAAR_* → SELLY_*`; launchd labels `com.bazaarskills.* → com.selly.*`;
+  config dir `~/.bazaar → ~/.selly`; the agent's own-thread `source` tag `"bazaar" → "selly"`. New
+  README and ASCII banner; the brand displays as **SELLY** ("Sells Everything Local, Liaises for
+  You"). The rename is harness-neutral by design — "agent", not "skills", since the goal is to be
+  model/harness-agnostic. Live installs migrate automatically: `setup` moves `~/.bazaar → ~/.selly`
+  early (preserving host/autonomy/config), and `migrations/v0.3.0.sh` tears down the old launchd
+  jobs, removes stale `bazaar*` launchers, and rewrites existing `source` tags. No data loss.
 
 ### Added
 - **Stale-chat follow-ups, then "not interested".** When OUR last message in a thread goes
@@ -12,7 +25,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   (quiet buyers and quiet sellers). New deterministic engine `bin/followup_state.py` derives the
   nudge count from the transcript tail (never a stored counter, so it is crash-safe and needs no
   migration); the ledger `data/followup_state.json` (gitignored) holds only the disposition + a
-  cache. Nudges are auto-sent through the normal `journal_send` bracket (a `$BAZAAR_FOLLOWUP=1`
+  cache. Nudges are auto-sent through the normal `journal_send` bracket (a `$SELLY_FOLLOWUP=1`
   branch on the buyer/buy passes), respecting pacing caps, quiet hours, and `/pause`; the drop is
   $0 deterministic and posts ONE batched channel notice. Open-escalation and terminal threads are
   excluded. Config: `followup_enabled` (default on), `followup_nudge_intervals_days [1,3]`,
@@ -27,7 +40,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   not nagged. New skill `skills/channel/listing-health.md`; `published_at` is now stamped at first
   publish/cross-list. Config: `listing_health_enabled` (default on), `stale_days 7`,
   `listing_health_interval_hours 24`, `rewarn_days 14`. Tests: `tests/test_listing_health.py`.
-- **Catch-up surfaces both.** `bin/triage.py` (so `/status` + `/bazaar-catchup`) now reports
+- **Catch-up surfaces both.** `bin/triage.py` (so `/status` + `/selly-catchup`) now reports
   `Follow-ups due` and `Stale listings` alongside the existing "awaiting you" signals.
 
 ### Changed
@@ -50,7 +63,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   deterministic engines, trust invariants, a Mermaid diagram, and built-vs-planned), both linked
   from the README. The internal as-built `ARCHITECTURE.md` stays gitignored; the public overview
   uses a distinct filename so it actually ships.
-- **`/bazaar-catchup` deep catch-up sweep.** One command that sweeps everything and tells you what
+- **`/selly-catchup` deep catch-up sweep.** One command that sweeps everything and tells you what
   needs you: it checks the interface and health (channel bound, browser reachable, each marketplace
   logged in, daemon loaded, paused or not), reads every local "awaiting you" signal, and does a deep
   per-marketplace reconciliation (unmanaged or undistributed listings and sold/removed drift via the
@@ -59,13 +72,13 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   each fix (`/sell-resolve`, `/sell-run`, `/buy-run`, `/sell-detect`, `/inbox-detect`, `/resume`),
   each keeping its own approval gate. Acts on nothing during the sweep, never reads a secret,
   turn-based and resumable (`data/catchup_session.json`), `--dry-run` aware. On-demand only; wrap with
-  `/loop /bazaar-catchup` for a periodic digest. Surfaced from the `/bazaar` menu ("What needs me") and
+  `/loop /selly-catchup` for a periodic digest. Surfaced from the `/selly` menu ("What needs me") and
   the `/status` summary.
-- **`bin/triage.py` (read-only "awaiting you" aggregator).** The file-state core of `/bazaar-catchup`:
+- **`bin/triage.py` (read-only "awaiting you" aggregator).** The file-state core of `/selly-catchup`:
   consolidates open escalations (both sides), unread managed threads (both sides, using a cursor-walk
   that correctly ignores threads already replied to), draft/undistributed listings, open checkouts,
   open wants, and overdue scan/eval cadence into one JSON digest. Standard library only,
-  `BAZAAR_DATA_DIR`-relocatable, never opens `data/floors` or `data/budgets`. Replaces the ad-hoc
+  `SELLY_DATA_DIR`-relocatable, never opens `data/floors` or `data/budgets`. Replaces the ad-hoc
   `find_unread.py` / `find_unhandled.py` prototypes (sell-side unread only), now removed. Tested by
   `tests/test_triage.py`.
 - **Telegram "/" command menu.** The bot now registers its everyday commands (`/status`, `/list`,
@@ -88,7 +101,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   past a per-market cursor), and `bin/tab_park.py` (keeps Meta tabs backgrounded in a dedicated
   warm Chrome so they keep firing readable push; a focused Meta tab delivers in-app with no push).
   Wired into `agent_daemon` + `supervisor` as a ~0-token per-loop check.
-- **Instant-mode setup in onboarding + `/bazaar`.** `bin/notify_setup.py` (status / open-fda /
+- **Instant-mode setup in onboarding + `/selly`.** `bin/notify_setup.py` (status / open-fda /
   grant-chrome; read-only, fail-open, macOS only) plus a new `WAKE_SPEED` onboarding anchor that
   offers Instant with pros-only copy, guides the Full Disk Access + Chrome notification grants,
   verifies via status, and falls back to Standard. Standard stays the default and never blocks
@@ -102,11 +115,11 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   skips.
 - **Runtime health check** (`bin/healthcheck.py`): read-only check that deps are present,
   Chrome/CDP is reachable, the install is onboarded, marketplace logins are confirmed, and the
-  daemon is loaded, with fail/warn/ok levels. Never prints a secret; honors `BAZAAR_DATA_DIR`.
-  Wired into `./setup` (returning-user path), onboarding verify, and a new `/bazaar health`
+  daemon is loaded, with fail/warn/ok levels. Never prints a secret; honors `SELLY_DATA_DIR`.
+  Wired into `./setup` (returning-user path), onboarding verify, and a new `/selly health`
   option.
 - **Mid-onboarding channel switch to Telegram.** After binding the interface the agent now says
-  it can be changed anytime ("switch to Telegram" or `/bazaar` → interface), nudges console users
+  it can be changed anytime ("switch to Telegram" or `/selly` → interface), nudges console users
   toward Telegram for phone notifications, and supports a switch on request with no restart.
 
 ### Changed
@@ -114,7 +127,7 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
   MCP to `@0.0.76` (skips the cold-start dist-tag lookup), stopped forced empty buyer sweeps
   (`force_buyer_pass_every` 2→0 with a 2h absolute floor as the strand backstop), switched the
   supervisor's forced sweep to one round-robin market instead of fanning out, right-sized the
-  maint pass via `BAZAAR_MAINT_MODEL`, and added a `BAZAAR_MAX_WORKERS` kill-switch. New
+  maint pass via `SELLY_MAINT_MODEL`, and added a `SELLY_MAX_WORKERS` kill-switch. New
   `bin/buyer_recheck.py` does a ~0-token CDP re-probe so the forced buyer pass fires only on real
   unread. Per-thread cursor idempotency, the pacing gate as sole send authority, fail-open probes,
   and the byte-stable 1h cache prefix are all preserved.
@@ -136,12 +149,12 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 - **Initial public release** — open-sourced under the MIT license; one-paste clone-and-`./setup`
   install, a `README` quickstart, a `CONTRIBUTING` guide, and a documented `data/` layout.
 - **gstack-style install lifecycle.** One-paste install
-  (`git clone … ~/bazaar-skills && cd ~/bazaar-skills && ./setup`), an idempotent re-runnable
-  `setup`, and lifecycle verbs: `/bazaar-upgrade`, `bin/bazaar-uninstall`, `bin/bazaar-config`,
+  (`git clone … ~/selly-agent && cd ~/selly-agent && ./setup`), an idempotent re-runnable
+  `setup`, and lifecycle verbs: `/selly-upgrade`, `bin/selly-uninstall`, `bin/selly-config`,
   `VERSION`, this `CHANGELOG`, and a `migrations/` runner.
 - **Global slash-command launchers.** `bin/install.py gen-launchers` installs thin launchers into
-  the harness's global skills dir (`~/.claude/skills/`) so `/bazaar`, `/sell`, `/buy`, … work from
-  any project while execution still happens in the `~/bazaar-skills` runtime dir.
+  the harness's global skills dir (`~/.claude/skills/`) so `/selly`, `/sell`, `/buy`, … work from
+  any project while execution still happens in the `~/selly-agent` runtime dir.
 - **Harness-agnostic runtime seam.** `Harness.pass_argv(PassSpec)` replaces the Claude-only
   `headless_cmd`; the headless runner (`bin/harness_run.py`) builds a harness-agnostic spec and
   routes it through the active harness. `run_pass.sh` / `intent.sh` are now thin wrappers.
@@ -150,13 +163,13 @@ All notable changes to Bazaar Skills are recorded here. Format loosely follows
 - **Canonical seller-initiated delist flow.** `skills/channel/delist.md` + `bin/delist_item.py`
   give "delete/remove my listing" a defined path: resolve the item by id, run each platform's
   take-down recipe, then write the durable `items/<id>.json` to `removed_by_seller` (one canonical
-  status). Wired into `/delist` and free-text intent in `bazaar-run.md` §1 + `harness_run.py`.
+  status). Wired into `/delist` and free-text intent in `selly-run.md` §1 + `harness_run.py`.
 
 ### Fixed
 - **Sell loop no longer replies to terminal (`lost`) threads.** The sell-side thread selection
   skipped only `status:"escalated"`, so a buyer messaging a dead thread (sold/delisted) got
   re-processed and answered with a throwaway "ok". The filter now skips `{escalated, lost}` —
-  the mirror of the buy side's `{closed, escalated}` (`bazaar-run.md`, `sell-watch.md`, the
+  the mirror of the buy side's `{closed, escalated}` (`selly-run.md`, `sell-watch.md`, the
   `fb`/`carousell` listing-flow recipes). `reply-pipeline.md` gains a defense-in-depth terminal
   guard so a `lost` thread never composes a reply even if the pipeline is entered directly.
 - **Delisted items no longer reported as live.** A seller-initiated take-down with no active

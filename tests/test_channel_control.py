@@ -5,7 +5,7 @@
 
 Focus: the pure classification (process_events) applies the right control side-effects and acks for
 /pause, /resume, and free-text corrections, and infer_target routes a correction at a known thread/
-want/item when the text names it. State is isolated via BAZAAR_DATA_DIR.
+want/item when the text names it. State is isolated via SELLY_DATA_DIR.
 """
 
 import os
@@ -36,7 +36,7 @@ def _ev(kind, text):
 def test_pause_resume_commands():
     print("/pause and /resume drive the control flag:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         acks = cc.process_events([_ev("command", "/pause")])
         check("paused after /pause", control.is_paused() is True)
         check("pause ack returned", len(acks) == 1 and acks[0].startswith("⏸"))
@@ -48,7 +48,7 @@ def test_pause_resume_commands():
 def test_freetext_becomes_correction():
     print("free text while paused → queued correction + ack:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         control.pause(source="telegram")
         acks = cc.process_events([_ev("text", "list it at 80 not 60")])
         pend = control.pending_corrections()
@@ -60,7 +60,7 @@ def test_freetext_becomes_correction():
 def test_photo_correction():
     print("photo while paused is captured (caption or [photo]):")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         control.pause(source="telegram")
         cc.process_events([_ev("photo", "")])
         check("photo placeholder captured", control.pending_corrections()[0]["text"] == "[photo]")
@@ -69,7 +69,7 @@ def test_photo_correction():
 def test_target_inference():
     print("infer_target routes a correction at a known thread/want when named:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         (Path(tmp) / "buyer_threads").mkdir()
         (Path(tmp) / "buyer_threads" / "carousell:2145160641.json").write_text("{}")
         (Path(tmp) / "wants").mkdir()
@@ -84,7 +84,7 @@ def test_target_inference():
 def test_target_attached_to_correction():
     print("a named correction carries its target through process_events:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         (Path(tmp) / "threads").mkdir()
         (Path(tmp) / "threads" / "fb:998877.json").write_text("{}")
         control.pause(source="telegram")
@@ -96,7 +96,7 @@ def test_target_attached_to_correction():
 def test_batch_order_pause_then_correct():
     print("a mixed batch [/pause, note, /resume] is fully accounted for:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         acks = cc.process_events([
             _ev("command", "/pause"),
             _ev("text", "use 80 dollars"),
@@ -110,7 +110,7 @@ def test_batch_order_pause_then_correct():
 def test_single_pause_ack_no_duplicate():
     print("dedup: two /pause in one batch yield EXACTLY ONE ack (the 7x 'holding here' spam bug):")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         acks = cc.process_events([_ev("command", "/pause"), _ev("command", "/pause")])
         check("paused after the batch", control.is_paused() is True)
         check("exactly ONE pause ack for two /pause", sum(a.startswith("⏸") for a in acks) == 1)
@@ -122,13 +122,13 @@ def test_single_pause_ack_no_duplicate():
 def test_resume_ack_reflects_pending_corrections():
     print("honest resume ack: 'applying now' only when corrections are queued, else 'back to work':")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         # paused with a queued correction → resume promises to apply it
         cc.process_events([_ev("command", "/pause"), _ev("text", "list kettle at 9 not 8")])
         acks = cc.process_events([_ev("command", "/resume")])
         check("resume WITH pending → 'applying your corrections'", "applying your corrections" in acks[0])
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         # paused with nothing queued → resume just confirms, no false promise
         cc.process_events([_ev("command", "/pause")])
         acks = cc.process_events([_ev("command", "/resume")])
@@ -148,7 +148,7 @@ def test_drain_catchall_acks_external_pause_once():
     print("drain catch-all: a flag flipped OUTSIDE a /pause event (LLM pass / loop fast-path) still"
           " gets exactly ONE ack, immune to the self-kill race:")
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         control.pause(source="telegram")          # set by something other than a /pause event
         sent = []
         orig_poll, orig_send = cc._poll_events, cc._send

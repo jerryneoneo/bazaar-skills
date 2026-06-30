@@ -60,20 +60,20 @@ def test_gated_modes_cover_sending_passes():
 def test_flags_stranded_pending_intent():
     print("a stranded pending intent (no live lease) is flagged for re-drive:")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             _enqueue("fb:vida", "fb", "no defects, all brand new", in_msg="1:50 PM|defects?")
             undriven = harness_run._undriven_intents("")
             check("one stranded intent flagged", len(undriven) == 1)
             check("it is the vida thread", undriven[0]["thread_id"] == "fb:vida")
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_scopes_to_resource_market():
     print("the gate scopes to the pass's marketplace (resource):")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             _enqueue("fb:a", "fb", "x")
             _enqueue("carousell:b", "carousell", "y")
@@ -82,32 +82,32 @@ def test_scopes_to_resource_market():
                   harness_run._undriven_intents("fb")[0]["market"] == "fb")
             check("unscoped sees both", len(harness_run._undriven_intents("")) == 2)
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_live_lease_intent_not_flagged():
     print("a pending intent whose market holds a LIVE lease is NOT flagged (in-flight, not stranded):")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             _enqueue("fb:vida", "fb", "in flight")
             lease.acquire(Path(d), "market:fb", "worker-live", "buyer", lease.AGENT_MARKET_TTL_SEC)
             check("live-lease intent guarded (not flagged)",
                   harness_run._undriven_intents("fb") == [])
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_sent_unverified_not_flagged():
     print("a sent_unverified intent is NOT flagged (the send fired; verify path owns it):")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             _enqueue("fb:olaf", "fb", "sent but uncommitted", sent=True)
             check("sent_unverified not treated as a never-fired send",
                   harness_run._undriven_intents("fb") == [])
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 if __name__ == "__main__":

@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.bazaarskills.agent</string>
+  <string>com.selly.agent</string>
 
   <key>ProgramArguments</key>
   <array>
     <!-- __PYTHON__ is resolved by install_daemon.sh to a stable, FDA-grantable interpreter
          (a Homebrew python if present, else /usr/bin/python3). NOT the bare /usr/bin/python3 shim:
          it re-execs a framework binary that launchd can't attribute Full Disk Access to, which
-         silently blocks Instant (notification) wake mode. See skills/bazaar-config.md "Wake speed". -->
+         silently blocks Instant (notification) wake mode. See skills/selly-config.md "Wake speed". -->
     <string>__PYTHON__</string>
     <string>__RUNTIME__/bin/agent_daemon.py</string>
   </array>
@@ -27,7 +27,7 @@
     <string>__PATH__</string>
     <!-- Pin the agent runtime so the daemon never autodetects `codex` (which the runner refuses
          → rc=3, a whole pass lost). Only claude-code is wired today; see harness_run.py. -->
-    <key>BAZAAR_HARNESS</key>
+    <key>SELLY_HARNESS</key>
     <string>claude-code</string>
   </dict>
 

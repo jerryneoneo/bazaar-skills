@@ -177,7 +177,7 @@ def test_reap_then_plan_escalates_after_budget():
     import os as _os
     import json as _json
     with tempfile.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             workers = {"fb": {"proc": _FakeProc(supervisor.CAP_HIT_SIGNAL),
                               "holder": "sup:buyer:fb:9", "started": 0.0}}
@@ -197,7 +197,7 @@ def test_reap_then_plan_escalates_after_budget():
                       any("fb" in r.get("text", "") and "turn cap" in r.get("text", "") for r in recs))
                 check("kind is notify", any(r.get("kind") == "notify" for r in recs))
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reap_caphit_budget_matches_daemon_count():
@@ -289,7 +289,7 @@ def test_preempt_on_pause():
     saved_confirm = supervisor._confirm_dead
     supervisor._confirm_dead = lambda *a, **k: None  # don't signal a real process group in a test
     with tempfile.TemporaryDirectory() as tmp:
-        os.environ["BAZAAR_DATA_DIR"] = tmp
+        os.environ["SELLY_DATA_DIR"] = tmp
         try:
             base = lease.data_dir()
             acq = lease.acquire(base, "market:fb", "h", "buyer", supervisor.LEASE_TTL_SEC)
@@ -301,7 +301,7 @@ def test_preempt_on_pause():
             check("market lease released (re-acquirable by another holder)", reacq["acquired"] is True)
         finally:
             supervisor._confirm_dead = saved_confirm
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_fast_pause_recognition():
@@ -477,7 +477,7 @@ def test_continuation_hint_does_not_double_advance_sell_memo():
 def test_enabled_sell_markets():
     print("enabled_sell_markets parses both config shapes:")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             (Path(d) / "seller_config.json").write_text(json.dumps(
                 {"marketplaces": {"fb": {"enabled": True}, "carousell": {"enabled": False},
@@ -486,7 +486,7 @@ def test_enabled_sell_markets():
             (Path(d) / "seller_config.json").write_text(json.dumps({"marketplaces": ["fb", "carousell"]}))
             check("legacy array shape → all", set(supervisor.enabled_sell_markets()) == {"fb", "carousell"})
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_run_once_idle_no_launches():

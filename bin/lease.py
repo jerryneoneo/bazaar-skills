@@ -46,7 +46,7 @@ AGENT_MARKET_TTL_SEC = 600
 
 
 def data_dir():
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

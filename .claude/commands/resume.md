@@ -1,5 +1,5 @@
 ---
-description: Bazaar — resume the agent, applying any corrections you left while paused
+description: SELLY — resume the agent, applying any corrections you left while paused
 ---
 
 # /resume — continue, applying your corrections first

@@ -92,7 +92,7 @@ def test_render_report_has_header_and_counts():
     findings = [_finding(category="missed-action", severity="high", record_id="r1")]
     candidates = eval_run.eval_cluster.cluster(findings)
     text = eval_run._render_report(findings, candidates, eval_corpus.Corpus(), eval_run.datetime.now(eval_run.timezone.utc))
-    check("has report header", "# Bazaar evaluation report" in text)
+    check("has report header", "# SELLY evaluation report" in text)
     check("severity counts line present", "high=1" in text)
     check("candidate section rendered", "Top improvement candidates" in text and "missed-action" in text)
 

@@ -29,7 +29,7 @@ Output (stdout, JSON):
 
 Exit codes: 0 ok · 2 bad input · 3 item record missing/invalid.
 
-The items dir resolves to ../data/items, overridable via $BAZAAR_ITEMS_DIR (for tests).
+The items dir resolves to ../data/items, overridable via $SELLY_ITEMS_DIR (for tests).
 Pure / stdlib. Reads + writes exactly one item record; touches no floor or address.
 """
 
@@ -49,8 +49,8 @@ REMOVED_STATUS = "removed_by_seller"
 
 
 def items_dir() -> Path:
-    """The durable item-record dir. $BAZAAR_ITEMS_DIR wins (tests); else bin/ -> ../data/items."""
-    override = os.environ.get("BAZAAR_ITEMS_DIR")
+    """The durable item-record dir. $SELLY_ITEMS_DIR wins (tests); else bin/ -> ../data/items."""
+    override = os.environ.get("SELLY_ITEMS_DIR")
     if override:
         return Path(override)
     return Path(__file__).resolve().parent.parent / "data" / "items"

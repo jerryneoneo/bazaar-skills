@@ -1,7 +1,7 @@
 """macOS platform — launchd supervisor + TCC-aware runtime dir.
 
 This is the only place launchd/TCC knowledge lives. The runtime must sit outside the
-TCC-protected ~/Documents, ~/Desktop, ~/Downloads (SETUP.md §3), so we use ~/bazaar-skills.
+TCC-protected ~/Documents, ~/Desktop, ~/Downloads (SETUP.md §3), so we use ~/selly-agent.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ class MacOSPlatform(Platform):
     name = "macos"
 
     def runtime_dir(self) -> Path:
-        return Path.home() / "bazaar-skills"
+        return Path.home() / "selly-agent"
 
     def is_tcc_blocked(self, path: Path) -> bool:
         try:
@@ -43,7 +43,7 @@ class MacOSPlatform(Platform):
         plan = {
             "supervisor": "launchd",
             "script": str(script),
-            "jobs": ["com.bazaarskills.chrome", "com.bazaarskills.agent"],
+            "jobs": ["com.selly.chrome", "com.selly.agent"],
             "path_hints": self.path_hints(),
             "dry_run": dry_run,
         }

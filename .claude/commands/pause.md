@@ -1,5 +1,5 @@
 ---
-description: Bazaar — pause the agent mid-flight (stop acting; queue corrections)
+description: SELLY — pause the agent mid-flight (stop acting; queue corrections)
 ---
 
 # /pause — stop the agent so you can correct it

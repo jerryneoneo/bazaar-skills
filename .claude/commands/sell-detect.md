@@ -5,7 +5,7 @@ description: Detect existing listings on connected marketplaces, manage + cross-
 # /sell-detect — find and distribute existing listings
 
 Thin entry point into the distribution flow. Scans every **enabled** marketplace for listings the
-seller created **outside** Bazaar, offers to bring each under management (watch chats + negotiate),
+seller created **outside** SELLY, offers to bring each under management (watch chats + negotiate),
 and cross-lists items to the seller's other suitable marketplaces. Also recommends platforms the
 seller hasn't set up yet when an item is a good fit.
 
@@ -25,6 +25,6 @@ Notes:
 - Offers are gated by `config.approvals.steps.distribution` (`balanced` default: `confirm`).
 - Honors `--dry-run` (scan/read run; imports, setups, and cross-list publishes are logged, not executed).
 - Also reachable as a `/detect` command over the seller channel via `/sell-run`. You rarely need to
-  run it by hand: `/bazaar-run` (§2b) auto-scans each enabled market on a cadence
+  run it by hand: `/selly-run` (§2b) auto-scans each enabled market on a cadence
   (`config.scan_interval_hours`, default 24h) and offers to manage + cross-list anything it finds.
   `/sell-detect` forces an immediate scan of **all** markets now.

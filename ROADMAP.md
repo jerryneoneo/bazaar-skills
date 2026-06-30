@@ -1,6 +1,6 @@
 # Roadmap
 
-Where Bazaar Skills is headed. This is **directional, not a set of commitments**; order and timing
+Where SELLY Skills is headed. This is **directional, not a set of commitments**; order and timing
 shift as we learn. The architecture is channel-, OS-, harness-, and model-agnostic by design (adapter
 seams throughout), so most roadmap items slot in behind stable interfaces. The axes are at different
 stages: the channel seam is clean (some adapters below are already built and just await onboarding
@@ -38,7 +38,7 @@ marketplaces, running inside your own Claude Code session and driving your real 
 
 Released 2026-06-28 (see [CHANGELOG.md](CHANGELOG.md)):
 
-- **`/bazaar-catchup`.** One deep sweep across every listing, marketplace, and setup surface that
+- **`/selly-catchup`.** One deep sweep across every listing, marketplace, and setup surface that
   reports everything waiting on you and offers to handle each item.
 - **Instant wake mode.** Reply the moment a buyer messages (push-notification trigger), with polling
   as the safe default.

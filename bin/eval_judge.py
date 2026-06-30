@@ -28,7 +28,7 @@ TIMEOUT_SEC = 150
 TARGET_BY_CATEGORY = {
     "context-loss": "bin/harness_run.py:CHANNEL_PROMPT",
     "missed-action": "skills/reply-pipeline.md",
-    "misroute": ".claude/commands/bazaar-run.md",
+    "misroute": ".claude/commands/selly-run.md",
     "tone-voice": "skills/voice.md",
     "hallucinated-state": "skills/reply-pipeline.md",
     "unhelpful-ux": "skills/voice.md",

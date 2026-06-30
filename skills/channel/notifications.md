@@ -8,7 +8,7 @@ Correlation: each `notify` is sent with a `ref` = the escalation id and recorded
 `channel_state.json → pending[]`. When a matching `action` (button) or `text` (free reply)
 event arrives from `watch()`, resolve that pending entry and clear it.
 
-> **Concurrency (when `$BAZAAR_RESOURCE` is set — you are one of several per-marketplace workers).**
+> **Concurrency (when `$SELLY_RESOURCE` is set — you are one of several per-marketplace workers).**
 > Do NOT write the control channel directly for a **background completion notice** ("✅ listed",
 > "cross-listed to eBay", "done") — two workers sending at once would interleave. Instead **enqueue**
 > it: `python3 bin/channel_outbox.py enqueue --kind notify --text "<notice>" [--ref <id>]`. The
@@ -97,14 +97,14 @@ field not found:   notify "🧩 Couldn't find <field> on <platform> (page may ha
                           Skip this platform, or retry?" actions=[retry=Retry, skip=Skip]
 ```
 
-**Bazaar update available (from the daemon's throttled `update_check`):** a one-way heads-up, NOT a
+**SELLY update available (from the daemon's throttled `update_check`):** a one-way heads-up, NOT a
 pending escalation. The always-on daemon checks upstream on a slow cadence (`config.update_check_interval_hours`,
-default 24h, read-only `git fetch`) and, when a newer Bazaar is available, sends ONE notice. It is
-**NOTIFY-only — never auto-applied** (account safety); the seller runs `/bazaar-upgrade` when they
+default 24h, read-only `git fetch`) and, when a newer SELLY is available, sends ONE notice. It is
+**NOTIFY-only — never auto-applied** (account safety); the seller runs `/selly-upgrade` when they
 choose. Deduped per version via `update_check snooze` (a newer release still breaks through). The
 supervisor ENQUEUEs it (single-writer drain); the single-flight loop sends directly.
 ```
-notify "🆙 Bazaar update available: v<current> -> v<latest>. Run /bazaar-upgrade when convenient
+notify "🆙 SELLY update available: v<current> -> v<latest>. Run /selly-upgrade when convenient
         (I won't auto-update)."   # kind=notify, no actions — informational
 ```
 
@@ -127,7 +127,7 @@ the **sale** completion confirm (Sold ✅ / Fell through) so the take-down fires
 
 **close → manual:** resolves from EITHER the button OR a free-text "deal other ways" / offline-terms
 disclosure (a pickup address, "leave it outside", a PayNow/bank number, "cash on collection" — the
-seller choosing to handle it themselves; routed here by `bazaar-run.md` §1). Post a brief hand-off
+seller choosing to handle it themselves; routed here by `selly-run.md` §1). Post a brief hand-off
 line to the buyer ("You're all set at <price>! The seller will take it from here to sort out payment
 and delivery with you directly. Thanks 🙏"), set thread `status:"handover"` (terminal — the agent
 stops auto-replying on it). Confirm to the seller, spelling out what they now own and promoting the

@@ -2,7 +2,7 @@
 
 STATUS: install/config layer is implemented; the runtime `pass_argv` is a **best-effort, UNVERIFIED
 stub** kept here so the seam stays genuinely harness-agnostic and a future contributor has a starting
-point. Bazaar ships Claude-only today (see ARCHITECTURE.md §2 / README). The headless runner refuses
+point. SELLY ships Claude-only today (see ARCHITECTURE.md §2 / README). The headless runner refuses
 to run a non-claude-code harness until its `pass_argv` is verified.
 
 Honest notes vs Claude Code:
@@ -74,7 +74,7 @@ class CodexHarness(Harness):
     def write_mcp(self, dest: Path, servers: dict) -> dict:
         path = self._config_path(dest)
         path.parent.mkdir(parents=True, exist_ok=True)
-        blocks = ["# Bazaar MCP servers (generated)\n"]
+        blocks = ["# SELLY MCP servers (generated)\n"]
         for name, spec in servers.items():
             blocks.append(f"[mcp_servers.{name}]")
             blocks.append(f'command = "{_toml_escape(spec.get("command", ""))}"')

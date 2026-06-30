@@ -20,7 +20,7 @@ reserve and send under-sends, which is the safe direction for account safety.
 Usage:
     python3 pacing_gate.py reserve --marketplace <id> [--kind reply] [--mode interactive] [--now <iso>]
     python3 pacing_gate.py status  [--marketplace <id>] [--now <iso>]
-    (tests relocate the whole data dir via the BAZAAR_DATA_DIR env var; there is no
+    (tests relocate the whole data dir via the SELLY_DATA_DIR env var; there is no
      per-invocation path override, so every process competes on the same lock file.)
 
 `--mode` selects the post-`go` jitter range ONLY — the cap and quiet_hours are enforced
@@ -73,9 +73,9 @@ HARD_DELAY_CEILING_SEC = 300
 
 
 def data_dir():
-    """The data directory — relocatable via BAZAAR_DATA_DIR (used by tests for isolation).
+    """The data directory — relocatable via SELLY_DATA_DIR (used by tests for isolation).
     There is no per-invocation override, so all production processes share one lock file."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

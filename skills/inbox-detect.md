@@ -1,7 +1,7 @@
 # INBOX-SWEEP flow — review every marketplace inbox, offer to take over untracked chats
 
-Bazaar normally acts only on conversations it already tracks. This skill reviews the **inbox itself**
-on each enabled marketplace, finds threads the user started on their **own** (outside Bazaar), and
+SELLY normally acts only on conversations it already tracks. This skill reviews the **inbox itself**
+on each enabled marketplace, finds threads the user started on their **own** (outside SELLY), and
 offers to take them over — both **purchase chats** (the user messaged a seller about a listing) and
 **listing chats** (someone messaged a listing the user never imported). It is the buy-and-sell
 counterpart to `distribution.md`'s my-listings SCAN, run against the chat list rather than the
@@ -13,7 +13,7 @@ counterpart to `distribution.md`'s my-listings SCAN, run against the chat list r
 > unread probe to avoid opening threads when nothing changed. Requires onboarding done (at least one
 > of `seller_config.json` / `buyer_config.json`).
 > **Approval:** the offer to step into a thread reads `config.approvals.steps.takeover`
-> (`skills/bazaar-config.md`) — a **hard floor**: `confirm` (default) asks first, `escalate` parks;
+> (`skills/selly-config.md`) — a **hard floor**: `confirm` (default) asks first, `escalate` parks;
 > it is never `auto`. The private budget ask on a buy takeover is independently `confirm`/`escalate`.
 > Once the user accepts, per-message handling reverts to the normal side gates (`buy_offer`/`buy_accept`
 > for buys; `offers`/`buyer_replies` for sells).
@@ -47,14 +47,14 @@ guard before starting (never interrupt an in-flight wizard).
   inboxes (union of seller + buyer markets), `scope:"both"`.
 - **`/buy-detect`** (`.claude/commands/buy-detect.md`) → start **SWEEP** with `scope:"buy"` (only
   buyer-initiated threads are offered; seller-initiated ones are left to `/sell-detect`).
-- **autonomous cadence** (from `bazaar-run.md` §2b) → start **SWEEP** for the **one** market that
+- **autonomous cadence** (from `selly-run.md` §2b) → start **SWEEP** for the **one** market that
   `python3 bin/inbox_detect.py due` reports overdue (cursor: `data/scan_state.json`, cadence
   `config.scan_interval_hours`) — the same slot as the my-listings SCAN, so a due market is swept
   for both unmanaged listings *and* untracked chats, then stamped once.
 
 ---
 
-## SWEEP — find inbox threads Bazaar isn't managing
+## SWEEP — find inbox threads SELLY isn't managing
 Scope: `/inbox-detect` sweeps **all** enabled markets; `/buy-detect` and the autonomous cadence pass a
 narrower set. `markets = [market]` when the cadence scopes one, else every enabled id (union of
 `seller_config` + `buyer_config`). Gate the open with the cheap unread probe so a quiet inbox costs
@@ -162,7 +162,7 @@ next group with decision==null, or → Done
 ```
 **Why no opening offer fires:** `liaison-pipeline.md` §2 INITIATE runs only when a thread has *no
 outbound message yet*. Here the seeded transcript already has outbound messages **and** the cursor sits
-at the last message, so the buy side of `/bazaar-run` (§3) finds nothing past the cursor — it neither
+at the last message, so the buy side of `/selly-run` (§3) finds nothing past the cursor — it neither
 re-INITIATEs nor re-replies; it simply waits for the seller's next message, then liaison replies once
 (naturally as the buyer, no identity line, per `skills/voice.md` Rule 3). No duplicate offer, no
 re-greeting, no contradicting the user's own last line.

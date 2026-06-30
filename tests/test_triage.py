@@ -292,7 +292,7 @@ def test_cli_json_runs(tmpdir_unused=None):
     import subprocess
     with tempfile.TemporaryDirectory() as tmp:
         _write_json(tmp, "floors/a.json", {"floor_price": 77777})
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         p = subprocess.run([sys.executable, str(ROOT / "bin" / "triage.py"), "--json"],
                            capture_output=True, text=True, env=env)
         check("exit 0", p.returncode == 0)

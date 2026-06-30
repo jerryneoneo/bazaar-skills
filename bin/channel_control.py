@@ -114,7 +114,7 @@ def corrections_pass_due(paused: bool, pending_count: int, elapsed_sec: float,
 
 def process_events(events: list[dict]) -> list[str]:
     """Apply control side-effects for one batch of normalized telegram events (in order) and return
-    the acks to send back. Pure except for the control.json writes (isolated via BAZAAR_DATA_DIR in
+    the acks to send back. Pure except for the control.json writes (isolated via SELLY_DATA_DIR in
     tests). Every inbound is accounted for: a /pause or /resume action, or a queued correction."""
     acks: list[str] = []
     for ev in events or []:
@@ -179,7 +179,7 @@ def drain(env: dict | None = None) -> int:
     for ack in acks:
         _send(ack, env)
     # Catch-all single confirmation: when the flag was flipped by something OTHER than a /pause event
-    # in this batch — the LLM seller pass (bazaar-run.md) or a loop's deterministic /pause fast-path —
+    # in this batch — the LLM seller pass (selly-run.md) or a loop's deterministic /pause fast-path —
     # no ack was queued above, so the one-shot claim fires it here. Exactly once per episode (the claim
     # self-dedups), and it does NOT depend on any pass surviving, so the self-kill race can't lose it.
     edge_ack = control.claim_pause_ack()

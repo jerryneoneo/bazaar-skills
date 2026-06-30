@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""onboarding_notice.py — SessionStart hook: self-heal an unfinished Bazaar setup.
+"""onboarding_notice.py — SessionStart hook: self-heal an unfinished SELLY setup.
 
-Fires when a Claude Code session starts in the Bazaar runtime dir. If Bazaar is installed but
+Fires when a Claude Code session starts in the SELLY runtime dir. If SELLY is installed but
 onboarding never completed (no data/seller_config.json yet), it injects a one-line note telling the
-agent to offer to finish setup by following .claude/commands/bazaar-install.md.
+agent to offer to finish setup by following .claude/commands/selly-install.md.
 
 This covers the case where `./setup` was run from inside an agent / non-TTY shell: there, the
 first-run handoff can't exec an attachable interactive session, so onboarding may never have run.
 Once data/seller_config.json exists the note stops on its own (no snooze needed).
 
-NO-OP for the daemon's headless `claude -p` passes — they set BAZAAR_DAEMON_PASS=1 (harness_run.py),
+NO-OP for the daemon's headless `claude -p` passes — they set SELLY_DAEMON_PASS=1 (harness_run.py),
 can't act on an interactive prompt, and must never have every pass nagged.
 
 Output contract (Claude Code SessionStart): JSON on stdout with
@@ -30,14 +30,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _data_dir() -> Path:
-    """The data dir — relocatable via BAZAAR_DATA_DIR (used by tests for isolation), matching bin/."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data dir — relocatable via SELLY_DATA_DIR (used by tests for isolation), matching bin/."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else ROOT / "data"
 
 
 def main() -> int:
     # Never run inside the daemon's headless passes (they can't act on it and would see it every pass).
-    if os.environ.get("BAZAAR_DAEMON_PASS"):
+    if os.environ.get("SELLY_DAEMON_PASS"):
         return 0
     try:
         sys.stdin.read()  # consume the hook event JSON (we don't need its fields)
@@ -49,9 +49,9 @@ def main() -> int:
             return 0
     except OSError:
         return 0  # fail-open: never wedge a session
-    note = ("Bazaar is installed here but onboarding isn't finished yet (no data/seller_config.json). "
+    note = ("SELLY is installed here but onboarding isn't finished yet (no data/seller_config.json). "
             "Proactively tell the user in one short line and offer to finish setup now by following "
-            ".claude/commands/bazaar-install.md (the /bazaar-install runbook).")
+            ".claude/commands/selly-install.md (the /selly-install runbook).")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                              "additionalContext": note}}))
     return 0

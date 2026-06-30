@@ -1,17 +1,17 @@
 # ONBOARDING flow
 
-**Triggers:** after INTRO `setup`, the `/onboard` command, or a jump from `/bazaar-install` /
-`/bazaar` into one of the named anchors below (re-runnable any time to edit — show the current value
+**Triggers:** after INTRO `setup`, the `/onboard` command, or a jump from `/selly-install` /
+`/selly` into one of the named anchors below (re-runnable any time to edit — show the current value
 as the default and accept "keep"). Writes `data/seller_config.json` and seeds availability.
 
 Uses only the `channel.md` verbs. All money/address handling follows the trust rules below. The
 `##`-anchored sections (`CHOOSE_INTERFACE`, `CHOOSE_MARKETPLACES`, `APPROVALS`, `BUYER_PROFILE`) are
-the single source of truth for those steps — full onboarding runs them in order; `/bazaar` jumps
-straight to one (incl. `WAKE_SPEED`, the optional Instant-mode speed upgrade). Bazaar is one agent that can **sell and buy**; the seller fields below write
+the single source of truth for those steps — full onboarding runs them in order; `/selly` jumps
+straight to one (incl. `WAKE_SPEED`, the optional Instant-mode speed upgrade). SELLY is one agent that can **sell and buy**; the seller fields below write
 `data/seller_config.json`, and the optional `BUYER_PROFILE` step writes `data/buyer_config.json`.
 
 ```
-say  "Let's get you set up. You can re-run /onboard (or open /bazaar) any time to change these."
+say  "Let's get you set up. You can re-run /onboard (or open /selly) any time to change these."
 
 run  CHOOSE_INTERFACE                                       # how you talk to me (probe & bind)
 ask  "What currency do you sell in?"                        -> currency        (e.g. SGD)
@@ -44,7 +44,7 @@ run  WAKE_SPEED                                             # optional: Instant 
 ask  "Want me to BUY for you too? I can search the marketplaces and negotiate on your behalf."
      options=[yes=Set up buying, skip=Just selling for now]
   yes  -> run BUYER_PROFILE                                 # writes data/buyer_config.json
-  skip -> say "No problem, enable buying any time via /bazaar -> buying."
+  skip -> say "No problem, enable buying any time via /selly -> buying."
 
 write data/seller_config.json   (schema below)
 say  "✅ All set! Send /list with photos to sell, or /search to buy."
@@ -78,7 +78,7 @@ write seller_config.channel = { adapter: choice, bound_at: <today>, detail: {…
 
 # SWITCHING IS EASY — never lock the user in, and make sure they KNOW it:
 #  • Right after binding, TELL them: "You can change your interface anytime — just say 'switch to
-#    Telegram' or open /bazaar -> interface."
+#    Telegram' or open /selly -> interface."
 #  • If they chose console, also nudge: "Want messages on your phone instead? Switch to Telegram
 #    anytime (~2 min with a BotFather token) — say the word."
 #  • MID-ONBOARDING: if at ANY later step the user says "use Telegram" / "switch to Telegram" (or
@@ -86,7 +86,7 @@ write seller_config.channel = { adapter: choice, bound_at: <today>, detail: {…
 #    bind the new adapter via connect(), then resume where they left off. No restart, no penalty.
 #  • If switching while a daemon is loaded: uninstall -> rewrite seller_config.channel -> reinstall
 #    (see adapters.md).
-say  "Bound <choice>. You can switch anytime — say 'switch to Telegram' or use /bazaar -> interface."
+say  "Bound <choice>. You can switch anytime — say 'switch to Telegram' or use /selly -> interface."
 ```
 
 ## CHOOSE_MARKETPLACES
@@ -123,7 +123,7 @@ say  a note that listings are filtered per item by category at publish time
 ```
 
 ## APPROVALS
-Set the **autonomy level**, which configures both layers at once (see `skills/bazaar-config.md` →
+Set the **autonomy level**, which configures both layers at once (see `skills/selly-config.md` →
 "Two layers of autonomy").
 ```
 say  "How much should I do on my own? Hands-free lets me list, search, and handle chats without
@@ -160,23 +160,23 @@ ask  "Learn my style over time?" options=[suggest=Suggest, then I apply (recomme
 for (field, value) in answers: run `python3 bin/style.py set --field <field> --value "<value>"`
      # firmness can also use `python3 bin/style.py set-firmness <level>` (sets the sell knobs).
 run  `python3 bin/style.py validate`   # fail-fast; re-ask on any error
-# Pending learning suggestions (from /pause steering + /bazaar-eval), if any:
+# Pending learning suggestions (from /pause steering + /selly-eval), if any:
 pending = `python3 bin/style.py proposals`
 if pending: for each, say {current -> proposed, rationale}; ask apply? -> `python3 bin/style.py apply --id <id>`
-say  "✅ Style saved. I'll deal in your voice. Change it anytime with /bazaar -> style."
+say  "✅ Style saved. I'll deal in your voice. Change it anytime with /selly -> style."
 ```
 
 ## WAKE_SPEED
-How fast Bazaar notices a new buyer message. OPTIONAL speed upgrade — Standard works out of the box,
-so never block onboarding on it. Single source of truth for `/bazaar -> speed`; full mechanism in
-`skills/bazaar-config.md` "Wake speed" (resolver + tab_park + fail-open poll fallback). macOS only.
+How fast SELLY notices a new buyer message. OPTIONAL speed upgrade — Standard works out of the box,
+so never block onboarding on it. Single source of truth for `/selly -> speed`; full mechanism in
+`skills/selly-config.md` "Wake speed" (resolver + tab_park + fail-open poll fallback). macOS only.
 ```
 say  "Two speeds (pick one, change anytime):
       ⚡ Instant — I reply the moment a buyer messages on Facebook or Instagram, often answering
          straight from the notification. (Needs Full Disk Access so I can read notifications.)
       🛡️ Standard — hands-off, I check your inboxes on a quick cycle. No extra permissions."
 ask  "Turn on Instant?" options=[instant=Turn on Instant, standard=Keep Standard (default)]
-  standard -> say "Done — Standard polling is on. Turn on Instant anytime via /bazaar -> speed."
+  standard -> say "Done — Standard polling is on. Turn on Instant anytime via /selly -> speed."
   instant  ->
      # macOS only — if not macOS, say so and fall back to Standard.
      # 1) Full Disk Access (TCC is user-only: open the pane + guide, then detect). Report the exact

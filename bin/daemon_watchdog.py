@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import instance_lock  # noqa: E402  PID liveness + lock-holder parse (shared with the daemon)
 import healthcheck  # noqa: E402  reuse heartbeat_status (single source of truth for staleness)
 
-AGENT_LABEL = "com.bazaarskills.agent"
+AGENT_LABEL = "com.selly.agent"
 RUNTIME_DIR = Path(__file__).resolve().parent.parent
 HEARTBEAT_PATH = RUNTIME_DIR / ".daemon.heartbeat"
 LOCK_PATH = RUNTIME_DIR / ".daemon.instancelock"

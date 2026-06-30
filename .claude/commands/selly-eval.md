@@ -1,8 +1,8 @@
 ---
-description: Bazaar Skills — evaluate recent conversations & passes, surface UX/behavior issues to fix
+description: SELLY Skills — evaluate recent conversations & passes, surface UX/behavior issues to fix
 ---
 
-# /bazaar-eval — grade the agent's own behavior
+# /selly-eval — grade the agent's own behavior
 
 A self-evaluation pass over recent activity. It joins the control-channel transcript
 (`data/channel_transcript.jsonl`), the pass log (`logs/pass.log`), and live state
@@ -16,7 +16,7 @@ Two layers:
   takeover marked managed with no thread seeded behind it (an orphaned takeover from the inbox sweep).
 - **LLM judge** (billed) adds nuance: misroutes, hallucinated state, tone/voice, low-UX. It is a
   headless `claude -p` sonnet subprocess, so it is the only part that costs tokens. It runs on every
-  `/bazaar-eval` (opt out with `--no-llm`) and on the nightly daemon run by default
+  `/selly-eval` (opt out with `--no-llm`) and on the nightly daemon run by default
   (`config.eval_judge_nightly`; set false for a $0 nightly).
 
 ## Run it

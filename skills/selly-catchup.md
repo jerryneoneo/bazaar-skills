@@ -1,6 +1,6 @@
-# BAZAAR-CATCHUP flow — sweep everything, report what's waiting, propose the work
+# SELLY-CATCHUP flow — sweep everything, report what's waiting, propose the work
 
-`/bazaar-catchup` answers one question: **is there anything I haven't attended to?** It does a deep,
+`/selly-catchup` answers one question: **is there anything I haven't attended to?** It does a deep,
 mostly read-only sweep across three surfaces, then sends one grouped digest and offers to act on each
 group by handing off to the skill that already owns it (each keeps its own approval gate). Nothing is
 acted on during the sweep itself.
@@ -26,7 +26,7 @@ The three surfaces:
 > `buyer_config.json`); if neither exists, run `skills/channel/onboarding.md` first.
 > **Approval:** the sweep itself acts on nothing, so it reads no business gate. Each accepted proposal
 > hands off to its owning skill, which applies its own gate (e.g. `takeover` for `/inbox-detect`,
-> `distribution` for `/sell-detect`) per `skills/bazaar-config.md`.
+> `distribution` for `/sell-detect`) per `skills/selly-config.md`.
 
 This is turn-based and resumable, exactly like `inbox-detect.md` / `distribution.md`: one market (or
 one question) per pass, persisted in `data/catchup_session.json`, so a long deep sweep never blocks a
@@ -53,15 +53,15 @@ persistence bug, same rule as listing/search). Only **one** of `catchup_session.
 is active at a time; guard before starting (never interrupt an in-flight wizard).
 
 ## Entry points
-- **`/bazaar-catchup`** (`.claude/commands/bazaar-catchup.md`) → start at **HEALTH**, `scope:"both"`.
+- **`/selly-catchup`** (`.claude/commands/selly-catchup.md`) → start at **HEALTH**, `scope:"both"`.
   Forces an immediate full sweep of every enabled, logged-in marketplace now.
 - **`/catchup` on the control channel** (Telegram et al.) → the same start (HEALTH, `scope:"both"`).
-  The channel pass routes it (`bazaar-run.md` §1) and, because the sweep is turn-based, drives one
-  step per pass with the seller's mid-flow replies routed back via `bazaar-run.md` §0. Registered in
+  The channel pass routes it (`selly-run.md` §1) and, because the sweep is turn-based, drives one
+  step per pass with the seller's mid-flow replies routed back via `selly-run.md` §0. Registered in
   the Telegram "/" menu (`bin/telegram.py` `BOT_COMMANDS`).
 - It has **no autonomous cadence** of its own (decision: on-demand only). The daemon already sweeps one
-  due market per pass via `bazaar-run.md` §2b; `/bazaar-catchup` is the manual "check all of it now".
-  Wrap with `/loop` (e.g. `/loop /bazaar-catchup`) for a periodic digest if you want one.
+  due market per pass via `selly-run.md` §2b; `/selly-catchup` is the manual "check all of it now".
+  Wrap with `/loop` (e.g. `/loop /selly-catchup`) for a periodic digest if you want one.
 
 ---
 
@@ -79,7 +79,7 @@ digest.health = {
 markets_pending = enabled markets (union of scope-relevant sides) MINUS digest.health.logged_out
 phase = sweep ; markets_done = [] ; write ; return         # one step per pass
 ```
-A logged-out market is reported as a health task to re-auth (`/bazaar` → marketplaces) and is **not**
+A logged-out market is reported as a health task to re-auth (`/selly` → marketplaces) and is **not**
 swept live this run (a deep read on a logged-out tab would just bounce to a login wall).
 
 ## SWEEP — local state, then one live market per pass
@@ -108,7 +108,7 @@ if peek.markets[m].new OR forced:
       classify each (bin/inbox_detect.py classify) into buy / sell / unknown
       append to digest.deep[m].untracked_chats = [ {tid, side, item_hint} ]   # do NOT offer takeover
 on logged-out / checkpoint for m -> move m to digest.health.logged_out, notify re-auth for THIS
-   market only (notifications.md), keep the others going (bazaar-run per-market resilience)
+   market only (notifications.md), keep the others going (selly-run per-market resilience)
 
 markets_done += [m] ; write ; return        # next pass sweeps the next market; when empty -> report
 ```
@@ -130,7 +130,7 @@ groups. If everything is empty: `say("✅ All caught up across <markets>. Nothin
 ⚙️ Setup / maintenance   (logged-out market, daemon not loaded, channel unbound, PAUSED,
                           notification path down, listing re-scan or self-eval overdue)
 ```
-If `digest.health.paused`, **lead** with the pause line (mirror `bazaar-run.md` /status): "⏸ PAUSED
+If `digest.health.paused`, **lead** with the pause line (mirror `selly-run.md` /status): "⏸ PAUSED
 since <since> (via <source>), <N> correction(s) queued. Send /resume to continue." Build `proposals`
 (one per non-empty group, in the same order) and `phase=propose`; write; return.
 
@@ -141,19 +141,19 @@ escalations (sell)   -> /sell-resolve            escalations (buy) -> the buy es
 buyers_waiting       -> /sell-run                 sellers_waiting / wants -> /buy-run
 listings (any)       -> /sell-detect              untracked_chats   -> /inbox-detect (/buy-detect = buy only)
 open checkouts       -> follow up on the buyer (notifications.md close)
-logged-out market    -> re-auth via /bazaar       paused            -> /resume
+logged-out market    -> re-auth via /selly       paused            -> /resume
 ```
 Present the numbered list once and ask one question:
 `ask("Want me to handle all of these, pick one, or leave it for now?",
      options="all=Handle all, pick=Pick one, leave=Leave it")` → `step=awaiting_action`.
 - **all** → for each proposal, RESUME its owning flow using the FOLLOW-UP / "do all" semantics in
-  `bazaar-run.md` §0 (a want already in `data/wants/`; the distribution batch; the inbox sweep): say
+  `selly-run.md` §0 (a want already in `data/wants/`; the distribution batch; the inbox sweep): say
   "On it" once, run them on the following passes, do **not** re-enumerate and do **not** start a new
   flow. Mark each `decision="act"`.
 - **pick** → ask which number, then hand off only that one (its gate still applies). Mark it `act`,
   the rest `defer`.
 - **leave** → mark all `decision="defer"`; nothing is recorded as declined (this is a status check,
-  not a takeover offer, so there is no `takeover_seen` write). The next `/bazaar-catchup` will surface
+  not a takeover offer, so there is no `takeover_seen` write). The next `/selly-catchup` will surface
   anything still open.
 When no proposal has `decision==null`: `session.active=false`; end with a one-line summary
 ("Handled N, left M, all marketplaces swept").

@@ -61,9 +61,9 @@ def _default_state() -> dict:
 
 
 def data_dir() -> Path:
-    """The data directory — relocatable via BAZAAR_DATA_DIR (used by tests for isolation).
+    """The data directory — relocatable via SELLY_DATA_DIR (used by tests for isolation).
     Read at call time so a test that sets the env before importing still hits the scratch dir."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 
