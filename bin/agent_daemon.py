@@ -1092,7 +1092,7 @@ def spawn_research_worker(batch_id: str, env: dict, dry_run: bool) -> None:
         return
     try:
         subprocess.Popen([str(BIN / "run_pass.sh"), "research"],
-                         env={**env, "BAZAAR_RESEARCH_BATCH": batch_id}, cwd=str(SELLER_DIR),
+                         env={**env, "SELLY_RESEARCH_BATCH": batch_id}, cwd=str(SELLER_DIR),
                          start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logging.info("spawned background research worker for %s", batch_id)
     except (OSError, subprocess.SubprocessError) as exc:

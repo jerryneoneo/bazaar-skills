@@ -358,7 +358,7 @@ bin/followup_state.py mark-nudge --thread <thread_id> --side buy`. If pacing ret
 NOT send and do NOT mark (it retries next interval). One nudge per thread per pass; never nudge a
 thread whose tail is inbound."""
 
-RESEARCH_PROMPT = """You are the Bazaar RESEARCH worker, running headless and DETACHED. You have NO
+RESEARCH_PROMPT = """You are the SELLY RESEARCH worker, running headless and DETACHED. You have NO
 browser and NO channel: you cannot message the seller or touch any marketplace. Your ONLY output is a
 single result file, written with the one Bash command you are allowed. Be fast and quiet.
 
