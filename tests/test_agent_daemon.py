@@ -808,6 +808,160 @@ def test_sweep_escalates_only_past_attempts_and_age():
             _os.environ.pop("BAZAAR_DATA_DIR", None)
 
 
+# --------------------------------------------------------------------------- #
+# Catchup orphan reconciliation (a /catchup sweep stranded active:true — e.g.  #
+# killed mid-sweep by a daemon reload — must never freeze the maint lane).     #
+# --------------------------------------------------------------------------- #
+
+def _write_catchup(d, *, active=True, age_sec=None, updated_at="__use_age__", extra=None):
+    """Write data/catchup_session.json under temp dir `d`. `age_sec` sets updated_at relative to now;
+    pass updated_at= a literal string (or None) to override (for the unparseable/absent cases)."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    state = {"active": active, "phase": "sweep", "markets_pending": ["carousell"],
+             "markets_done": ["fb"], "digest": {"local": {"counts": {"total": 20}}}, "proposals": []}
+    if updated_at == "__use_age__":
+        ts = datetime.now(timezone.utc) - timedelta(seconds=age_sec or 0)
+        state["updated_at"] = ts.isoformat()
+    elif updated_at is not None:
+        state["updated_at"] = updated_at
+    if extra:
+        state.update(extra)
+    path = Path(d) / "catchup_session.json"
+    path.write_text(_json.dumps(state))
+    return path
+
+
+def test_catchup_active_parses_and_failopen():
+    print("_catchup_active: True iff the session file says active; fail-open False otherwise:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, active=True, age_sec=10)
+            check("active:true -> True", agent_daemon._catchup_active() is True)
+            _write_catchup(d, active=False, age_sec=10)
+            check("active:false -> False", agent_daemon._catchup_active() is False)
+            (Path(d) / "catchup_session.json").unlink()
+            check("missing file -> False (fail-open)", agent_daemon._catchup_active() is False)
+            (Path(d) / "catchup_session.json").write_text("{not json")
+            check("garbage json -> False (fail-open)", agent_daemon._catchup_active() is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_catchup_session_age():
+    print("_catchup_session_age_sec: real age in seconds; None when it can't be timed:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, age_sec=7200)
+            age = agent_daemon._catchup_session_age_sec()
+            check("~2h old session reads ~7200s", age is not None and 7100 < age < 7300)
+            _write_catchup(d, updated_at="not-a-timestamp")
+            check("unparseable updated_at -> None", agent_daemon._catchup_session_age_sec() is None)
+            _write_catchup(d, updated_at=None)  # absent
+            check("absent updated_at -> None", agent_daemon._catchup_session_age_sec() is None)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_clears_stale():
+    print("reconcile_catchup_orphan: clears a stale active sweep, preserving the digest:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=7200)  # past the 3600 TTL
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            state = _json.loads(path.read_text())
+            check("returns True (it cleared one)", cleared is True)
+            check("session is now inactive", state["active"] is False)
+            check("a closed_reason was stamped", "catchup orphan" in state.get("closed_reason", ""))
+            check("digest preserved (nothing lost)", state["digest"]["local"]["counts"]["total"] == 20)
+            check("markets preserved", state["markets_done"] == ["fb"])
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_clears_untimeable():
+    print("reconcile_catchup_orphan: an active sweep with an un-timeable stamp is treated as stale:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, updated_at="garbage-stamp")
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            check("returns True", cleared is True)
+            check("session inactive (bad stamp can't hide an orphan)",
+                  _json.loads(path.read_text())["active"] is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_spares_fresh():
+    print("reconcile_catchup_orphan: a fresh, recently-advanced sweep is left untouched:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=60)  # well within the TTL
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            check("returns False (nothing to clear)", cleared is False)
+            check("a live sweep stays active", _json.loads(path.read_text())["active"] is True)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_inactive_is_noop():
+    print("reconcile_catchup_orphan: an already-inactive session is a no-op:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, active=False, age_sec=7200)
+            check("returns False", agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
+            (Path(d) / "catchup_session.json").unlink()
+            check("missing file -> False (fail-open, no crash)",
+                  agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_dry_run_noop():
+    print("reconcile_catchup_orphan(dry_run=True): logs only, writes nothing:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=7200)
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=True, ttl_sec=3600)
+            check("returns False under dry-run", cleared is False)
+            check("file untouched (still active)", _json.loads(path.read_text())["active"] is True)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_catchup_ttl_in_config():
+    print("load_config exposes catchup_ttl_sec (default 3600):")
+    cfg = agent_daemon.load_config()
+    check("catchup_ttl_sec present", "catchup_ttl_sec" in cfg)
+    check("is a positive number",
+          isinstance(cfg["catchup_ttl_sec"], (int, float)) and cfg["catchup_ttl_sec"] > 0)
+
+
 if __name__ == "__main__":
     print("agent_daemon tests\n")
     test_plan_outbox_sweep_pure()

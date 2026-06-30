@@ -333,6 +333,10 @@ def test_maint_argv():
     check("full seller browser set", "mcp__playwright__browser_file_upload" in a)
     check("scan cadence + distribution drain", "inbox_detect.py due" in prompt and "distribution_session" in prompt)
     check("never interrupts a listing", "listing_session.json" in prompt)
+    # The catchup stand-down survives, but only for a RECENTLY-UPDATED sweep: the daemon's deterministic
+    # reconciler clears a stale/orphaned one before this pass runs (so it can't freeze the lane forever).
+    check("still defers to an active catch-up sweep", "catchup_session.json" in prompt)
+    check("stand-down scoped to a fresh sweep", "recently updated" in prompt)
 
 
 def test_followup_branch_in_buyer_and_buy():
