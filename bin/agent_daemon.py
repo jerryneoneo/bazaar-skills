@@ -53,6 +53,7 @@ LOOP_ITER_BUDGET = 120
 sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
 import control  # noqa: E402  the single source of truth for the pause flag (data/control.json)
+import channel_control  # noqa: E402  is_pause_command (shared /pause matching rule) + deterministic drain
 import instance_lock  # noqa: E402  PID-aware singleton lock (reclaims a stale lock; no respawn storm)
 import proc_tree  # noqa: E402  kill the whole pass tree on preempt/timeout (shared with supervisor)
 import notify_watch  # noqa: E402  notification-path trigger (macOS Notification Center; fail-open)
@@ -70,6 +71,7 @@ TOKEN_DIRS = [SELLER_DIR, SELLER_DIR.parent]
 import harness_run  # noqa: E402  CAP_HIT_SIGNAL single source of truth
 import lease  # noqa: E402  per-market lease — the outbox sweeper skips a market a live worker owns
 import thread_outbox  # noqa: E402  the send-intent log the outbox sweeper drains stranded sends from
+import atomic_io  # noqa: E402  crash-safe JSON write (tmp + os.replace) for the catchup-orphan reconcile
 CAP_HIT_SIGNAL = harness_run.CAP_HIT_SIGNAL
 REDRIVE_SIGNAL = harness_run.REDRIVE_SIGNAL  # a gated pass ended owning a never-fired send
 CONTINUATION_RETRY_CAP = 2
@@ -95,6 +97,16 @@ OUTBOX_ESCALATE_AFTER_SEC = 1800  # 30 min stranded before we ever surface it (r
 # seconds — a 120s cap would kill it mid-run.
 EVAL_TIMEOUT_SEC = 120
 EVAL_JUDGE_TIMEOUT_SEC = 900
+
+# Catchup orphan TTL. A /catchup sweep that stays `active:true` longer than this WITHOUT a fresh
+# `updated_at` is a crash orphan (the classic case: a daemon source-reload kills the pass mid-sweep,
+# leaving active:true forever). Left alone it freezes the whole maint lane — every maint pass stands
+# down on "a sweep is in flight". The reconciler finalizes-and-clears such a session so the lane
+# unblocks. 3600 = 6× the default maint_poll_sec (600): comfortably longer than any single legit
+# one-market sweep step (which re-stamps updated_at every pass), so a slow-but-live sweep is never
+# falsely reaped; far short of "stuck all afternoon". Same fail-safe-on-stale family as
+# journal_reconcile.GRACE_SEC. Overridable via config.catchup_ttl_sec.
+CATCHUP_TTL_SEC = 3600
 
 _stop = False
 
@@ -182,6 +194,18 @@ def load_config() -> dict:
     return {
         "buyer_poll_sec": cfg.get("buyer_poll_sec", cfg.get("watch_poll_sec", 300)),
         "peek_timeout": cfg.get("channel_poll_sec", 25),
+        # Photo-burst settle window: photos sent one-by-one land as separate updates. Wait until none
+        # has arrived for `photo_settle_gap_sec` (or `photo_settle_cap_sec` total) before running the
+        # listing pass, so the WHOLE batch is polled together — no straggler opens a partial listing
+        # or gets mis-read as a price reply. Deterministic, ~0 tokens.
+        "photo_settle_gap_sec": cfg.get("photo_settle_gap_sec", 8),
+        "photo_settle_cap_sec": cfg.get("photo_settle_cap_sec", 60),
+        # Background research worker (Phase B): a detached, browser-free pass identifies the item +
+        # finds comps WHILE the seller answers, so findings land fast. Disable to fall back to inline
+        # research inside the listing pass. research_timeout_sec: if the worker hasn't written a result
+        # by then, the daemon marks it failed and the listing pass does inline research (fail-closed).
+        "research_worker_enabled": cfg.get("research_worker_enabled", True),
+        "research_timeout_sec": cfg.get("research_timeout_sec", 90),
         # Safety net: even when the cheap buyer_peek reports nothing new, force a full buyer
         # pass every Nth consecutive empty peek so a missed/flaky unread signal can't strand a
         # buyer. 0 disables the count net (preferred once the time floor below covers strands).
@@ -195,6 +219,9 @@ def load_config() -> dict:
         # buyer-inbox knobs. Both are gated by cheap non-LLM probes so idle cost stays ~zero.
         "buy_poll_sec": cfg.get("buy_poll_sec", 600),
         "maint_poll_sec": cfg.get("maint_poll_sec", 600),
+        # How stale an active /catchup sweep may get before it's treated as a crash orphan and cleared
+        # (so a reload-killed sweep can't freeze the maint lane). See CATCHUP_TTL_SEC.
+        "catchup_ttl_sec": cfg.get("catchup_ttl_sec", CATCHUP_TTL_SEC),
         "force_buy_pass_every": cfg.get("force_buy_pass_every", 6),
         # Nightly self-eval: how often to CHECK whether one is due (the actual cadence is
         # config.eval_interval_hours, owned by eval_state.py; 0 there disables it).
@@ -380,6 +407,71 @@ def _listing_health_session_active() -> bool:
         return bool(json.loads(
             (SELLER_DIR / "data" / "listing_health_session.json").read_text()).get("active"))
     except (OSError, ValueError):
+        return False
+
+
+def _catchup_path() -> Path:
+    """The /catchup sweep session file. Relocatable via BAZAAR_DATA_DIR (so tests isolate it; in
+    production thread_outbox.data_dir() resolves to SELLER_DIR/data, same file the skill writes)."""
+    return thread_outbox.data_dir() / "catchup_session.json"
+
+
+def _catchup_active() -> bool:
+    """True when a /catchup sweep is mid-flight. Fail-open to False (mirror _distribution_active)."""
+    try:
+        return bool(json.loads(_catchup_path().read_text()).get("active"))
+    except (OSError, ValueError):
+        return False
+
+
+def _catchup_session_age_sec(now: datetime | None = None) -> float | None:
+    """Seconds since the catchup session's `updated_at`, or None when it can't be timed.
+
+    A None result is deliberate and meaningful: a crash orphan can carry an absent/garbage timestamp,
+    and the reconciler treats None as STALE so it can never hide behind a bad stamp (same rule as
+    journal_reconcile, which folds an un-timeable orphan rather than skip it)."""
+    try:
+        stamp = json.loads(_catchup_path().read_text()).get("updated_at")
+        ts = thread_outbox.parse_iso(stamp)  # raises ValueError on a malformed (non-empty) stamp
+    except (OSError, ValueError):
+        return None
+    if ts is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return (now - ts).total_seconds()
+
+
+def reconcile_catchup_orphan(env: dict, dry_run: bool, ttl_sec: float = CATCHUP_TTL_SEC) -> bool:
+    """Finalize-and-clear a STALE active catchup sweep so it can never freeze the maint lane forever.
+
+    Stale = `active:true` AND (un-timeable age OR older than ttl_sec) — the daemon-reload-mid-sweep
+    orphan. We flip active:false with a closed_reason, PRESERVING the digest/markets so nothing the
+    sweep gathered is lost (the next /catchup re-surfaces anything still open). A FRESH sweep (within
+    the TTL) is left untouched — the channel pass is still driving it; clearing it would interrupt a
+    live sweep. `env` is unused (kept for call-site symmetry with reconcile_orphans). Best-effort +
+    fail-open: any error is logged and swallowed, never raised into the loop. Returns True iff it
+    cleared a session."""
+    if not _catchup_active():
+        return False
+    age = _catchup_session_age_sec()
+    if age is not None and age <= ttl_sec:
+        return False  # a live, recently-advanced sweep — do not interrupt it
+    age_str = "unknown" if age is None else f"{int(age)}s"
+    if dry_run:
+        logging.info("[dry-run] would reconcile a stale catchup sweep (age=%s)", age_str)
+        return False
+    try:
+        path = _catchup_path()
+        state = json.loads(path.read_text())
+        state["active"] = False
+        state["closed_reason"] = (
+            "catchup orphan reconciled: sweep stalled active past TTL (likely killed mid-sweep by a "
+            "daemon reload); finalized with the digest gathered so far")
+        atomic_io.write_json(path, state)
+        logging.info("reconciled a stale catchup sweep (age=%s) — maint lane unblocked", age_str)
+        return True
+    except (OSError, ValueError) as exc:
+        logging.warning("catchup reconcile error (non-fatal): %s", exc)
         return False
 
 
@@ -682,6 +774,454 @@ def _touch_heartbeat() -> None:
         HEARTBEAT.write_text(json.dumps({"ts": time.time(), "pid": os.getpid()}))
     except OSError as exc:
         logging.debug("heartbeat write failed: %s", exc)
+
+
+def _channel_say(channel: dict, env: dict, text: str, kind: str = "intent",
+                 dry_run: bool = False, options: str = "", ref: str = "") -> None:
+    """Send a plain, deterministic line to the control channel (no LLM, instant). Telegram-only;
+    fail-open. Tagged `intent` by default so the next pass treats it as a system ack, not a
+    considered answer to resolve against. With `options` (e.g. "sell=Sell it,buy=Buy one") it sends
+    inline buttons under `ref`. Honors --dry-run (logs instead of sending)."""
+    if channel.get("adapter") != "telegram":
+        return
+    if dry_run:
+        logging.info("[dry-run] would channel-say%s: %s",
+                     f" (buttons {options})" if options else "", (text or "")[:60])
+        return
+    cmd = [sys.executable, str(BIN / "telegram.py"), "send", "--text", text, "--kind", kind]
+    if options:
+        cmd += ["--options", options]
+    if ref:
+        cmd += ["--ref", ref]
+    try:
+        subprocess.run(cmd, env=env, capture_output=True, timeout=15)
+    except subprocess.SubprocessError as exc:
+        logging.warning("channel say failed: %s", exc)
+
+
+def _listing_step() -> str:
+    """The current step of the active listing wizard, or "" if none/unreadable (fail-open)."""
+    try:
+        s = json.loads((SELLER_DIR / "data" / "listing_session.json").read_text())
+        return s.get("step", "") if s.get("active") else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _download_burst(file_ids: list, batch_id: str, env: dict) -> list:
+    """Download a pending photo burst to data/photos/<batch_id>/ BY file_id. getfile is non-consuming
+    (it uses the file_id, not the getUpdates cursor), so the updates stay pending for the pass to
+    formally consume — no steal/race. Returns the saved RELATIVE paths (best-effort; skips failures).
+    This lets the daemon hand the research worker its photos the instant they arrive, with no LLM."""
+    paths = []
+    for i, fid in enumerate(file_ids):
+        dest = SELLER_DIR / "data" / "photos" / batch_id / f"{i:02d}.jpg"
+        try:
+            r = subprocess.run([sys.executable, str(BIN / "telegram.py"), "getfile",
+                                "--file-id", fid, "--dest", str(dest)],
+                               capture_output=True, text=True, env=env, timeout=60)
+            if r.returncode == 0:
+                paths.append(str(dest.relative_to(SELLER_DIR)))
+        except (subprocess.SubprocessError, ValueError) as exc:
+            logging.warning("burst photo download failed (%s): %s", fid, exc)
+    return paths
+
+
+def _open_intake_session(batch_id: str, photos: list, dry_run: bool = False) -> bool:
+    """Deterministically open a listing session at `awaiting_intent` so the daemon can ask sell-or-buy
+    INSTANTLY (no LLM) and start the background research worker right away. `photos` are the
+    daemon-downloaded paths (so the worker has them immediately and the pass need not re-download).
+    Fail-open: returns False on any write error (caller then falls back to the LLM pass). In --dry-run
+    it logs and returns True without writing (so the dry-run still exercises the ask path)."""
+    if dry_run:
+        logging.info("[dry-run] would open intake session %s at awaiting_intent (%s photo(s))",
+                     batch_id, len(photos))
+        return True
+    path = SELLER_DIR / "data" / "listing_session.json"
+    session = {"active": True, "item_id": "", "step": "awaiting_intent", "batch_id": batch_id,
+               "intent": None, "fields": {"photos": photos},
+               "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(session, indent=2))
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        logging.warning("open intake session failed: %s", exc)
+        return False
+
+
+def _has_caption(peek: dict) -> bool:
+    """True when the pending photo burst carries a caption (so intent may be classifiable). A bare,
+    caption-less burst sets latest_text to the photo placeholder; treat that (and empty) as no caption."""
+    return (peek.get("latest_text", "") or "") not in ("", "[sent photos]")
+
+
+def listing_ack_plan(active: bool, step: str, photos: int, nonphoto: int, has_caption: bool) -> dict:
+    """PURE: the instant deterministic ack for a listing interaction, from the session state + the
+    pending burst. Returns {text, options, action} where action ∈ {ask_intent, run}:
+      ask_intent — a bare photo burst: the daemon asks sell-or-buy ITSELF (text+options buttons) and
+                   opens the awaiting_intent session, so the question lands instantly (no LLM cold
+                   start). The caller still runs ONE cheap pass that just stashes the photos.
+      run        — caller sends `text` (if any) as an instant pre-ack, then runs the seller pass.
+    Every case ends in a seller pass; the point is that the ACK fires deterministically here, before
+    the pass, instead of being the pass's slow first turn (which is what made the seller wait)."""
+    fresh_burst = (not active) and photos > 0 and nonphoto == 0
+    if fresh_burst and not has_caption:
+        # Bare photo(s): intent is genuinely unclear → ask sell-or-buy INSTANTLY (deterministic).
+        return {"text": "Quick one: want me to sell this for you, or buy one like it?",
+                "options": "sell=Sell it,buy=Buy one", "action": "ask_intent"}
+    if fresh_burst:  # captioned burst → the pass classifies + researches; pre-ack so it isn't silent.
+        return {"text": "👀 On it, taking a look at your photos.", "options": "", "action": "run"}
+    if active and step == "awaiting_intent" and nonphoto > 0:  # seller answered sell/buy → research next.
+        # Instant, generic, NO item name (the research worker supplies the item + price next). The
+        # listing pass must NOT read the photos synchronously — the background worker already is.
+        return {"text": "👍 On it. I'll review the photos and do some research, then come back "
+                        "with a price.", "options": "", "action": "run"}
+    if active and step == "awaiting_listing_inputs":  # seller answered price/floor/info → publish next.
+        return {"text": "👍 Got it, reviewing your answers and setting it up now.", "options": "", "action": "run"}
+    return {"text": "", "options": "", "action": "run"}
+
+
+def channel_instant_ack(channel: dict, env: dict, peek: dict, cfg: dict, dry_run: bool) -> str:
+    """Handle a listing interaction DETERMINISTICALLY and INSTANTLY (no LLM in the critical path).
+    Returns "defer" when the daemon fully handled it (the caller must NOT run a seller pass) or "run"
+    when the caller should run the seller pass (after any instant ack sent here). The expensive LLM
+    work is reserved for the background research worker, the buy search, and the browser publish — the
+    acks, the sell/buy choice, and (via research_orchestrate) the result present are all done here, so
+    none of them waits on a ~2-min channel pass cold-start."""
+    active = _listing_active()
+    photos, nonphoto = peek.get("photos", 0), peek.get("nonphoto", 0)
+    # Settle a FRESH photo burst (collect the whole batch) before acting.
+    if not active and photos > 0 and nonphoto == 0:
+        _channel_say(channel, env, "📸 Got it. Send me all the angles; give me a moment to look.",
+                     dry_run=dry_run)
+        settle_photo_burst(channel, env, cfg["photo_settle_gap_sec"], cfg["photo_settle_cap_sec"])
+        peek = channel_peek(channel, env, 1)  # refresh after settle (more photos may have landed)
+        active = _listing_active()
+    step = _listing_step() if active else ""
+    photos, nonphoto = peek.get("photos", 0), peek.get("nonphoto", 0)
+
+    # 1) BARE PHOTO BURST → ask sell/buy INSTANTLY, pre-download the photos, START the research worker,
+    #    and DRAIN the pending updates deterministically — NO slow LLM pass to stash/consume.
+    if (not active) and photos > 0 and nonphoto == 0 and not _has_caption(peek):
+        batch_id = f"batch-{peek.get('latest_ts') or 0}"
+        paths = [] if dry_run else _download_burst(peek.get("photo_file_ids", []), batch_id, env)
+        if _open_intake_session(batch_id, paths, dry_run):
+            if not dry_run:
+                spawn_research_worker(batch_id, env, dry_run)   # worker starts NOW (full head start)
+                _write_research_state(batch_id, time.time())
+                _drain_pending(env)                              # consume the pending photo updates
+            _channel_say(channel, env, "Quick one: want me to sell this for you, or buy one like it?",
+                         kind="ask", options="sell=Sell it,buy=Buy one", ref=f"intent-{batch_id}",
+                         dry_run=dry_run)
+            return "defer"
+        return "run"  # couldn't open the session → let the pass ask the old way
+
+    # 2) SELL/BUY answer at awaiting_intent → handle deterministically (no LLM).
+    act = peek.get("latest_action") or {}
+    if active and step == "awaiting_intent" and act.get("choice") in ("sell", "buy"):
+        if act["choice"] == "sell":
+            _channel_say(channel, env, "👍 On it. I'll review the photos and do some research, then "
+                         "come back with a price.", dry_run=dry_run)
+            if not dry_run:
+                _set_listing_step("researching", intent="sell")  # instant deterministic transition
+                _drain_pending(env)                               # consume the button tap
+            return "defer"  # the worker is already running; research_orchestrate presents when ready
+        # BUY → close the listing; the buy search needs an LLM pass.
+        _channel_say(channel, env, "👍 On it. I'll look for one like this to buy.", dry_run=dry_run)
+        if not dry_run:
+            _close_listing_session()
+            _drain_pending(env)
+        return "run"
+
+    # 3) Everything else (captioned burst, price/floor reply, non-listing message) → instant pre-ack,
+    #    then the seller pass does the considered work.
+    plan = listing_ack_plan(active, step, photos, nonphoto, _has_caption(peek))
+    if plan["text"]:
+        _channel_say(channel, env, plan["text"], dry_run=dry_run)
+    elif not active:
+        send_intent(channel, env, peek.get("latest_text", ""), dry_run)  # non-listing fresh message
+    return "run"
+
+
+# --- Background research worker (Phase B) ---------------------------------------------------------
+RESEARCH_STATE = SELLER_DIR / "data" / "research_state.json"
+RESEARCH_RESULTS = SELLER_DIR / "data" / "research_results"
+
+
+def _listing_session() -> dict:
+    """The active listing session dict, or {} if none/unreadable (fail-open)."""
+    try:
+        s = json.loads((SELLER_DIR / "data" / "listing_session.json").read_text())
+        return s if s.get("active") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_LISTING_PATH = SELLER_DIR / "data" / "listing_session.json"
+
+
+def _write_listing_session(session: dict) -> None:
+    """Atomic write of the listing session (tmp + os.replace). Fail-open."""
+    try:
+        tmp = _LISTING_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(session, indent=2))
+        os.replace(tmp, _LISTING_PATH)
+    except OSError as exc:
+        logging.warning("listing session write failed: %s", exc)
+
+
+def _set_listing_step(step: str, *, intent: str | None = None, fields: dict | None = None) -> None:
+    """Deterministically advance the listing session's step (and optionally intent/fields) — no LLM.
+    This is how the daemon moves the wizard (e.g. awaiting_intent → researching) instantly."""
+    try:
+        s = json.loads(_LISTING_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    s["step"] = step
+    if intent is not None:
+        s["intent"] = intent
+    if fields:
+        s.setdefault("fields", {}).update(fields)
+    s["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write_listing_session(s)
+
+
+def _close_listing_session() -> None:
+    """Mark the listing session inactive (e.g. the seller chose BUY). Fail-open."""
+    try:
+        s = json.loads(_LISTING_PATH.read_text())
+        s["active"] = False
+        _write_listing_session(s)
+    except (OSError, ValueError):
+        pass
+
+
+def _drain_pending(env: dict) -> None:
+    """Consume the pending channel updates deterministically (telegram.py poll advances the offset),
+    so a burst/tap the daemon already handled does not re-trigger — WITHOUT a slow LLM pass. The
+    photos were already downloaded by file_id, so the drained events are just discarded. Fail-open."""
+    try:
+        subprocess.run([sys.executable, str(BIN / "telegram.py"), "poll", "--timeout", "0"],
+                       env=env, capture_output=True, timeout=20)
+    except subprocess.SubprocessError as exc:
+        logging.warning("drain pending failed: %s", exc)
+
+
+def _price_floor_confirm() -> bool:
+    """True when approvals.steps.price_floor == 'confirm' (the balanced default) — the seller is asked
+    for list price + floor. Only then can the daemon present the combined ask deterministically; for
+    'auto' it returns False and the listing pass handles the (auto-price) publish. Fail-open to True
+    (the safe/common case: ask the seller)."""
+    try:
+        steps = (json.loads(CONFIG_PATH.read_text()).get("approvals") or {}).get("steps") or {}
+        return steps.get("price_floor", "confirm") == "confirm"
+    except (OSError, ValueError):
+        return True
+
+
+def _present_research_result(channel: dict, env: dict, batch_id: str) -> bool:
+    """DETERMINISTICALLY present the background worker's findings (no LLM present pass): fold the
+    result into the listing session fields, advance to awaiting_listing_inputs, and send the
+    'Looks like X' line + the ONE combined price/floor/info ask. Returns True if it presented; False
+    to defer to an LLM pass (malformed result, or price_floor=auto). Fail-open."""
+    try:
+        result = json.loads((RESEARCH_RESULTS / f"{batch_id}.json").read_text())
+    except (OSError, ValueError):
+        return False
+    title = (result.get("title") or "").strip()
+    if not title or not _price_floor_confirm():
+        return False  # nothing usable, or auto-price → let the listing pass handle it
+    cond = (result.get("condition") or "good").strip()
+    cur = (result.get("currency") or "").strip()
+    low, med, high = result.get("comp_low"), result.get("comp_med"), result.get("comp_high")
+    size = (result.get("size_bucket") or "medium").strip()
+    # Fold the findings into the session so the publish pass has them after the seller replies.
+    _set_listing_step("awaiting_listing_inputs", fields={
+        "title": title, "category": result.get("category"),
+        "category_tag": result.get("category_tag"), "condition": cond,
+        "attributes": result.get("attributes"), "size_bucket": size,
+        "comp_low": low, "comp_med": med, "comp_high": high, "currency": cur})
+    price_line = (f"Similar ones sell ~{low} to {high} {cur}." if low and high
+                  else "I couldn't pin a tight price range, so name what you'd like.")
+    suggest = f" (I suggest {med})" if med else ""
+    msg = (f"🔎 Looks like a {title} ({cond}). {price_line}\n\n"
+           f"To get it live, reply in one message:\n"
+           f"1) List price?{suggest}\n"
+           f"2) Your floor, the lowest you'd accept? 🔒 PRIVATE, never shown to buyers; I only ever "
+           f"quote your list price.\n"
+           f"3) Anything buyers should know (what's included / condition notes)? Optional, say 'skip'.\n"
+           f"I'll ship it as {size}; tell me if that's off.")
+    _channel_say(channel, env, msg, kind="ask")
+    _research_cleanup(batch_id)  # findings are now in the session; drop the worker artifacts
+    logging.info("presented research result deterministically for %s (%s)", batch_id, title)
+    return True
+
+
+def research_decide(active: bool, step: str, batch_id: str, has_photos: bool, result_exists: bool,
+                    failed_exists: bool, state_batch: str, age_sec: float, timeout: float) -> str:
+    """PURE: what the daemon should do for the background research worker this tick.
+      cleanup — no research-phase listing session → drop any stale research state + result files.
+      none    — in a research phase but photos not stashed yet (nothing to research).
+      spawn   — photos are ready, no result/worker yet for this batch → spawn the detached worker.
+      fail    — the worker exceeded the timeout with no result → mark it failed (then present inline).
+      present — a result OR a failure marker is ready AND step==researching → run the seller pass to
+                present findings (or fall back to inline research on failure).
+      hold    — a result is ready but the seller is still at awaiting_intent (hasn't picked sell yet).
+      wait    — the worker is running within the timeout → do nothing this tick."""
+    if not (active and step in ("awaiting_intent", "researching")):
+        return "cleanup"
+    if not batch_id or not has_photos:
+        return "none"
+    if result_exists or failed_exists:
+        return "present" if step == "researching" else "hold"
+    if state_batch != batch_id:
+        return "spawn"
+    if age_sec > timeout:
+        return "fail"
+    return "wait"
+
+
+def spawn_research_worker(batch_id: str, env: dict, dry_run: bool) -> None:
+    """Launch the DETACHED, browser-free research worker (non-blocking; it writes its result file then
+    exits). It holds no run-lock and touches no browser/channel, so it runs concurrently with the chat
+    and cannot collide with a buyer worker or the seller pass. Fail-open."""
+    if dry_run:
+        logging.info("[dry-run] would spawn background research worker for %s", batch_id)
+        return
+    try:
+        subprocess.Popen([str(BIN / "run_pass.sh"), "research"],
+                         env={**env, "BAZAAR_RESEARCH_BATCH": batch_id}, cwd=str(SELLER_DIR),
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logging.info("spawned background research worker for %s", batch_id)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.warning("research spawn failed: %s", exc)
+
+
+def _write_research_state(batch_id: str, started_at: float) -> None:
+    try:
+        RESEARCH_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = RESEARCH_STATE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"batch_id": batch_id, "started_at": started_at}))
+        os.replace(tmp, RESEARCH_STATE)
+    except OSError as exc:
+        logging.warning("research state write failed: %s", exc)
+
+
+def _touch_research_failed(batch_id: str) -> None:
+    if not batch_id:
+        return
+    try:
+        RESEARCH_RESULTS.mkdir(parents=True, exist_ok=True)
+        (RESEARCH_RESULTS / f"{batch_id}.failed").write_text("1")
+    except OSError as exc:
+        logging.warning("research failed-marker write error: %s", exc)
+
+
+def _research_cleanup(batch_id: str) -> None:
+    try:
+        RESEARCH_STATE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    for suffix in (".json", ".failed"):
+        try:
+            if batch_id:
+                (RESEARCH_RESULTS / f"{batch_id}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def research_orchestrate(channel: dict, env: dict, dry_run: bool, cfg: dict,
+                         now: float | None = None) -> str:
+    """Drive the background research worker for the active listing (cheap, non-LLM, fail-open). Spawns
+    the worker when photos are ready, marks a timed-out worker failed, and — when a RESULT lands —
+    PRESENTS it DETERMINISTICALLY (no LLM pass): folds it into the session + sends the 'Looks like X'
+    + combined ask. Returns "present" only when an LLM pass is genuinely needed (a worker TIMEOUT →
+    inline research, or price_floor=auto), else "none". Disabled via config.research_worker_enabled
+    (then the listing pass researches inline, the old way)."""
+    if not cfg.get("research_worker_enabled", True):
+        return "none"
+    sess = _listing_session()
+    active = bool(sess)
+    step = sess.get("step", "")
+    batch_id = sess.get("batch_id") or ""
+    has_photos = bool((sess.get("fields") or {}).get("photos"))
+    try:
+        state = json.loads(RESEARCH_STATE.read_text())
+    except (OSError, ValueError):
+        state = {}
+    state_batch = state.get("batch_id") or ""
+    result_exists = bool(batch_id and (RESEARCH_RESULTS / f"{batch_id}.json").exists())
+    failed_exists = bool(batch_id and (RESEARCH_RESULTS / f"{batch_id}.failed").exists())
+    age = (now if now is not None else time.time()) - float(state.get("started_at", 0) or 0)
+    action = research_decide(active, step, batch_id, has_photos, result_exists, failed_exists,
+                             state_batch, age, cfg.get("research_timeout_sec", 90))
+    if action == "cleanup":
+        if state_batch:
+            _research_cleanup(state_batch)
+        return "none"
+    if action == "spawn" and not dry_run:
+        spawn_research_worker(batch_id, env, dry_run)
+        _write_research_state(batch_id, now if now is not None else time.time())
+        return "none"
+    if action == "fail":
+        if not dry_run:
+            _touch_research_failed(batch_id)
+        return "present" if step == "researching" else "none"
+    if action == "present":
+        # A result is ready → present it DETERMINISTICALLY (no LLM). Only fall back to an LLM pass
+        # when there's no usable result (worker .failed → inline research) or price_floor=auto.
+        if not dry_run and result_exists and _present_research_result(channel, env, batch_id):
+            return "none"
+        return "present"  # .failed / auto-price / malformed result → the listing pass handles it
+    return "none"  # hold / wait / none / dry-run spawn
+
+
+def settle_step(photos: int, nonphoto: int, now: float, last_count: int, last_change: float,
+                start: float, gap_sec: float, cap_sec: float) -> tuple[str, int, float]:
+    """PURE: one photo-burst settle decision. Returns (action, new_last_count, new_last_change).
+
+      interrupt — a non-photo event (text/command, e.g. /pause) is pending: stop waiting and let
+                  the pass handle the mixed input now (a command must never be delayed by settle).
+      settled   — photos are present AND none new for >= gap_sec, or cap_sec elapsed: the burst is
+                  complete, run the pass so it polls the whole batch at once.
+      wait      — keep collecting (the gap timer resets whenever the photo count changes).
+    Seed last_count=-1 so the first observed count always registers as a change."""
+    if nonphoto > 0:
+        return ("interrupt", last_count, last_change)
+    if photos != last_count:
+        return ("wait", photos, now)                       # count changed → reset the gap timer
+    if photos > 0 and (now - last_change) >= gap_sec:
+        return ("settled", last_count, last_change)
+    if (now - start) >= cap_sec:
+        return ("settled", last_count, last_change)
+    return ("wait", last_count, last_change)
+
+
+def settle_photo_burst(channel: dict, env: dict, gap_sec: float, cap_sec: float,
+                       now_fn=time.monotonic, sleep_fn=time.sleep) -> int:
+    """Wait (non-consuming) until a photo burst settles, so the seller pass that follows polls the
+    WHOLE batch in one read. Returns the settled photo count, or -1 if it bailed early (a non-photo
+    event arrived, or /pause). now_fn/sleep_fn are injected in tests. Keeps the typing indicator and
+    heartbeat warm while it waits; capped so it can never wedge the loop."""
+    start = now_fn()
+    last_count = -1
+    last_change = start
+    while True:
+        if control.is_paused():
+            return -1
+        pk = channel_peek(channel, env, 2)
+        action, last_count, last_change = settle_step(
+            pk.get("photos", 0), pk.get("nonphoto", 0), now_fn(),
+            last_count, last_change, start, gap_sec, cap_sec)
+        if action == "interrupt":
+            return -1
+        if action == "settled":
+            return max(0, last_count)
+        _touch_heartbeat()
+        _send_typing(channel, env)
+        sleep_fn(1)
 
 
 def reconcile_orphans(env: dict, dry_run: bool) -> None:
@@ -1174,6 +1714,10 @@ def main(argv) -> int:
         _swept = harness_run.sweep_stale_pass_logs()
         if _swept:
             logging.info("swept %s stale per-pass log(s) leaked by forced kills", len(_swept))
+        # Heal a catch-up sweep orphaned by the reload that respawned us (reload-mid-sweep): clear the
+        # stranded active:true on boot so the maint lane never stays frozen across a restart.
+        if reconcile_catchup_orphan(env, ns.dry_run):
+            logging.info("reconciled a stale catch-up sweep orphaned by a prior crash/reload")
         if channel["adapter"] == "telegram":
             _register_bot_commands(env)  # populate the "/" autocomplete menu (idempotent, non-fatal)
         last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
@@ -1187,6 +1731,8 @@ def main(argv) -> int:
         empty_peeks = 0  # consecutive buyer peeks that found nothing new (drives the safety net)
         empty_buys = 0   # consecutive buy peeks that found nothing actionable (buy safety net)
         _was_paused = False  # edge-triggered PAUSED/RESUMED logging (the loop runs ~1/sec; don't spam)
+        # A correction already pending makes the apply pass due immediately, not a retry-interval out.
+        last_corrections = time.monotonic() - channel_control.CORRECTIONS_RETRY_SEC
         src_fp = _source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
         while not _stop:
             iter_start = time.monotonic()  # Fix D: time each iteration so a wedged one is VISIBLE (WARN)
@@ -1205,6 +1751,14 @@ def main(argv) -> int:
             if paused != _was_paused:
                 if paused:
                     logging.info("daemon PAUSED — channel peek continues; action passes held until /resume")
+                    # ONE-SHOT confirmation on the false→true edge, however the flag flipped (the
+                    # /pause fast-path below, an LLM seller pass, or the CLI). The drain's catch-all
+                    # claims the ack exactly once (control.claim_pause_ack), so it never duplicates
+                    # and never waits for the next inbound message. A restart INTO a paused state is
+                    # safe: ack_sent persists in control.json, so the claim returns False (no re-ack).
+                    if not ns.dry_run:
+                        subprocess.run([sys.executable, str(BIN / "channel_control.py"), "drain"],
+                                       env=env, capture_output=True, timeout=60)
                 else:
                     logging.info("daemon RESUMED — %s correction(s) queued for the next pass",
                                  len(control.pending_corrections()))
@@ -1214,10 +1768,34 @@ def main(argv) -> int:
             # warm Chrome is a dedicated instance, so this never touches the user's own browser.
             if not paused:
                 tab_park.park()
+            # APPLY pending corrections (post-/resume or any stranded one): the drain cleared the
+            # pause + acked, but applying a correction is state-routed LLM work — so force ONE channel
+            # pass (skills/channel/corrections.md: apply each, mark-applied, report) BEFORE the
+            # background gates so they read the corrected state. Runs before the peek so this single
+            # pass also handles any pending channel message (no double pass). Rate-limited.
+            if not ns.dry_run and channel_control.corrections_pass_due(
+                    paused, len(control.pending_corrections()), time.monotonic() - last_corrections):
+                # A /resume also unwedges a stale catch-up sweep so the background lane returns with the
+                # corrections (only a TTL-exceeded orphan; a fresh, live sweep is left untouched).
+                reconcile_catchup_orphan(env, ns.dry_run, cfg.get("catchup_ttl_sec", CATCHUP_TTL_SEC))
+                logging.info("pending correction(s) → channel pass to apply + report")
+                run_pass("seller", channel, env, ns.dry_run)
+                last_corrections = time.monotonic()
             peek = channel_peek(channel, env, peek_timeout)
             if peek["pending"]:
                 _send_typing(channel, env)                                  # instant native 'typing…'
-                if paused:
+                # DETERMINISTIC /pause fast-path: an explicit /pause at the channel sets the flag and
+                # drains (the drain sends the ONE confirmation) with NO seller pass — so the pass that
+                # would set the flag can't be SIGTERM'd before it acks (the self-kill race). Matches
+                # only the explicit command (is_pause_command); fuzzy "stop" stays the LLM's job.
+                if not paused and channel_control.is_pause_command(peek.get("latest_text", "")):
+                    logging.info("/pause at channel → set flag + drain (no LLM seller pass)")
+                    control.pause(source="telegram")
+                    paused = True
+                    if not ns.dry_run:
+                        subprocess.run([sys.executable, str(BIN / "channel_control.py"), "drain"],
+                                       env=env, capture_output=True, timeout=60)
+                elif paused:
                     # Deterministic, ~$0: consume /resume + capture corrections + ack. No claude -p,
                     # no browser. Leaving the offset un-advanced would deadlock /resume, so we MUST drain.
                     logging.info("paused: %s pending → deterministic control drain (no LLM)", peek["pending"])
@@ -1225,13 +1803,20 @@ def main(argv) -> int:
                         subprocess.run([sys.executable, str(BIN / "channel_control.py"), "drain"],
                                        env=env, capture_output=True, timeout=60)
                 else:
-                    mid_listing = _listing_active()  # skip the redundant intent line during a listing wizard
-                    logging.info("%s: %s pending → typing%s + seller pass",
-                                 channel["adapter"], peek["pending"],
-                                 "" if mid_listing else " + intent")
-                    if not mid_listing:
-                        send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)  # ~6s (TG only)
-                    run_pass("seller", channel, env, ns.dry_run)            # full pass: work + report
+                    # Instant DETERMINISTIC acks (settle the photo burst + sell/buy ask + step
+                    # pre-acks) land BEFORE the pass, so the seller never waits through the pass cold
+                    # start for a mere acknowledgment (was the >2min dead air).
+                    decision = channel_instant_ack(channel, env, peek, cfg, ns.dry_run)
+                    logging.info("%s: %s pending → instant handling (%s)",
+                                 channel["adapter"], peek["pending"], decision)
+                    if decision != "defer":   # 'defer' = fully handled deterministically (no LLM pass)
+                        run_pass("seller", channel, env, ns.dry_run)        # full pass: work + report
+            # BACKGROUND RESEARCH (Phase B): drive the detached worker for an active listing — spawn it
+            # when photos are ready, present its result DETERMINISTICALLY when it lands, and only fall
+            # back to an LLM pass on a worker timeout (inline research) or auto-price.
+            if not paused and research_orchestrate(channel, env, ns.dry_run, cfg) == "present":
+                logging.info("research fallback → inline present pass")
+                run_pass("seller", channel, env, ns.dry_run)
             # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): a market whose path
             # resolves to "notification" (e.g. FB web push) wakes the agent the moment its OS
             # notification lands, instead of waiting for the buyer poll. Poll-path markets (e.g.
@@ -1315,6 +1900,11 @@ def main(argv) -> int:
             # pass, or start a cadence-due my-listings SCAN and/or inbox SWEEP. Gated by cheap non-LLM
             # probes so the LLM only runs when there's work (never interrupts an active listing wizard).
             if not paused and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
+                # Heal a stale/abandoned catchup sweep FIRST: a reload-killed sweep stranded active:true
+                # would otherwise make every maint pass stand down forever. A FRESH sweep is left to the
+                # channel pass and still defers maint below (cat_active) — we never interrupt a live one.
+                reconcile_catchup_orphan(env, ns.dry_run, cfg.get("catchup_ttl_sec", CATCHUP_TTL_SEC))
+                cat_active = _catchup_active()
                 dist_active = _distribution_active()
                 idet_active = _inbox_detect_active()
                 lh_active = _listing_health_session_active()
@@ -1323,17 +1913,21 @@ def main(argv) -> int:
                 # Stale-listing suggestions are the LOWEST-priority maint step: only start a new episode
                 # when no higher-priority detect/drain work is pending, so it never preempts a live wizard
                 # or an in-flight batch (one item per pass; rate-limited by listing_health_interval_hours).
-                if not (dist_active or idet_active or lh_active or scan_due or sweep_due):
+                if not (dist_active or idet_active or lh_active or scan_due or sweep_due or cat_active):
                     lh_due_item = _listing_health_due(env)
                     if lh_due_item:
                         run_listing_health_start(env, lh_due_item, ns.dry_run)
                         lh_active = not ns.dry_run  # dry-run writes no session, so it stays inactive
-                if dist_active or idet_active or lh_active or scan_due or sweep_due:
+                # A fresh catchup sweep defers ALL maint work this tick (the maint prompt would stand down
+                # anyway — skipping deterministically saves the wasted pass and keeps single-active-session).
+                if (dist_active or idet_active or lh_active or scan_due or sweep_due) and not cat_active:
                     reason = ("drain distribution batch" if dist_active else
                               "drain inbox-takeover batch" if idet_active else
                               "suggest stale-listing fixes" if lh_active else "detect due")
                     logging.info("maint pass → %s", reason)
                     run_pass("maint", channel, env, ns.dry_run)
+                elif cat_active:
+                    logging.info("maint deferred — catch-up sweep in flight (fresh)")
                 last_maint = time.monotonic()
 
             # BUY SIDE (§3): pursue active wants — search/shortlist a `searching` want, or liaise a

@@ -27,7 +27,22 @@
       "Bash(gh auth *)",
       "Bash(gh pr *)",
       "Bash(git fetch *)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "Bash(xargs cat)",
+      "Bash(python3 tests/test_relist_state.py)",
+      "Bash(python3 tests/test_inbox_scan.py)",
+      "Bash(grep -iA1 \"platform offer\\\\|relist\\\\|non-relist\\\\|read assistant\\\\|already-seen offer\\\\|platform_offers key\")",
+      "Bash(python3 -m pytest -q)",
+      "Bash(python3 bin/inbox_scan.py platform-offers)",
+      "Bash(echo \"rc=$?\")",
+      "Bash(python3 bin/relist_state.py due --item smoke-test-item --market carousell)",
+      "Bash(python3 -c \"import json;d=json.load\\(open\\('data/config.json'\\)\\);print\\('free_relist=',d['approvals']['steps'].get\\('free_relist'\\)\\);print\\('relist_cooldown_days=',d.get\\('relist_cooldown_days'\\)\\)\")",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0,'bin'\\); import inbox_scan, relist_state; print\\('imports OK; platform_offers_now exists:', hasattr\\(inbox_scan,'platform_offers_now'\\), '| relist due fn:', hasattr\\(relist_state,'is_due'\\)\\)\")",
+      "Bash(git push *)",
+      "Bash(git rev-list *)",
+      "Bash(grep -E \"origin/main$\")",
+      "Bash(python3 tests/test_agent_daemon.py)",
+      "Bash(python3 tests/test_thread_outbox.py)"
     ]
   },
   "hooks": {

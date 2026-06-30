@@ -104,6 +104,138 @@ def test_channel_peek_parses_success():
     with_run(lambda *a, **k: FakeProc(0, '{"pending": 1, "latest_text": "hi"}'), body)
 
 
+def test_settle_step_pure():
+    print("settle_step: pure photo-burst decisions:")
+    check("non-photo pending → interrupt",
+          agent_daemon.settle_step(2, 1, 10, 2, 5, 0, 8, 60)[0] == "interrupt")
+    action, count, change = agent_daemon.settle_step(1, 0, 3, -1, 0, 0, 8, 60)
+    check("first count seen → wait + reset", action == "wait" and count == 1 and change == 3)
+    action, count, change = agent_daemon.settle_step(3, 0, 9, 1, 3, 0, 8, 60)
+    check("count grew → wait + reset timer", action == "wait" and count == 3 and change == 9)
+    check("stable past the gap → settled",
+          agent_daemon.settle_step(3, 0, 20, 3, 9, 0, 8, 60)[0] == "settled")
+    check("stable within the gap → wait",
+          agent_daemon.settle_step(3, 0, 12, 3, 9, 0, 8, 60)[0] == "wait")
+    check("cap elapsed → settled",
+          agent_daemon.settle_step(3, 0, 61, 3, 60, 0, 8, 60)[0] == "settled")
+
+
+def _with_settle_stubs(peek_seq, body):
+    """Run body() with channel_peek/typing/heartbeat/pause stubbed for settle_photo_burst tests."""
+    seq = iter(peek_seq)
+    last = peek_seq[-1] if peek_seq else {"photos": 0, "nonphoto": 0}
+    saved = (agent_daemon.channel_peek, agent_daemon._send_typing,
+             agent_daemon._touch_heartbeat, agent_daemon.control.is_paused)
+    agent_daemon.channel_peek = lambda *a, **k: next(seq, last)
+    agent_daemon._send_typing = lambda *a, **k: None
+    agent_daemon._touch_heartbeat = lambda *a, **k: None
+    agent_daemon.control.is_paused = lambda: False
+    try:
+        body()
+    finally:
+        (agent_daemon.channel_peek, agent_daemon._send_typing,
+         agent_daemon._touch_heartbeat, agent_daemon.control.is_paused) = saved
+
+
+def test_settle_photo_burst_coalesces():
+    print("settle_photo_burst: a one-by-one burst (1→2→3) coalesces into one batch:")
+    clock = {"t": 0.0}
+    peeks = [{"photos": 1, "nonphoto": 0}, {"photos": 2, "nonphoto": 0},
+             {"photos": 3, "nonphoto": 0}] + [{"photos": 3, "nonphoto": 0}] * 20
+    def body():
+        n = agent_daemon.settle_photo_burst(
+            {"adapter": "telegram"}, {}, 8, 60,
+            now_fn=lambda: clock["t"], sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s))
+        check("settles on the full batch of 3", n == 3)
+    _with_settle_stubs(peeks, body)
+
+
+def test_settle_photo_burst_interrupts_on_command():
+    print("settle_photo_burst: a non-photo event ends the wait immediately (-1):")
+    clock = {"t": 0.0}
+    peeks = [{"photos": 1, "nonphoto": 0}, {"photos": 1, "nonphoto": 1}]
+    def body():
+        n = agent_daemon.settle_photo_burst(
+            {"adapter": "telegram"}, {}, 8, 60,
+            now_fn=lambda: clock["t"], sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s))
+        check("interrupted → -1", n == -1)
+    _with_settle_stubs(peeks, body)
+
+
+def test_settle_config_keys_present():
+    print("load_config exposes the photo settle window knobs:")
+    cfg = agent_daemon.load_config()
+    check("gap present + numeric", isinstance(cfg.get("photo_settle_gap_sec"), (int, float)))
+    check("cap present + numeric", isinstance(cfg.get("photo_settle_cap_sec"), (int, float)))
+
+
+def test_has_caption_pure():
+    print("_has_caption: a bare photo burst (placeholder/empty) is caption-less:")
+    check("photo placeholder → no caption", agent_daemon._has_caption({"latest_text": "[sent photos]"}) is False)
+    check("empty → no caption", agent_daemon._has_caption({"latest_text": ""}) is False)
+    check("real caption → has caption", agent_daemon._has_caption({"latest_text": "selling my couch"}) is True)
+
+
+def test_listing_ack_plan_pure():
+    print("listing_ack_plan: instant deterministic acks per listing state (no LLM latency):")
+    # Bare photo burst → daemon asks sell/buy ITSELF, instantly.
+    bare = agent_daemon.listing_ack_plan(False, "", 3, 0, has_caption=False)
+    check("bare burst → ask_intent with buttons",
+          bare["action"] == "ask_intent" and "sell=Sell it" in bare["options"])
+    # Captioned burst → instant 'taking a look', then the pass classifies.
+    cap = agent_daemon.listing_ack_plan(False, "", 2, 0, has_caption=True)
+    check("captioned burst → run + a look ack", cap["action"] == "run" and cap["text"])
+    # Seller answered sell/buy (an action = nonphoto) at awaiting_intent → instant GENERIC ack (no
+    # item name; the background worker supplies the item + price next).
+    ans = agent_daemon.listing_ack_plan(True, "awaiting_intent", 0, 1, has_caption=False)
+    check("sell/buy answer → run + generic research ack",
+          ans["action"] == "run" and "research" in ans["text"].lower())
+    # Just the un-answered photos sitting at awaiting_intent → run (the cheap pass stashes them).
+    stash = agent_daemon.listing_ack_plan(True, "awaiting_intent", 2, 0, has_caption=False)
+    check("photos-only at awaiting_intent → run, no premature ack",
+          stash["action"] == "run" and stash["text"] == "")
+    # Seller answered the combined price/floor/info ask → instant 'reviewing', then publish.
+    rev = agent_daemon.listing_ack_plan(True, "awaiting_listing_inputs", 0, 1, has_caption=False)
+    check("combined answer → run + reviewing ack",
+          rev["action"] == "run" and "reviewing" in rev["text"].lower())
+
+
+def test_research_decide_pure():
+    print("research_decide: background-research orchestration decisions (pure):")
+    d = agent_daemon.research_decide
+    # No research-phase session → clean up any stale state/results.
+    check("inactive → cleanup", d(False, "", "b1", True, False, False, "b1", 0, 90) == "cleanup")
+    check("past research phase → cleanup",
+          d(True, "awaiting_listing_inputs", "b1", True, False, False, "b1", 0, 90) == "cleanup")
+    # In research phase but photos not stashed yet → nothing to do.
+    check("no photos yet → none", d(True, "awaiting_intent", "b1", False, False, False, "", 0, 90) == "none")
+    # Photos ready, no result, no worker for this batch → spawn (even at awaiting_intent, so research
+    # overlaps the sell/buy decision).
+    check("photos + new batch → spawn",
+          d(True, "awaiting_intent", "b1", True, False, False, "", 0, 90) == "spawn")
+    # Worker running within the timeout → wait.
+    check("running within timeout → wait",
+          d(True, "researching", "b1", True, False, False, "b1", 10, 90) == "wait")
+    # Worker exceeded the timeout, still no result → fail (→ inline backstop).
+    check("timed out → fail", d(True, "researching", "b1", True, False, False, "b1", 120, 90) == "fail")
+    # Result ready at researching → present.
+    check("result at researching → present",
+          d(True, "researching", "b1", True, True, False, "b1", 5, 90) == "present")
+    # Result ready but seller still choosing sell/buy → hold it until they pick sell.
+    check("result at awaiting_intent → hold",
+          d(True, "awaiting_intent", "b1", True, True, False, "b1", 5, 90) == "hold")
+    # A failure marker at researching also drives a present (the pass then inlines).
+    check("failed marker at researching → present",
+          d(True, "researching", "b1", True, False, True, "b1", 5, 90) == "present")
+
+
+def test_present_research_result_failopen():
+    print("_present_research_result: returns False (no write) when there is no usable result:")
+    # A batch with no result file → reads nothing → returns False, defers to a pass. Safe: no IO.
+    check("missing result → False (no present)",
+          agent_daemon._present_research_result({"adapter": "console"}, {}, "no-such-batch-xyz") is False)
+
+
 def test_buyer_force_due_count_net():
     print("buyer_force_due: count-based net fires at/after force_every empty peeks:")
     check("below threshold → not due", agent_daemon.buyer_force_due(1, 2, 0.0, 0.0)[0] is False)
@@ -808,6 +940,160 @@ def test_sweep_escalates_only_past_attempts_and_age():
             _os.environ.pop("BAZAAR_DATA_DIR", None)
 
 
+# --------------------------------------------------------------------------- #
+# Catchup orphan reconciliation (a /catchup sweep stranded active:true — e.g.  #
+# killed mid-sweep by a daemon reload — must never freeze the maint lane).     #
+# --------------------------------------------------------------------------- #
+
+def _write_catchup(d, *, active=True, age_sec=None, updated_at="__use_age__", extra=None):
+    """Write data/catchup_session.json under temp dir `d`. `age_sec` sets updated_at relative to now;
+    pass updated_at= a literal string (or None) to override (for the unparseable/absent cases)."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    state = {"active": active, "phase": "sweep", "markets_pending": ["carousell"],
+             "markets_done": ["fb"], "digest": {"local": {"counts": {"total": 20}}}, "proposals": []}
+    if updated_at == "__use_age__":
+        ts = datetime.now(timezone.utc) - timedelta(seconds=age_sec or 0)
+        state["updated_at"] = ts.isoformat()
+    elif updated_at is not None:
+        state["updated_at"] = updated_at
+    if extra:
+        state.update(extra)
+    path = Path(d) / "catchup_session.json"
+    path.write_text(_json.dumps(state))
+    return path
+
+
+def test_catchup_active_parses_and_failopen():
+    print("_catchup_active: True iff the session file says active; fail-open False otherwise:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, active=True, age_sec=10)
+            check("active:true -> True", agent_daemon._catchup_active() is True)
+            _write_catchup(d, active=False, age_sec=10)
+            check("active:false -> False", agent_daemon._catchup_active() is False)
+            (Path(d) / "catchup_session.json").unlink()
+            check("missing file -> False (fail-open)", agent_daemon._catchup_active() is False)
+            (Path(d) / "catchup_session.json").write_text("{not json")
+            check("garbage json -> False (fail-open)", agent_daemon._catchup_active() is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_catchup_session_age():
+    print("_catchup_session_age_sec: real age in seconds; None when it can't be timed:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, age_sec=7200)
+            age = agent_daemon._catchup_session_age_sec()
+            check("~2h old session reads ~7200s", age is not None and 7100 < age < 7300)
+            _write_catchup(d, updated_at="not-a-timestamp")
+            check("unparseable updated_at -> None", agent_daemon._catchup_session_age_sec() is None)
+            _write_catchup(d, updated_at=None)  # absent
+            check("absent updated_at -> None", agent_daemon._catchup_session_age_sec() is None)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_clears_stale():
+    print("reconcile_catchup_orphan: clears a stale active sweep, preserving the digest:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=7200)  # past the 3600 TTL
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            state = _json.loads(path.read_text())
+            check("returns True (it cleared one)", cleared is True)
+            check("session is now inactive", state["active"] is False)
+            check("a closed_reason was stamped", "catchup orphan" in state.get("closed_reason", ""))
+            check("digest preserved (nothing lost)", state["digest"]["local"]["counts"]["total"] == 20)
+            check("markets preserved", state["markets_done"] == ["fb"])
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_clears_untimeable():
+    print("reconcile_catchup_orphan: an active sweep with an un-timeable stamp is treated as stale:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, updated_at="garbage-stamp")
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            check("returns True", cleared is True)
+            check("session inactive (bad stamp can't hide an orphan)",
+                  _json.loads(path.read_text())["active"] is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_spares_fresh():
+    print("reconcile_catchup_orphan: a fresh, recently-advanced sweep is left untouched:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=60)  # well within the TTL
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
+            check("returns False (nothing to clear)", cleared is False)
+            check("a live sweep stays active", _json.loads(path.read_text())["active"] is True)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_inactive_is_noop():
+    print("reconcile_catchup_orphan: an already-inactive session is a no-op:")
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            _write_catchup(d, active=False, age_sec=7200)
+            check("returns False", agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
+            (Path(d) / "catchup_session.json").unlink()
+            check("missing file -> False (fail-open, no crash)",
+                  agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_reconcile_catchup_orphan_dry_run_noop():
+    print("reconcile_catchup_orphan(dry_run=True): logs only, writes nothing:")
+    import os as _os
+    import json as _json
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        _os.environ["BAZAAR_DATA_DIR"] = d
+        try:
+            path = _write_catchup(d, active=True, age_sec=7200)
+            cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=True, ttl_sec=3600)
+            check("returns False under dry-run", cleared is False)
+            check("file untouched (still active)", _json.loads(path.read_text())["active"] is True)
+        finally:
+            _os.environ.pop("BAZAAR_DATA_DIR", None)
+
+
+def test_catchup_ttl_in_config():
+    print("load_config exposes catchup_ttl_sec (default 3600):")
+    cfg = agent_daemon.load_config()
+    check("catchup_ttl_sec present", "catchup_ttl_sec" in cfg)
+    check("is a positive number",
+          isinstance(cfg["catchup_ttl_sec"], (int, float)) and cfg["catchup_ttl_sec"] > 0)
+
+
 if __name__ == "__main__":
     print("agent_daemon tests\n")
     test_plan_outbox_sweep_pure()
@@ -825,6 +1111,14 @@ if __name__ == "__main__":
     test_buy_peek_success_and_failopen()
     test_channel_peek_console_skips_subprocess()
     test_channel_peek_parses_success()
+    test_settle_step_pure()
+    test_settle_photo_burst_coalesces()
+    test_settle_photo_burst_interrupts_on_command()
+    test_settle_config_keys_present()
+    test_has_caption_pure()
+    test_listing_ack_plan_pure()
+    test_research_decide_pure()
+    test_present_research_result_failopen()
     test_buyer_force_due_count_net()
     test_buyer_force_due_time_floor()
     test_buyer_recheck_failopen_conservative()
@@ -853,6 +1147,14 @@ if __name__ == "__main__":
     test_listing_health_due_parses_and_failopen()
     test_listing_health_start_dry_run_spawns_nothing()
     test_followup_poll_sec_in_config()
+    test_catchup_active_parses_and_failopen()
+    test_catchup_session_age()
+    test_reconcile_catchup_orphan_clears_stale()
+    test_reconcile_catchup_orphan_clears_untimeable()
+    test_reconcile_catchup_orphan_spares_fresh()
+    test_reconcile_catchup_orphan_inactive_is_noop()
+    test_reconcile_catchup_orphan_dry_run_noop()
+    test_catchup_ttl_in_config()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

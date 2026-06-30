@@ -78,6 +78,14 @@ def test_normalize():
                                           {"file_id": "L", "file_size": 9000}]}}, chat)[0]
     check("photo -> photo kind", photo["kind"] == "photo")
     check("picks largest photo", photo["payload"]["file_id"] == "L")
+    check("photo preserves ts", photo["ts"] == 13)
+    check("photo with no media_group_id omits the key",
+          "media_group_id" not in photo["payload"])
+    grouped = telegram._normalize({"update_id": 5, "message": {"chat": {"id": 100}, "date": 15,
+                                  "media_group_id": "MG42",
+                                  "photo": [{"file_id": "g", "file_size": 200}]}}, chat)[0]
+    check("gallery photo preserves media_group_id",
+          grouped["payload"].get("media_group_id") == "MG42")
     action = telegram._normalize({"update_id": 4, "callback_query": {"id": "cb1", "data": "esc-7:counter",
                                  "message": {"chat": {"id": 100}, "date": 14}}}, chat)[0]
     check("callback -> action", action["kind"] == "action")
@@ -149,6 +157,36 @@ def test_poll_logs_each_event_once():
             check("re-poll with no new updates logs nothing new", len(cl.read_turns()) == 2)
         finally:
             telegram.api, telegram.get_token = orig_api, orig_token
+
+
+def test_peek_summary_burst_counts():
+    print("peek_summary breaks a pending burst into photo/non-photo counts (settle window):")
+    updates = [
+        {"update_id": 30, "message": {"chat": {"id": 100}, "date": 5,
+                                      "media_group_id": "G1", "photo": [{"file_id": "a", "file_size": 1}]}},
+        {"update_id": 31, "message": {"chat": {"id": 100}, "date": 7,
+                                      "photo": [{"file_id": "b", "file_size": 1}]}},
+        {"update_id": 32, "message": {"chat": {"id": 100}, "text": "that's all", "date": 9}},
+    ]
+    s = telegram.peek_summary(updates, 100)
+    check("counts all pending", s["pending"] == 3)
+    check("counts photos", s["photos"] == 2)
+    check("collects photo file_ids (non-consuming pre-download)", s["photo_file_ids"] == ["a", "b"])
+    check("counts non-photo", s["nonphoto"] == 1)
+    check("latest_ts is the max ts", s["latest_ts"] == 9)
+    check("latest_text seeded from newest textful event", s["latest_text"] == "that's all")
+    pure = telegram.peek_summary(updates[:2], 100)
+    check("a pure photo burst has nonphoto==0", pure["nonphoto"] == 0 and pure["photos"] == 2)
+    # A button tap (callback) → latest_action carries ref+choice (deterministic sell/buy detection).
+    tap = telegram.peek_summary(
+        [{"update_id": 50, "callback_query": {"id": "cb9", "data": "intent-b1:sell",
+          "message": {"chat": {"id": 100}, "date": 20}}}], 100)
+    check("button tap exposes latest_action ref+choice",
+          tap["latest_action"] == {"ref": "intent-b1", "choice": "sell"})
+    check("no action → latest_action None", pure["latest_action"] is None)
+    foreign = telegram.peek_summary(
+        [{"update_id": 40, "message": {"chat": {"id": 999}, "text": "spam", "date": 1}}], 100)
+    check("foreign chat not counted", foreign["pending"] == 0)
 
 
 def test_peek_logs_nothing():
@@ -300,6 +338,7 @@ if __name__ == "__main__":
     test_token_safety()
     test_send_logs_outbound()
     test_poll_logs_each_event_once()
+    test_peek_summary_burst_counts()
     test_peek_logs_nothing()
     test_setcommands_registers()
     test_setcommands_idempotent()

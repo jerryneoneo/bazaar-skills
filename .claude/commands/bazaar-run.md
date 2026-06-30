@@ -76,19 +76,27 @@ for e in events (in order):
                     /resume  -> `python3 bin/control.py resume --source <adapter>`. BEFORE resuming normal
                                 work, run skills/channel/corrections.md: drain pending corrections,
                                 apply each to the durable state the relevant pass reads, mark applied.
-   action:   resolve the matching pending notify via skills/channel/notifications.md
-             (sell escalations/bids/sale, AND buy escalations/deals)
+   action:   a button-tap. If its ref is `intent-<batch>` (the daemon's instant sell/buy question for
+             a bare photo burst) OR a listing_session is active at step `awaiting_intent`, it is the
+             SELL/BUY CHOICE -> route to skills/channel/listing.md `awaiting_intent` (choice = the
+             button key). Otherwise resolve the matching pending notify via
+             skills/channel/notifications.md (sell escalations/bids/sale, AND buy escalations/deals).
    text while a flow is mid-step -> feed it as that flow's awaited input
+   # A listing_session at `awaiting_intent` is waiting for the sell/buy choice (the daemon asked it
+   # instantly): a "sell"/"buy" reply (button or text) routes to listing.md awaiting_intent.
    # Mid-step = data/listing_session.json OR data/distribution_session.json OR data/buy_session.json
    # is active; route the reply to whichever is active (only one runs at a time). Never re-ask which
    # item/want it is — that's a persistence bug (see listing.md / search.md routing rules).
-   PHOTO while a LISTING session is mid-step -> it is MORE PHOTOS, NEVER a price/floor answer.
-   # A photo can never be the awaited price/floor text. The daemon's settle window already coalesces
-   # an initial burst into one START pass, so this covers later stragglers (an extra angle sent after
-   # the session opened). If they are more angles of session.item_id, append to fields.photos (refine
-   # identification only if material) and ack briefly ("added 📷"). If they are clearly a DIFFERENT
-   # item, do NOT silently fold them in: ask "More angles of <current item>, or a new item to list?"
-   # and act on the answer next pass. NEVER parse a photo as the awaited price/floor reply.
+   PHOTO while a LISTING session is mid-step -> route to listing.md; NEVER a price/floor answer.
+   # A photo can never be the awaited price/floor text.
+   #  - step `awaiting_intent` with fields.photos still EMPTY: these are the item's FIRST photos (the
+   #    daemon opened the session + asked sell/buy before consuming them). listing.md awaiting_intent
+   #    downloads them into fields.photos and keeps waiting for the sell/buy choice. NOT a straggler.
+   #  - any LATER step (researching / awaiting_listing_inputs): the daemon's settle window already
+   #    coalesced the initial burst, so this is a STRAGGLER (an extra angle). If it's more angles of
+   #    session.item_id, append to fields.photos (refine identification only if material) and ack
+   #    briefly ("added 📷"). If it's clearly a DIFFERENT item, do NOT silently fold it in: ask
+   #    "More angles of <current item>, or a new item to list?" and act on the answer next pass.
 
    text (free reply) that ANSWERS an OPEN pending escalation -> resolve that pending, NOT the gate.
    # Before the FRESH-MESSAGE INTENT GATE, check channel_state.pending[] (notifications.md:8 already
@@ -167,6 +175,16 @@ for e in events (in order):
    #      mirror for sell), then return.
    # Exactly ONE flow starts (or one ask is sent). Never start both.
    # ------------------------------------------------------------------------------------
+
+# 1b. RESUME the active listing wizard if it has READY work — even with NO new seller event. The
+#     background research worker (Phase B) writes data/research_results/<batch_id>.json off to the
+#     side, and the daemon fires this pass the moment it (or a timeout .failed marker) lands. So:
+#     if data/listing_session.json is active at step `researching`, run skills/channel/listing.md
+#     RESEARCH now — it PRESENTS a ready result (or does inline research on failure), or returns
+#     quietly if the worker is still running. This is what lets findings surface proactively while
+#     the seller is idle, instead of only on their next message.
+if listing_session active AND step == "researching":
+   run skills/channel/listing.md RESEARCH (present-or-wait); then continue.
 
 # 2. SELL SIDE — one pass per ENABLED marketplace inbox   (skip if --scope buy or no seller_config)
 for id, sel in seller_config.marketplaces.items() if sel.enabled:    # e.g. fb, carousell, ebay…

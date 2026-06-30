@@ -625,6 +625,76 @@ def test_supervisor_stall_guard_warns_over_budget():
         1.0, agent_daemon.LOOP_ITER_BUDGET) is None)
 
 
+def _run_supervisor_once(probe_overrides, maint_poll_sec=0):
+    """One supervisor iteration with all peeks idle + the catchup/maint probes overridden. Returns
+    (modes, reconcile_calls): the run_pass mode strings captured, and how many times the catchup
+    reconciler was invoked. Hermetic — every probe is monkeypatched; no real files/passes touched."""
+    import argparse
+    modes, reconcile_calls = [], []
+    saved = {}
+    def patch(name, fn):
+        saved[name] = getattr(agent_daemon, name)
+        setattr(agent_daemon, name, fn)
+    patch("channel_peek", lambda *a, **k: {"pending": 0, "latest_text": ""})
+    patch("buyer_peek", lambda *a, **k: {"pending": 0, "markets": {}})
+    patch("buy_peek", lambda *a, **k: {"pending": 0})
+    patch("notify_trigger", lambda *a, **k: {"pending": 0, "latest_text": "", "markets": {}})
+    for n in ("_distribution_active", "_inbox_detect_active", "_listing_health_session_active"):
+        patch(n, lambda *a, **k: False)
+    for n in ("_scan_due", "_inbox_sweep_due", "_eval_due"):
+        patch(n, lambda *a, **k: False)
+    patch("_listing_health_due", lambda *a, **k: None)
+    patch("_followup_due", lambda *a, **k: {"nudges": 0, "drops": 0, "enabled": False, "due_nudges": []})
+    patch("run_followup_reconcile", lambda *a, **k: None)
+    patch("_catchup_active", lambda *a, **k: False)
+    patch("reconcile_catchup_orphan", lambda *a, **k: (reconcile_calls.append(1), False)[1])
+    patch("run_pass", lambda mode, *a, **k: modes.append(mode))
+    for name, fn in probe_overrides.items():
+        patch(name, fn)
+    paused_saved = agent_daemon.control.is_paused
+    agent_daemon.control.is_paused = lambda: False
+    cfg = {"buyer_poll_sec": 10 ** 9, "buy_poll_sec": 10 ** 9, "maint_poll_sec": maint_poll_sec,
+           "eval_poll_sec": 10 ** 9, "update_poll_sec": 10 ** 9, "followup_poll_sec": 10 ** 9,
+           "force_buyer_pass_every": 0, "catchup_ttl_sec": 3600}
+    ns = argparse.Namespace(once=True, dry_run=True)
+    try:
+        supervisor.run(cfg, {"adapter": "telegram", "detail": {}}, dict(os.environ), ns, 3, 1)
+    finally:
+        for n, fn in saved.items():
+            setattr(agent_daemon, n, fn)
+        agent_daemon.control.is_paused = paused_saved
+    return modes, reconcile_calls
+
+
+def test_maint_defers_to_fresh_catchup():
+    print("maint gate: a FRESH active catch-up sweep defers the maint pass (don't interrupt a live sweep):")
+    # scan is due (real maint work), but a fresh catchup is active and the reconciler clears nothing.
+    modes, _ = _run_supervisor_once({
+        "_scan_due": lambda *a, **k: True,
+        "_catchup_active": lambda *a, **k: True,
+        "reconcile_catchup_orphan": lambda *a, **k: False,  # fresh → not cleared
+    })
+    check("no maint pass while a fresh sweep is in flight", "maint" not in modes)
+
+
+def test_maint_runs_after_catchup_reconciled():
+    print("maint gate: once the reconciler clears a STALE sweep, the deferred maint work proceeds:")
+    # The reconciler clears the orphan, so _catchup_active reads False on the same tick → maint runs.
+    modes, _ = _run_supervisor_once({
+        "_scan_due": lambda *a, **k: True,
+        "_catchup_active": lambda *a, **k: False,       # already cleared by the reconcile call
+        "reconcile_catchup_orphan": lambda *a, **k: True,
+    })
+    check("maint pass runs after a stale sweep is reconciled", "maint" in modes)
+
+
+def test_startup_reconciles_catchup_orphan():
+    print("startup: the supervisor reconciles a stale catch-up orphan on boot (reload-orphan self-heal):")
+    # maint_poll huge so the maint GATE never fires — any reconcile call is the startup one.
+    _, reconcile_calls = _run_supervisor_once({}, maint_poll_sec=10 ** 9)
+    check("reconcile_catchup_orphan invoked at startup", len(reconcile_calls) >= 1)
+
+
 if __name__ == "__main__":
     print("supervisor tests\n")
     test_plan_only_new_markets()
@@ -656,6 +726,9 @@ if __name__ == "__main__":
     test_concurrency_reflects_config()
     test_source_change_routes_through_relaunch_self()
     test_supervisor_stall_guard_warns_over_budget()
+    test_maint_defers_to_fresh_catchup()
+    test_maint_runs_after_catchup_reconciled()
+    test_startup_reconciles_catchup_orphan()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")

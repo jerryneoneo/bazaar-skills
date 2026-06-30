@@ -374,6 +374,11 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
     swept = harness_run.sweep_stale_pass_logs()
     if swept:
         logging.info("swept %s stale per-pass log(s) leaked by forced kills", len(swept))
+    # Heal a catch-up sweep orphaned by the very reload that respawned us (the reload-mid-sweep case):
+    # a relaunched supervisor clears the stranded active:true on boot, so the maint lane never stays
+    # frozen across a restart waiting for the first maint poll interval.
+    if ad.reconcile_catchup_orphan(env, ns.dry_run):
+        logging.info("reconciled a stale catch-up sweep orphaned by a prior crash/reload")
     ad._log_wake_mode()  # explicit Instant/Standard banner (did the FDA grant take?)
     src_fp = ad._source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
 
@@ -421,6 +426,9 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 paused, len(ad.control.pending_corrections()), time.monotonic() - last_corrections):
             if workers:
                 _preempt_all(workers)
+            # A /resume should also unwedge a stale catch-up sweep so the background lane comes back with
+            # the corrections. Only a TTL-exceeded orphan is cleared — a fresh, live sweep is untouched.
+            ad.reconcile_catchup_orphan(env, ns.dry_run, cfg.get("catchup_ttl_sec", ad.CATCHUP_TTL_SEC))
             logging.info("pending correction(s) → channel pass to apply + report")
             ad.run_pass("seller", channel, env, ns.dry_run)
             last_corrections = time.monotonic()
@@ -490,9 +498,21 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 if workers:
                     logging.info("channel work → preempting %s buyer worker(s)", len(workers))
                     _preempt_all(workers)
-                if not ad._listing_active():
-                    ad.send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)
-                ad.run_pass("seller", channel, env, ns.dry_run)
+                # Deterministic, INSTANT handling (settle + sell/buy ask + sell-tap transition) so the
+                # seller never waits on a ~2-min channel pass for an ack/transition. 'defer' = fully
+                # handled here (no LLM pass needed). Shared with the single-flight loop.
+                if ad.channel_instant_ack(channel, env, peek, cfg, ns.dry_run) != "defer":
+                    ad.run_pass("seller", channel, env, ns.dry_run)
+
+        # BACKGROUND RESEARCH (Phase B): drive the detached worker. When its result lands, present it
+        # DETERMINISTICALLY (no LLM pass). Only a worker TIMEOUT (inline research) or auto-price needs
+        # a pass — then preempt market workers first (the seller is waiting).
+        if not paused and ad.research_orchestrate(channel, env, ns.dry_run, cfg) == "present":
+            if workers:
+                logging.info("research fallback → preempting %s worker(s) to present", len(workers))
+                _preempt_all(workers)
+            logging.info("research fallback → inline present pass")
+            ad.run_pass("seller", channel, env, ns.dry_run)
 
         # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): launch a scoped buyer
         # worker for any notification-path market (trigger_resolver) with new OS-notification mail,
@@ -586,6 +606,12 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
 
         # EXCLUSIVE passes: only when no market worker is live (they'd contend on a shared tab/account).
         if not paused and not workers and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
+            # Heal a stale/abandoned catchup sweep FIRST (reload-killed → stranded active:true would
+            # freeze this lane forever). Safe here: maint is exclusive with channel/buy (gated on
+            # `not workers`), so the clear can never race a channel pass mid-advancing a live sweep —
+            # and a FRESH sweep (within TTL) is left untouched and still defers maint below.
+            ad.reconcile_catchup_orphan(env, ns.dry_run, cfg.get("catchup_ttl_sec", ad.CATCHUP_TTL_SEC))
+            cat_active = ad._catchup_active()
             dist_active = ad._distribution_active()
             idet_active = ad._inbox_detect_active()
             lh_active = ad._listing_health_session_active()
@@ -593,16 +619,19 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
             sweep_due = ad._inbox_sweep_due(env)
             # Stale-listing suggestions are the LOWEST-priority maint step (see agent_daemon.py): only
             # open a new episode when no higher-priority detect/drain work is pending.
-            if not (dist_active or idet_active or lh_active or scan_due or sweep_due):
+            if not (dist_active or idet_active or lh_active or scan_due or sweep_due or cat_active):
                 lh_due_item = ad._listing_health_due(env)
                 if lh_due_item:
                     ad.run_listing_health_start(env, lh_due_item, ns.dry_run)
                     lh_active = not ns.dry_run
-            if dist_active or idet_active or lh_active or scan_due or sweep_due:
+            # A fresh catch-up sweep defers ALL maint this tick (the maint prompt would stand down anyway).
+            if (dist_active or idet_active or lh_active or scan_due or sweep_due) and not cat_active:
                 logging.info("maint pass (exclusive)%s",
                              " → suggest stale-listing fixes" if lh_active and not (
                                  dist_active or idet_active or scan_due or sweep_due) else "")
                 ad.run_pass("maint", channel, env, ns.dry_run)
+            elif cat_active:
+                logging.info("maint deferred — catch-up sweep in flight (fresh)")
             last_maint = time.monotonic()
 
         if not paused and not workers and time.monotonic() - last_buy >= cfg["buy_poll_sec"]:
