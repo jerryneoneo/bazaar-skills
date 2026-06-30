@@ -25,7 +25,7 @@ agent. They are excluded because they carry secrets, identity, or private conver
 ### Money & identity (the core invariants)
 | Path | Holds | Written by |
 |---|---|---|
-| `seller_config.json` | Currency, region, **exact pickup address**, delivery zones, channel binding. | Onboarding (`/bazaar-install`); the first-run gate. |
+| `seller_config.json` | Currency, region, **exact pickup address**, delivery zones, channel binding. | Onboarding (`/selly-install`); the first-run gate. |
 | `buyer_config.json` | Delivery area, payment methods, markets to search. | Onboarding (buying step). |
 | `floors/<item>.json` | Your **secret minimum sell price** per item. | Set when you list; read only by `bin/floor_gate.py`. |
 | `budgets/<want>.json` | Your **secret maximum buy budget** per want. | Set when you search; read only by `bin/budget_gate.py`. |

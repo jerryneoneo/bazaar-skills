@@ -3,7 +3,7 @@
 
     python3 tests/test_healthcheck.py
 
-Hermetic: the data-dir-driven checks run against a temp BAZAAR_DATA_DIR, and the live checks
+Hermetic: the data-dir-driven checks run against a temp SELLY_DATA_DIR, and the live checks
 (CDP, launchctl) are exercised against unreachable inputs so they degrade to warn/ok WITHOUT
 raising. We don't invoke the full run_checks() here — it probes the harness CLI (slow, network),
 which preflight already covers; we test the pure logic healthcheck adds on top.

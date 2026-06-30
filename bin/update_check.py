@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""update_check.py — throttled, fail-open "is a newer Bazaar available upstream?" check.
+"""update_check.py — throttled, fail-open "is a newer SELLY available upstream?" check.
 
-Bazaar should notice when the repo it was cloned from has moved on and OFFER to update (it never
-auto-applies unless `bazaar-config auto_upgrade` is true — see /bazaar-upgrade). This is the engine
+SELLY should notice when the repo it was cloned from has moved on and OFFER to update (it never
+auto-applies unless `selly-config auto_upgrade` is true — see /selly-upgrade). This is the engine
 the entry points call: the global launchers + the in-dir SessionStart hook (interactive) and the
 always-on daemon (which notifies over the channel). All of them share ONE throttle + snooze state so
 the user is asked at most once per cadence, never on every keystroke.
@@ -14,8 +14,8 @@ Design, mirroring eval_state.py / scan_state.py:
     NEWER upstream version breaks through the snooze and asks again.
   • FAIL-OPEN: no network / not a git checkout / any error -> update_available:false (never blocks use).
 
-State: ~/.bazaar/update_state.json (cross-cutting install state, alongside config.json; relocate via
-$BAZAAR_CONFIG_DIR for tests). Compares HEAD against the branch's upstream (`@{u}`), else origin/main.
+State: ~/.selly/update_state.json (cross-cutting install state, alongside config.json; relocate via
+$SELLY_CONFIG_DIR for tests). Compares HEAD against the branch's upstream (`@{u}`), else origin/main.
 
 Usage:
   update_check.py check  [--force] [--default-branch main]
@@ -47,9 +47,9 @@ SECONDS_PER_DAY = 86400.0
 
 
 def _config_dir() -> Path:
-    """~/.bazaar (cross-cutting install state). Relocatable via $BAZAAR_CONFIG_DIR for tests."""
-    env = os.environ.get("BAZAAR_CONFIG_DIR")
-    return Path(env) if env else Path.home() / ".bazaar"
+    """~/.selly (cross-cutting install state). Relocatable via $SELLY_CONFIG_DIR for tests."""
+    env = os.environ.get("SELLY_CONFIG_DIR")
+    return Path(env) if env else Path.home() / ".selly"
 
 
 def _state_path() -> Path:
@@ -57,7 +57,7 @@ def _state_path() -> Path:
 
 
 def _data_dir() -> Path:
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else RUNTIME_DIR / "data"
 
 

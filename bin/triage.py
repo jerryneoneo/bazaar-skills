@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """triage.py — read-only aggregator of every local "awaiting you" signal.
 
-`/bazaar-catchup` does a deep, mostly read-only sweep of listings, marketplaces, and the
+`/selly-catchup` does a deep, mostly read-only sweep of listings, marketplaces, and the
 interface, then proposes work. This module is its cheap file-state core: it reads only the
 local `data/` state and reports, in one digest, the tasks not yet attended to:
 
@@ -18,7 +18,7 @@ not touched here. It consolidates the earlier find_unread.py / find_unhandled.py
 prototypes (sell-side unread only) into one both-sides digest, using the cursor-walk that
 correctly ignores threads we have already replied to.
 
-Standard library only. Data dir relocatable via BAZAAR_DATA_DIR (tests + isolation),
+Standard library only. Data dir relocatable via SELLY_DATA_DIR (tests + isolation),
 matching the rest of bin/.
 
 Run:
@@ -69,8 +69,8 @@ CATEGORY_KEYS = (
 
 
 def data_dir() -> Path:
-    """The data dir - relocatable via BAZAAR_DATA_DIR (used by tests for isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data dir - relocatable via SELLY_DATA_DIR (used by tests for isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
 
 

@@ -36,7 +36,7 @@ For each pending correction `{id, text, target, source, ts}`:
      If the item is already live, re-anchor and re-publish per the listing flow's PUBLISH step.
    - **b. Hold a thread** ("stop replying to that buyer / seller", "leave that chat alone"): set
      `status:"held"` in `data/threads/<market>:<id>.json` (sell side) or
-     `data/buyer_threads/<market>:<id>.json` (buy side). Both loops in `.claude/commands/bazaar-run.md`
+     `data/buyer_threads/<market>:<id>.json` (buy side). Both loops in `.claude/commands/selly-run.md`
      skip `held` threads. `held` is **reversible** (unlike `escalated`) — a later "resume that chat"
      correction clears it back to its prior status.
    - **c. Re-scope a want / budget** ("raise the budget on <want>", "stop pursuing <want>"): adjust the
@@ -46,7 +46,7 @@ For each pending correction `{id, text, target, source, ts}`:
    - **d. General steering** with no concrete state target ("be more terse", "always ask before
      offering"): leave it in the transcript (the channel pass already reads the tail) so it shapes the
      next channel turn. If it implies a config change (e.g. an approvals/autonomy preference), point the
-     user at `/bazaar` rather than silently rewriting `data/config.json`.
+     user at `/selly` rather than silently rewriting `data/config.json`.
    - **e. Style / persona steering** ("be more terse", "give lowballers a harder time", "stop being so
      soft", "stand your ground more"): this is a durable preference, not a one-off, so record it as a
      **style proposal** instead of letting it die in the transcript. Map it to the closest field and run
@@ -54,7 +54,7 @@ For each pending correction `{id, text, target, source, ts}`:
      negotiation.sell_firmness|learning> --value <v> --rationale "<the user's words>" --source correction`
      (`bin/style.py` is the single source of truth and skips silently when `learning:"off"`). It does
      **not** rewrite the persona; tell the user you noted it and that they can apply it under
-     `/bazaar -> style`. If `style.json learning` is `auto` and the mapping is unambiguous, you may
+     `/selly -> style`. If `style.json learning` is `auto` and the mapping is unambiguous, you may
      apply it now via `python3 bin/style.py apply --id <id>` and say what you changed. Never hand-edit
      `data/style.json` directly here, and never let a "troll harder" note cross into abusive wording
      (the `skills/style.md` invariants hold).

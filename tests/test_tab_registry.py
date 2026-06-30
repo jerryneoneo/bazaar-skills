@@ -110,7 +110,7 @@ def test_cli_resolve_known_market_region():
     print("CLI resolve known market+region (carousell SG -> www.carousell.sg):")
     with tempfile.TemporaryDirectory() as d:
         _write_config(d, side="seller", region="SG")
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["resolve", "--market", "carousell"], env=env)
         check("exits 0", out.returncode == 0)
         payload = json.loads(out.stdout)
@@ -125,7 +125,7 @@ def test_cli_region_inferred_from_buyer_config():
     print("CLI resolve infers region from the BUYER config (--side buy):")
     with tempfile.TemporaryDirectory() as d:
         _write_config(d, side="buyer", region="MY")
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["resolve", "--market", "carousell", "--side", "buy"], env=env)
         check("exits 0", out.returncode == 0)
         payload = json.loads(out.stdout)
@@ -137,7 +137,7 @@ def test_cli_region_override_wins():
     print("CLI --region override beats the config region:")
     with tempfile.TemporaryDirectory() as d:
         _write_config(d, side="seller", region="SG")  # config says SG
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["resolve", "--market", "carousell", "--region", "HK"], env=env)
         check("exits 0", out.returncode == 0)
         payload = json.loads(out.stdout)
@@ -149,7 +149,7 @@ def test_cli_unknown_market_exits_3():
     print("CLI unknown market -> exit 3:")
     with tempfile.TemporaryDirectory() as d:
         _write_config(d, side="seller", region="SG")
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["resolve", "--market", "nope_not_a_market"], env=env)
         check("unknown market exits 3", out.returncode == 3)
         check("error on stderr", "error" in json.loads(out.stderr))
@@ -159,7 +159,7 @@ def test_cli_explicit_config_path():
     print("CLI --config explicit path overrides the data-dir default:")
     with tempfile.TemporaryDirectory() as d:
         cfg = _write_config(d, side="seller", region="TW")
-        # No BAZAAR_DATA_DIR set — prove --config alone supplies the region.
+        # No SELLY_DATA_DIR set — prove --config alone supplies the region.
         out = _run(["resolve", "--market", "carousell", "--config", str(cfg)])
         check("exits 0", out.returncode == 0)
         payload = json.loads(out.stdout)
@@ -188,7 +188,7 @@ def test_cli_missing_config_exits_3():
     print("CLI missing config (no region source) -> exit 3:")
     with tempfile.TemporaryDirectory() as d:
         # Empty data dir: no seller_config.json present.
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["resolve", "--market", "carousell"], env=env)
         check("missing config exits 3", out.returncode == 3)
 
@@ -204,7 +204,7 @@ def test_cli_list_enabled_only():
             "carousell": {"enabled": True},
             "ebay": {"enabled": False},
         })
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = _run(["list"], env=env)
         check("exits 0", out.returncode == 0)
         payload = json.loads(out.stdout)
@@ -224,7 +224,7 @@ def test_concurrent_resolve_is_deterministic():
     n_workers = 12
     with tempfile.TemporaryDirectory() as d:
         _write_config(d, side="seller", region="SG")
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         args = [sys.executable, BIN, "resolve", "--market", "carousell"]
         procs = [subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
                  for _ in range(n_workers)]

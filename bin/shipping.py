@@ -24,9 +24,9 @@ import os
 import sys
 from pathlib import Path
 
-# Data dir is relocatable via BAZAAR_DATA_DIR (used by tests for isolation), matching the
+# Data dir is relocatable via SELLY_DATA_DIR (used by tests for isolation), matching the
 # convention in control.py / pacing_gate.py / ui_cache.py.
-DATA_DIR = Path(os.environ.get("BAZAAR_DATA_DIR") or (Path(__file__).resolve().parent.parent / "data"))
+DATA_DIR = Path(os.environ.get("SELLY_DATA_DIR") or (Path(__file__).resolve().parent.parent / "data"))
 CONFIG_PATH = DATA_DIR / "seller_config.json"
 ITEMS_DIR = DATA_DIR / "items"
 

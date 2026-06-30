@@ -23,4 +23,4 @@ Notes:
 - Read-only browsing: searching never messages a seller — the liaison step (after you confirm) opens
   the thread and negotiates.
 - Honors `--dry-run` (browser actions logged, not executed; all files still written).
-- This is also reachable as a `/search` command over the buyer channel via `/bazaar-run`.
+- This is also reachable as a `/search` command over the buyer channel via `/selly-run`.

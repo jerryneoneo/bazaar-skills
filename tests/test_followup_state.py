@@ -6,7 +6,7 @@
 Focus: the deterministic DETECT + SCHEDULE core. The nudge count is DERIVED from the transcript
 tail (never trusted from the ledger), the schedule is a pure lookup, and `scan_due` partitions
 threads into due nudges vs due drops at a fixed `now`. Composition + sending is the LLM pass's job
-and is not exercised here. State is isolated per test via tmp dirs / BAZAAR_DATA_DIR.
+and is not exercised here. State is isolated per test via tmp dirs / SELLY_DATA_DIR.
 """
 
 import json
@@ -289,12 +289,12 @@ def test_reconcile_prunes_answered():
 # ---- CLI smoke -------------------------------------------------------------
 
 def test_cli():
-    print("CLI: due/mark-nudge/mark-drop exit codes + JSON shape via BAZAAR_DATA_DIR:")
+    print("CLI: due/mark-nudge/mark-drop exit codes + JSON shape via SELLY_DATA_DIR:")
     with tempfile.TemporaryDirectory() as tmp:
         _write_json(tmp, "config.json", {"followup_enabled": True})
         _write_json(tmp, "threads/fb:t.json",
                     _thread(thread_id="fb:t", rows=[_msg("in", "hi", _ago(3)), _msg("out", "r", _ago(1.5))]))
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         exe = [sys.executable, str(ROOT / "bin" / "followup_state.py")]
         p = subprocess.run(exe + ["due", "--now", NOW.isoformat()], capture_output=True, text=True, env=env)
         check("due exit 0", p.returncode == 0)

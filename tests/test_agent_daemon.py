@@ -320,7 +320,7 @@ def test_buyer_pass_caphit_triggers_one_continuation():
 
     # run_pass returns the cap-hit signal on the FIRST buyer call, then 0 on the continuation.
     def fake_run_pass(mode, channel, env, dry_run, extra_env=None):
-        calls.append((mode, (extra_env or {}).get("BAZAAR_BUYER_PEEK_THREAD")))
+        calls.append((mode, (extra_env or {}).get("SELLY_BUYER_PEEK_THREAD")))
         return agent_daemon.CAP_HIT_SIGNAL if len(calls) == 1 else 0
     agent_daemon.run_pass = fake_run_pass
     escalations = []
@@ -330,7 +330,7 @@ def test_buyer_pass_caphit_triggers_one_continuation():
     try:
         agent_daemon.run_buyer_with_continuation(
             "carousell", {"adapter": "telegram"}, {}, False,
-            extra_env={"BAZAAR_BUYER_PEEK_TEXT": "hi"}, peek_thread="carousell:1")
+            extra_env={"SELLY_BUYER_PEEK_TEXT": "hi"}, peek_thread="carousell:1")
         buyer_calls = [c for c in calls if c[0] == "buyer"]
         check("exactly two buyer passes (initial + ONE continuation)", len(buyer_calls) == 2)
         check("the continuation carried the peek-thread hint",
@@ -374,7 +374,7 @@ def test_escalate_cap_hit_enqueues_channel_notify():
     import tempfile as _tf
     tg = {"adapter": "telegram", "detail": {}}
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             agent_daemon.escalate_cap_hit(tg, {}, "fb", False, via_outbox=True)
             outbox = Path(d) / "channel_outbox.jsonl"
@@ -389,7 +389,7 @@ def test_escalate_cap_hit_enqueues_channel_notify():
             agent_daemon.escalate_cap_hit(tg, {}, "carousell", True, via_outbox=True)
             check("dry-run enqueues nothing", not outbox.exists())
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_escalate_cap_hit_direct_send_in_single_flight():
@@ -411,7 +411,7 @@ def test_escalate_cap_hit_direct_send_in_single_flight():
         return FakeProc(0)
     agent_daemon.subprocess.run = fake_run
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             agent_daemon.escalate_cap_hit(tg, {}, "fb", False, via_outbox=False)
             check("a direct telegram.py send fired (not just an enqueue)", len(sent) == 1)
@@ -431,7 +431,7 @@ def test_escalate_cap_hit_direct_send_in_single_flight():
                                           False, via_outbox=False)
             check("non-telegram adapter → no direct send (gated like the notify path)", sent == [])
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
             agent_daemon.subprocess.run = saved_run
 
 
@@ -634,7 +634,7 @@ def test_load_config_eval_judge_nightly():
     cfg = agent_daemon.load_config()
     check("present and bool", isinstance(cfg.get("eval_judge_nightly"), bool))
     saved = agent_daemon.CONFIG_PATH
-    agent_daemon.CONFIG_PATH = Path("/nonexistent/bazaar/config.json")  # exists() False → code default
+    agent_daemon.CONFIG_PATH = Path("/nonexistent/selly/config.json")  # exists() False → code default
     try:
         check("absent config → default True", agent_daemon.load_config()["eval_judge_nightly"] is True)
     finally:
@@ -789,7 +789,7 @@ def test_sweep_outbox_redrives_and_bumps_attempts():
     from datetime import datetime, timedelta, timezone
     import thread_outbox as to
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             old = datetime.now(timezone.utc) - timedelta(seconds=300)
             to.enqueue("fb:vida", "fb", "no defects, all brand new", "1:50 PM|defects?", old, side="sell")
@@ -799,7 +799,7 @@ def test_sweep_outbox_redrives_and_bumps_attempts():
             check("intent still alive (not dropped)", len(recs) == 1)
             check("attempts bumped to 1 (bounds the re-drive loop)", recs[0]["attempts"] == 1)
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_sweep_outbox_dry_run_is_noop():
@@ -821,7 +821,7 @@ def test_escalation_text_is_honest():
     import json as _json
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             agent_daemon._enqueue_outbox_escalation(
                 {"thread_id": "fb:vida-onepiece", "id": "x", "text": "hi", "attempts": 3}, {})
@@ -837,7 +837,7 @@ def test_escalation_text_is_honest():
                   "verifying" in txt and "may already have" in txt)
             check("kind notify", any(r.get("kind") == "notify" for r in recs))
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_sweep_skips_intent_already_committed():
@@ -849,7 +849,7 @@ def test_sweep_skips_intent_already_committed():
     from datetime import datetime, timedelta, timezone
     import thread_outbox as to
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             # a long-stranded, max-attempts intent that WOULD otherwise escalate ...
             old = datetime.now(timezone.utc) - timedelta(seconds=4000)
@@ -876,7 +876,7 @@ def test_sweep_skips_intent_already_committed():
             check("NO false-alarm notify was enqueued",
                   not outbox.exists() or outbox.read_text().strip() == "")
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_sweep_does_not_escalate_before_age_floor():
@@ -886,7 +886,7 @@ def test_sweep_does_not_escalate_before_age_floor():
     from datetime import datetime, timedelta, timezone
     import thread_outbox as to
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
             iid = to.enqueue("fb:young", "fb", "holding line", "1:00 PM|hi", now, side="sell")["id"]
@@ -902,7 +902,7 @@ def test_sweep_does_not_escalate_before_age_floor():
             recs = to.peek(statuses=to.OPEN_STATUSES)["pending"]
             check("intent still pending, not marked escalated", recs and not recs[0].get("escalated"))
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_sweep_escalates_only_past_attempts_and_age():
@@ -913,7 +913,7 @@ def test_sweep_escalates_only_past_attempts_and_age():
     from datetime import datetime, timedelta, timezone
     import thread_outbox as to
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             now = datetime(2026, 6, 29, 12, 0, 0, tzinfo=timezone.utc)
             iid = to.enqueue("fb:stuck", "fb", "holding line", "1:00 PM|hi", now, side="sell")["id"]
@@ -937,7 +937,7 @@ def test_sweep_escalates_only_past_attempts_and_age():
                      if outbox.exists() else [])
             check("no second escalation on the next sweep", len(recs2) == before)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -969,7 +969,7 @@ def test_catchup_active_parses_and_failopen():
     import os as _os
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             _write_catchup(d, active=True, age_sec=10)
             check("active:true -> True", agent_daemon._catchup_active() is True)
@@ -980,7 +980,7 @@ def test_catchup_active_parses_and_failopen():
             (Path(d) / "catchup_session.json").write_text("{not json")
             check("garbage json -> False (fail-open)", agent_daemon._catchup_active() is False)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_catchup_session_age():
@@ -988,7 +988,7 @@ def test_catchup_session_age():
     import os as _os
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             _write_catchup(d, age_sec=7200)
             age = agent_daemon._catchup_session_age_sec()
@@ -998,7 +998,7 @@ def test_catchup_session_age():
             _write_catchup(d, updated_at=None)  # absent
             check("absent updated_at -> None", agent_daemon._catchup_session_age_sec() is None)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reconcile_catchup_orphan_clears_stale():
@@ -1007,7 +1007,7 @@ def test_reconcile_catchup_orphan_clears_stale():
     import json as _json
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             path = _write_catchup(d, active=True, age_sec=7200)  # past the 3600 TTL
             cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
@@ -1018,7 +1018,7 @@ def test_reconcile_catchup_orphan_clears_stale():
             check("digest preserved (nothing lost)", state["digest"]["local"]["counts"]["total"] == 20)
             check("markets preserved", state["markets_done"] == ["fb"])
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reconcile_catchup_orphan_clears_untimeable():
@@ -1027,7 +1027,7 @@ def test_reconcile_catchup_orphan_clears_untimeable():
     import json as _json
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             path = _write_catchup(d, active=True, updated_at="garbage-stamp")
             cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
@@ -1035,7 +1035,7 @@ def test_reconcile_catchup_orphan_clears_untimeable():
             check("session inactive (bad stamp can't hide an orphan)",
                   _json.loads(path.read_text())["active"] is False)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reconcile_catchup_orphan_spares_fresh():
@@ -1044,14 +1044,14 @@ def test_reconcile_catchup_orphan_spares_fresh():
     import json as _json
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             path = _write_catchup(d, active=True, age_sec=60)  # well within the TTL
             cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=False, ttl_sec=3600)
             check("returns False (nothing to clear)", cleared is False)
             check("a live sweep stays active", _json.loads(path.read_text())["active"] is True)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reconcile_catchup_orphan_inactive_is_noop():
@@ -1059,7 +1059,7 @@ def test_reconcile_catchup_orphan_inactive_is_noop():
     import os as _os
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             _write_catchup(d, active=False, age_sec=7200)
             check("returns False", agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
@@ -1067,7 +1067,7 @@ def test_reconcile_catchup_orphan_inactive_is_noop():
             check("missing file -> False (fail-open, no crash)",
                   agent_daemon.reconcile_catchup_orphan({}, False, 3600) is False)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_reconcile_catchup_orphan_dry_run_noop():
@@ -1076,14 +1076,14 @@ def test_reconcile_catchup_orphan_dry_run_noop():
     import json as _json
     import tempfile as _tf
     with _tf.TemporaryDirectory() as d:
-        _os.environ["BAZAAR_DATA_DIR"] = d
+        _os.environ["SELLY_DATA_DIR"] = d
         try:
             path = _write_catchup(d, active=True, age_sec=7200)
             cleared = agent_daemon.reconcile_catchup_orphan({}, dry_run=True, ttl_sec=3600)
             check("returns False under dry-run", cleared is False)
             check("file untouched (still active)", _json.loads(path.read_text())["active"] is True)
         finally:
-            _os.environ.pop("BAZAAR_DATA_DIR", None)
+            _os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_catchup_ttl_in_config():

@@ -27,7 +27,7 @@ Usage:
     python3 ui_cache.py prune      [--market <id>] [--flow <id>] \\
                                    [--max-fail 3] [--max-age-days 30] [--now <iso>]
 
-    (tests relocate the whole data dir via the BAZAAR_DATA_DIR env var.)
+    (tests relocate the whole data dir via the SELLY_DATA_DIR env var.)
 
 Output (stdout, JSON). `get --step`:
     {"market": "carousell", "flow": "listing", "step": "title_field",
@@ -56,8 +56,8 @@ VALID_STRATEGIES = ("css", "aria", "role", "text")
 
 
 def data_dir():
-    """The data directory — relocatable via BAZAAR_DATA_DIR (used by tests for isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data directory — relocatable via SELLY_DATA_DIR (used by tests for isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

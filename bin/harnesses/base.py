@@ -1,6 +1,6 @@
 """Harness interface — the agent-runtime abstraction boundary.
 
-Bazaar is harness-agnostic *by design*: it runs under Claude Code today, and other harnesses
+SELLY is harness-agnostic *by design*: it runs under Claude Code today, and other harnesses
 (Codex, Cursor, OpenCode, …) slot in later behind this same interface. The pieces that differ
 between harnesses live here:
   • where secrets/permissions live + the MCP config format  (write_settings / write_mcp / load_env)

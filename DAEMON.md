@@ -5,13 +5,13 @@ the cheap always-on part from the expensive thinking part so idle cost is ~zero:
 
 ```
 launchd (RunAtLoad + KeepAlive, survives logout/reboot/crash)
-├── com.bazaarskills.chrome   → bin/chrome_debug.sh
+├── com.selly.chrome   → bin/chrome_debug.sh
 │       one warm, logged-in Chrome (your .browser-profile) with remote-debugging :9222
-└── com.bazaarskills.agent    → bin/agent_daemon.py   (no LLM)
+└── com.selly.agent    → bin/agent_daemon.py   (no LLM)
         • long-`peek`s Telegram (non-consuming) → on pending → run_pass.sh seller
         • every buyer_poll_sec → run_pass.sh buyer
         • every update_poll_sec → throttled read-only upstream update check; on a newer release,
-          ONE channel heads-up (NEVER auto-applies — you run /bazaar-upgrade). Deduped per version.
+          ONE channel heads-up (NEVER auto-applies — you run /selly-upgrade). Deduped per version.
         • single-flight lock, logs, restart-on-crash
             └── run_pass.sh → harness_run.py → the active harness's headless pass (today
                  `claude -p`, scoped perms) does the real work, driving the warm Chrome over
@@ -27,13 +27,13 @@ The LLM (`claude -p`) runs **only when there's work** — a channel event or a b
 > macOS and **Task Scheduler on Windows** (`bin/install.py supervisor`, behind `bin/platforms/`).
 > The headless runner (`bin/harness_run.py`) builds a harness-agnostic `PassSpec` and routes it
 > through the active harness's `pass_argv` (`bin/harnesses/`); **Claude Code is the only verified
-> runtime today** (the runner refuses an unwired harness). Setup is `./setup` / `/bazaar-install`;
-> change it later with `/bazaar`, update with `/bazaar-upgrade`.
+> runtime today** (the runner refuses an unwired harness). Setup is `./setup` / `/selly-install`;
+> change it later with `/selly`, update with `/selly-upgrade`.
 
 ## Prerequisites
 - `claude`, `npx`, `node`, `curl`, `python3` on PATH. Check: `which claude npx node curl python3`.
   - If `claude` isn't in the plist PATH, export `CLAUDE_BIN` (its full path) in the daemon's
-    environment, and/or fix the `PATH` in `launchd/com.bazaarskills.agent.plist`.
+    environment, and/or fix the `PATH` in `launchd/com.selly.agent.plist`.
 - Chrome installed; the `.browser-profile` already logged in to your enabled marketplaces (FB,
   Carousell, eBay, …). The token lives in `../.claude/settings.local.json` (the daemon reads it and
   injects it into each pass).
@@ -60,7 +60,7 @@ Stop the agent **mid-flight** to fix something, from any interface — all three
   running within ~one poll cadence** (the killed step is idempotent). Then send a plain-language
   **correction** ("list it at $80 not $60", "stop replying to that buyer"); it's captured and
   acked. Send **/resume** — pending corrections are applied to the right state, then work continues.
-- **Claude Code:** `/pause` and `/resume` slash commands (or in the `/bazaar` menu).
+- **Claude Code:** `/pause` and `/resume` slash commands (or in the `/selly` menu).
 - **Terminal:** `python3 bin/control.py pause` / `resume` / `status` — a plain file write under
   `data/`, so it pauses the daemon **even mid-pass**.
 

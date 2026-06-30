@@ -5,11 +5,11 @@ Shared logic used by the buyer-side loop (`/sell-run`, or the `/sell-watch` alia
 `/sell-resolve` is the console-only fallback). Process **one buyer message at a time, in order**.
 
 > **Load config first.** Read `data/config.json` for `approvals` (per-step gates — see
-> `skills/bazaar-config.md`), `reply_delay_sec`, `max_actions_per_hour`, `quiet_hours`,
+> `skills/selly-config.md`), `reply_delay_sec`, `max_actions_per_hour`, `quiet_hours`,
 > `checkout_disclosure` (posted with the checkout link at close, §3b); and
 > `data/seller_config.json` for `currency` + `shipping` (needed for the
 > delivery-fee branch). If `config.approvals` is absent, apply the migration shim in
-> `bazaar-config.md` (derives the step map from the legacy `autonomy_mode`/`listing_autonomy`/
+> `selly-config.md` (derives the step map from the legacy `autonomy_mode`/`listing_autonomy`/
 > `close_gate`). All decisions below read `approvals.steps.<key>`: `auto` acts, `confirm` gates
 > on `confirm()`, `escalate` always surfaces via `notify()`.
 
@@ -61,7 +61,7 @@ line ("Let me sort the best way to get this to you, back shortly!"), and never a
 transact offline yourself.
 *(Seller-side equivalent: when the **seller** volunteers offline terms over the control channel,
 that is them choosing "deal other ways" — it resolves the pending `close` to `manual` per
-`bazaar-run.md` §1 + `notifications.md` close → manual; it is never a new listing or a listing edit,
+`selly-run.md` §1 + `notifications.md` close → manual; it is never a new listing or a listing edit,
 and the volunteered address/payment is discarded, never stored.)*
 
 **availability** — two distinct shapes:
@@ -257,7 +257,7 @@ before resending so you never double-reply.
 Reactive replies above handle a buyer who wrote to us. The **follow-up** path handles a buyer who did
 NOT: when our last message goes unanswered, `bin/followup_state.py` schedules up to 2 gentle nudges
 (gentle escalation, ~1d then ~3d), then marks the buyer not interested (~3d later). It is OFF unless
-`followup_enabled` (config) is on, and is driven by the buyer pass only when `$BAZAAR_FOLLOWUP=1`
+`followup_enabled` (config) is on, and is driven by the buyer pass only when `$SELLY_FOLLOWUP=1`
 (see the FOLLOW-UP MODE block in the buyer prompt). A nudge is **not** a new mechanism: compose a
 short friendly line and send it through the EXACT §5 bracket (`journal_send.py intent` →
 `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →

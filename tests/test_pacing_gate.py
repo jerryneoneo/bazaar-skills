@@ -162,7 +162,7 @@ def test_cli_mode_flag_selects_range():
             "max_actions_per_hour": 9, "reply_delay_sec": [50, 50],
             "interactive_reply_delay_sec": [5, 5], "quiet_hours": [0, 0],
         }))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py"), "reserve",
                 "--marketplace", "fb", "--kind", "reply"]
         interactive = subprocess.run(base + ["--mode", "interactive"],
@@ -210,13 +210,13 @@ def test_load_cfg_interactive_delay_validation():
 
 
 def test_cli_go_then_status():
-    print("CLI reserve -> status (isolated data dir via BAZAAR_DATA_DIR, real wall clock):")
+    print("CLI reserve -> status (isolated data dir via SELLY_DATA_DIR, real wall clock):")
     with tempfile.TemporaryDirectory() as d:
         # quiet_hours [0,0] => never quiet, so the test passes regardless of wall-clock hour.
         (Path(d) / "config.json").write_text(json.dumps({
             "max_actions_per_hour": 3, "reply_delay_sec": [0, 0], "quiet_hours": [0, 0],
         }))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py")]
         out = subprocess.run(base + ["reserve", "--marketplace", "fb", "--kind", "reply"],
                              capture_output=True, text=True, env=env)
@@ -237,7 +237,7 @@ def test_concurrent_reserve_respects_cap():
         (Path(d) / "config.json").write_text(json.dumps({
             "max_actions_per_hour": cap, "reply_delay_sec": [0, 0], "quiet_hours": [0, 0],
         }))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py"), "reserve",
                 "--marketplace", "fb", "--kind", "reply"]
         # Launch all at once; flock must serialize the check-and-record.
@@ -260,7 +260,7 @@ def test_now_clamp_rejects_time_travel():
     print("hardening: --now far from wall clock is rejected (no window time-travel):")
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "config.json").write_text(json.dumps({"max_actions_per_hour": 3}))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py"), "reserve",
                 "--marketplace", "fb"]
         future = subprocess.run(base + ["--now", "2099-01-01T00:00:00Z"],
@@ -275,7 +275,7 @@ def test_cap_below_one_rejected():
     print("hardening: max_actions_per_hour < 1 is rejected (no silent lockout):")
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / "config.json").write_text(json.dumps({"max_actions_per_hour": 0}))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         out = subprocess.run([sys.executable, str(ROOT / "bin" / "pacing_gate.py"),
                               "reserve", "--marketplace", "fb"],
                              capture_output=True, text=True, env=env)
@@ -376,7 +376,7 @@ def test_cli_reserve_block_flag():
             "max_actions_per_hour": 9, "reply_delay_sec": [0, 0],
             "interactive_reply_delay_sec": [0, 0], "quiet_hours": [0, 0],
         }))
-        env = {**os.environ, "BAZAAR_DATA_DIR": d}
+        env = {**os.environ, "SELLY_DATA_DIR": d}
         base = [sys.executable, str(ROOT / "bin" / "pacing_gate.py"), "reserve",
                 "--marketplace", "fb", "--kind", "reply", "--block"]
         out = subprocess.run(base, capture_output=True, text=True, env=env)

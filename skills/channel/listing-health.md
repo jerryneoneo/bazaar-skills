@@ -2,7 +2,7 @@
 
 When a LIVE listing has had no buyer interest (no inbound message on any of its threads) for
 `stale_days` (default 7), the agent proposes CONCRETE ways to improve it. Detection is deterministic
-(`bin/listing_health.py` — see `skills/bazaar-config.md` for the config keys); THIS skill is the
+(`bin/listing_health.py` — see `skills/selly-config.md` for the config keys); THIS skill is the
 compose step the **MAINT pass** runs, one item per pass, from the session baton
 `data/listing_health_session.json`. The agent only **suggests** — it never auto-applies a change.
 

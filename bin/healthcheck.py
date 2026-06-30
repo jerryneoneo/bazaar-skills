@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""healthcheck.py — is this Bazaar install actually runnable?
+"""healthcheck.py — is this SELLY install actually runnable?
 
 Where preflight.py checks that dependencies are *present* (a static, pre-onboarding check),
 this checks that the install is *live*: the browser is reachable, you're onboarded, your
@@ -7,7 +7,7 @@ marketplaces are logged in, and (if you chose always-on) the daemon is loaded. I
 "silent" blockers that let an unattended pass start but quietly do nothing.
 
 Read-only. Never installs, never writes, never prints a secret (floor / budget / token / address).
-The data dir is relocatable via BAZAAR_DATA_DIR (tests + isolation), matching the rest of bin/.
+The data dir is relocatable via SELLY_DATA_DIR (tests + isolation), matching the rest of bin/.
 
 Run:
   healthcheck.py            -> human summary + exit 0 unless a hard FAIL
@@ -35,8 +35,8 @@ import preflight  # noqa: E402  (reuse the presence checks)
 from platforms import UnsupportedPlatform  # noqa: E402
 
 CDP_URL = "http://127.0.0.1:9222/json/version"
-DAEMON_LABELS = ("com.bazaarskills.chrome", "com.bazaarskills.agent")
-AGENT_LABEL = "com.bazaarskills.agent"
+DAEMON_LABELS = ("com.selly.chrome", "com.selly.agent")
+AGENT_LABEL = "com.selly.agent"
 HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / ".daemon.heartbeat"
 LOCK_PATH = Path(__file__).resolve().parent.parent / ".daemon.instancelock"
 # Normal cadence is ~15s idle / ~4s mid-pass (run_pass ticks the heartbeat), so a 300s gap means the
@@ -47,8 +47,8 @@ FAIL, WARN, OK = "fail", "warn", "ok"
 
 
 def _data_dir() -> Path:
-    """The data dir — relocatable via BAZAAR_DATA_DIR (used by tests for isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data dir — relocatable via SELLY_DATA_DIR (used by tests for isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
 
 
@@ -82,7 +82,7 @@ def onboarded_check(data_dir: Path) -> dict:
     if (data_dir / "seller_config.json").exists():
         return _check("onboarded", OK, "seller_config.json present")
     return _check("onboarded", WARN, "not onboarded yet",
-                  "run onboarding: ./setup (first run) or /bazaar-install")
+                  "run onboarding: ./setup (first run) or /selly-install")
 
 
 def marketplace_checks(data_dir: Path) -> list[dict]:
@@ -101,12 +101,12 @@ def marketplace_checks(data_dir: Path) -> list[dict]:
                if isinstance(m, dict) and m.get("enabled")}
     if not enabled:
         return [_check("marketplace-logins", WARN, "no marketplaces enabled",
-                       "enable one via /bazaar -> marketplaces")]
+                       "enable one via /selly -> marketplaces")]
     not_ready = sorted(mid for mid, m in enabled.items() if m.get("auth") != "confirmed")
     if not_ready:
         return [_check("marketplace-logins", WARN,
                        f"{len(not_ready)} of {len(enabled)} not logged in: {', '.join(not_ready)}",
-                       "open each in the warm Chrome and sign in (/bazaar -> marketplaces)")]
+                       "open each in the warm Chrome and sign in (/selly -> marketplaces)")]
     return [_check("marketplace-logins", OK, f"all {len(enabled)} enabled markets logged in")]
 
 
@@ -146,7 +146,7 @@ def login_liveness_checks(data_dir: Path, cdp_reachable: bool) -> list[dict]:
         return []
     return [_check("marketplace-live-login", WARN,
                    f"{', '.join(logged_out)} look logged out now (was confirmed at setup)",
-                   "re-log in in the warm Chrome (/bazaar -> marketplaces)")]
+                   "re-log in in the warm Chrome (/selly -> marketplaces)")]
 
 
 def permissions_check(harness_name: str | None) -> list[dict]:
@@ -196,7 +196,7 @@ def daemon_checks() -> list[dict]:
     installed = [lbl for lbl in DAEMON_LABELS if (la / f"{lbl}.plist").exists()]
     if not installed:
         return [_check("daemon", OK,
-                       "no always-on daemon installed (interactive mode — keep a /bazaar-run session open)")]
+                       "no always-on daemon installed (interactive mode — keep a /selly-run session open)")]
     results = []
     for lbl in installed:
         loaded = _launchctl_loaded(lbl)
@@ -313,7 +313,7 @@ def run_checks(harness_name: str | None = None) -> dict:
 
 def render(result: dict) -> str:
     icon = {OK: "✅", WARN: "⚠️ ", FAIL: "❌"}
-    lines = ["Bazaar health check:"]
+    lines = ["SELLY health check:"]
     for c in result["checks"]:
         line = f"  {icon[c['level']]} {c['name']}: {c['detail']}"
         if c["level"] != OK and c["fix_hint"]:
@@ -333,9 +333,9 @@ def main(argv) -> int:
     p.add_argument("--json", action="store_true", help="emit JSON instead of a human summary")
     p.add_argument("--quiet", action="store_true", help="no output; exit code only")
     p.add_argument("--harness", default="",
-                   help="claude-code | codex (default: $BAZAAR_HARNESS or autodetect)")
+                   help="claude-code | codex (default: $SELLY_HARNESS or autodetect)")
     ns = p.parse_args(argv[1:])
-    harness_name = ns.harness or os.environ.get("BAZAAR_HARNESS") or None
+    harness_name = ns.harness or os.environ.get("SELLY_HARNESS") or None
     try:
         result = run_checks(harness_name)
     except UnsupportedPlatform as exc:

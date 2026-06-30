@@ -41,5 +41,5 @@ those aren't scannable here; `say` that once and skip (don't guess). Read-only; 
 ## Guardrails
 - Posting blocked / flagged / login wall / phone-verify → **stop and escalate**, no tight-loop retries.
 - **Privacy:** postal code only, never the street address; ship-only (no meetup phrasing).
-- Publish gating follows `config.approvals.steps.publish` (see `skills/bazaar-config.md`).
+- Publish gating follows `config.approvals.steps.publish` (see `skills/selly-config.md`).
 - `--dry-run`: log each verb instead of executing.

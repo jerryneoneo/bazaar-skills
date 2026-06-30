@@ -1,9 +1,9 @@
 # Channel adapter registry — detect & bind (probe & bind)
 
 `skills/channel/channel.md` defines the six verbs every adapter must implement. **This file** is the
-*binding* contract: how onboarding / `/bazaar` discover which chat interfaces the seller already has
+*binding* contract: how onboarding / `/selly` discover which chat interfaces the seller already has
 ("probe & bind") and how they connect a fresh one. Detection and binding happen **only at onboarding
-/ `/bazaar`** — never in the hot loop, which just binds the already-chosen
+/ `/selly`** — never in the hot loop, which just binds the already-chosen
 `seller_config.channel.adapter` for the whole run (preserving the single-consumer invariant).
 
 This is the chat-channel analogue of `skills/marketplaces.md` (which catalogs marketplaces).
@@ -53,8 +53,8 @@ The universal fallback — works in any harness (Claude Code `/sell`, Codex, Ter
 `connect()` → the guided **BotFather walkthrough**, taught step by step (the agent drives it from
 whatever adapter you're reachable on now, usually the console):
   1. Open Telegram and message **@BotFather** (the official, verified bot-maker — blue checkmark).
-  2. Send `/newbot`, then follow its two prompts: a **display name** (e.g. "My Bazaar") and a
-     **username** that must end in `bot` (e.g. `my_bazaar_bot`).
+  2. Send `/newbot`, then follow its two prompts: a **display name** (e.g. "My SELLY") and a
+     **username** that must end in `bot` (e.g. `my_selly_bot`).
   3. BotFather replies with an **HTTP API token** that looks like `123456789:AAE…`. Copy it.
   4. Paste that token here when the agent asks. It is written to `.claude/settings.local.json → env`
      as `TELEGRAM_BOT_TOKEN` — never printed, logged, or committed (gitignored). The agent then runs
@@ -113,7 +113,7 @@ not a hard-coded `telegram.py`. The single-flight run-lock (`.daemon.runlock`) i
 independent and unchanged. `console` has no daemon (it's the interactive `/sell` surface).
 
 ## Switching adapters while the daemon runs
-`/bazaar interface` must not leave the daemon polling the old channel: if `install_daemon.sh status`
+`/selly interface` must not leave the daemon polling the old channel: if `install_daemon.sh status`
 shows a loaded daemon, do **uninstall → rewrite `channel.adapter` → reinstall** (the same dance
 `DAEMON.md` mandates for switching to `/sell`).
 

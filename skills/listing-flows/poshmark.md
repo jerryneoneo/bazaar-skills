@@ -46,5 +46,5 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
 ## Guardrails
 - Logged-out / checkpoint → **stop and escalate** ("re-auth your Poshmark"), no tight-loop retries.
 - Category mismatch (non-fashion item) → **escalate**, never force-post.
-- Publish gating follows `config.approvals.steps.publish` (see `skills/bazaar-config.md`).
+- Publish gating follows `config.approvals.steps.publish` (see `skills/selly-config.md`).
 - `--dry-run`: log each verb instead of executing.

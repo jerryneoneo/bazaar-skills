@@ -1,26 +1,26 @@
-# Bazaar Skills — Setup runbook (manual install, as it stands today)
+# SELLY Skills — Setup runbook (manual install, as it stands today)
 
 This is the **zero-to-running** install record — every step, dependency, secret, and gotcha we hit
 standing the agent up on a real Mac. It documents *reality*, not an idealized flow.
 
 > **Most users won't run these steps by hand** — `./setup` automates the §11 friction inventory.
 > To install (one paste, gstack-style):
-> `git clone https://github.com/jerryneoneo/bazaar-skills.git ~/bazaar-skills && cd ~/bazaar-skills && ./setup`.
+> `git clone https://github.com/jerryneoneo/selly-agent.git ~/selly-agent && cd ~/selly-agent && ./setup`.
 > `./setup` is **idempotent**: prereqs → pick runtime (Claude Code) → sign-in gate → install global
-> launchers (so `/bazaar`, `/sell`, `/buy` work from any project) → first-run handoff to
-> `.claude/commands/bazaar-install.md` (with the verified choice in `$BAZAAR_HARNESS`), which drives
+> launchers (so `/selly`, `/sell`, `/buy` work from any project) → first-run handoff to
+> `.claude/commands/selly-install.md` (with the verified choice in `$SELLY_HARNESS`), which drives
 > the rest via `bin/preflight.py`, `bin/install.py`, `bin/platforms/`, and `bin/harnesses/`. Re-run
 > `./setup` any time (e.g. after `git pull`) — it refreshes launchers/config + runs migrations and
 > **skips onboarding** once configured. Flags: `--host`, `--autonomy`, `--yes`, `--prefix`.
-> Prefer a local copy? Put the repo at `~/bazaar-skills` and run `./setup` directly (no clone needed).
+> Prefer a local copy? Put the repo at `~/selly-agent` and run `./setup` directly (no clone needed).
 > If you self-host the bootstrap, a curl one-liner (`curl -fsSL https://<your-host>/install.sh | bash`,
 > or `iwr -useb https://<your-host>/install.ps1 | iex` on Windows) is optional; `install.sh` only
-> clones, then hands off to `./setup`. Lifecycle: `/bazaar-upgrade`, `bin/bazaar-uninstall`,
-> `bin/bazaar-config`. This file
+> clones, then hands off to `./setup`. Lifecycle: `/selly-upgrade`, `bin/selly-uninstall`,
+> `bin/selly-config`. This file
 > remains the **reference** for what those scripts do and how to do it by hand.
 
 **Why this file exists:** it's the basis for the **installer UX** (now built — see above). Every step
-tagged **🔧 MANUAL** or **⚠️ GOTCHA** maps to an automated step in `bazaar-install.md` — see
+tagged **🔧 MANUAL** or **⚠️ GOTCHA** maps to an automated step in `selly-install.md` — see
 [§11 Friction inventory](#11-friction-inventory--automation-candidates).
 
 > Companion docs: **README.md** = overview & install · **DAEMON.md** = day-to-day operations · this file
@@ -35,8 +35,8 @@ chosen at onboarding per your region) through a real logged-in Chrome and replie
 when there's work, driving a warm Chrome over CDP.
 
 **Two locations (important):**
-- **Dev source** — where the code is edited (this repo, e.g. `…/Bazaar Skills/seller-agent`).
-- **Live runtime** — `~/bazaar-skills` (must be outside `~/Documents`; see §3). The daemon runs
+- **Dev source** — where the code is edited (this repo, e.g. `…/SELLY Skills/seller-agent`).
+- **Live runtime** — `~/selly-agent` (must be outside `~/Documents`; see §3). The daemon runs
   from here. Changes are pushed dev → runtime with `rsync` (see §10 / DAEMON.md).
 
 ---
@@ -64,10 +64,10 @@ Note where `claude`/`npx`/`node` live — launchd needs them on PATH (§8). On t
 ## 3. ⚠️ GOTCHA — put the runtime OUTSIDE `~/Documents`
 macOS **TCC privacy** blocks launchd-spawned processes from reading `~/Documents`, `~/Desktop`,
 `~/Downloads` → you'll see `Operation not permitted` and the daemon flaps. Keep the live runtime
-at **`~/bazaar-skills`** (home root is fine).
+at **`~/selly-agent`** (home root is fine).
 
 ```bash
-rsync -a --exclude 'logs/' --exclude '.daemon.runlock' "<dev>/seller-agent/" "$HOME/bazaar-skills/"
+rsync -a --exclude 'logs/' --exclude '.daemon.runlock' "<dev>/seller-agent/" "$HOME/selly-agent/"
 ```
 
 ---
@@ -84,7 +84,7 @@ rsync -a --exclude 'logs/' --exclude '.daemon.runlock' "<dev>/seller-agent/" "$H
 ---
 
 ## 5. 🔧 MANUAL — secrets + permissions
-Create **`~/bazaar-skills/.claude/settings.local.json`** (gitignored):
+Create **`~/selly-agent/.claude/settings.local.json`** (gitignored):
 ```json
 {
   "env": { "TELEGRAM_BOT_TOKEN": "123456:PASTE-YOUR-BOTFATHER-TOKEN" },
@@ -145,7 +145,7 @@ confirm you're logged into the marketplaces. This produces `data/seller_config.j
 
 ## 8. Install the always-on daemon (launchd)
 ```bash
-cd ~/bazaar-skills
+cd ~/selly-agent
 bin/chrome_debug.sh &                         # warm Chrome (first time, confirm logins)
 launchd/install_daemon.sh install             # loads chrome + agent LaunchAgents (RunAtLoad+KeepAlive)
 ```
@@ -155,14 +155,14 @@ launchd/install_daemon.sh install             # loads chrome + agent LaunchAgent
   preferring Homebrew python over the bare `/usr/bin/python3` shim) before copying them into
   `~/Library/LaunchAgents`. You only need to hand-edit `__PATH__` if detection misses a dir
   (launchd jobs otherwise get a minimal PATH and can't find `claude`/`npx`).
-- The two jobs: `com.bazaarskills.chrome` (warm browser) + `com.bazaarskills.agent`
+- The two jobs: `com.selly.chrome` (warm browser) + `com.selly.agent`
   (`bin/agent_daemon.py`). They start at login and restart on crash.
 
 ---
 
 ## 9. Verify
 ```bash
-cd ~/bazaar-skills
+cd ~/selly-agent
 for t in floor_gate shipping telegram negotiate; do python3 tests/test_$t.py | tail -1; done  # ALL PASS x4
 python3 bin/install.py validate --harness claude-code # config JSON valid + permission floor granted
 python3 bin/healthcheck.py                           # runnable state: CDP, logins, permissions, daemon
@@ -185,7 +185,7 @@ line** (~6s, e.g. "Let me check your listings…", from `bin/intent.sh`) → the
   daemon** vs the **`/sell` console** (at-desk, native streaming). To use `/sell`: `uninstall` the
   daemon first, then re-`install`. The interactive loop runs `python3 bin/daemon_conflict.py` at
   session start and warns you if a loaded daemon would fight it (conflict → exit 1).
-- Push code changes: `rsync` dev → `~/bazaar-skills` (exclude `launchd/`, `.claude/settings.local.json`,
+- Push code changes: `rsync` dev → `~/selly-agent` (exclude `launchd/`, `.claude/settings.local.json`,
   `.browser-profile/`, `logs/`), then `install_daemon.sh install` to restart.
 
 ---
@@ -195,9 +195,9 @@ What the future installer should do for each manual/gotcha step:
 
 | Step | Today (manual/gotcha) | Installer should… |
 |---|---|---|
-| Select harness + sign in (§2) | autodetect, fail later if not logged in | **menu** to pick Claude Code or Codex → **gate on sign-in** (instruct + wait + re-check via `install.py harness --name`) → pass the choice to Stage 2 as `$BAZAAR_HARNESS` |
+| Select harness + sign in (§2) | autodetect, fail later if not logged in | **menu** to pick Claude Code or Codex → **gate on sign-in** (instruct + wait + re-check via `install.py harness --name`) → pass the choice to Stage 2 as `$SELLY_HARNESS` |
 | Prereqs (§2) | check `which` by hand | **preflight** node/python/chrome + verify `claude` is logged in; offer to fix |
-| Location (§3) | know about TCC, copy to `~/bazaar-skills` | pick a **non-TCC dir** automatically; do the copy |
+| Location (§3) | know about TCC, copy to `~/selly-agent` | pick a **non-TCC dir** automatically; do the copy |
 | Bot token (§4) | BotFather, copy token | **guided** BotFather walkthrough + paste field; `telegram.py verify` gates a bad/malformed token |
 | chat_id (§4) | `/start`, captured on poll | detect first `/start`, confirm via `telegram.py verify` (`chat_bound`) — never bind a null chat_id |
 | Secrets/perms (§5) | hand-edit JSON (we broke it) | **generate** `settings.local.json` + `install.py validate` (JSON **and** permission floor) |
@@ -210,16 +210,16 @@ What the future installer should do for each manual/gotcha step:
 ---
 
 ## 12. Known gotchas / operational notes
-- **Auto update-check**: Bazaar checks for a newer version on its own and OFFERS to update — it never
-  auto-applies (you run `/bazaar-upgrade`). Three surfaces, all sharing one throttle + per-version
-  dedupe (`bin/update_check.py`): the global launchers check when you run `/bazaar` / `/sell` / `/buy`;
+- **Auto update-check**: SELLY checks for a newer version on its own and OFFERS to update — it never
+  auto-applies (you run `/selly-upgrade`). Three surfaces, all sharing one throttle + per-version
+  dedupe (`bin/update_check.py`): the global launchers check when you run `/selly` / `/sell` / `/buy`;
   a SessionStart hook checks when you open a session in the runtime dir; and the always-on daemon
   sends a one-line Telegram heads-up. Cadence + behavior: `config.json` →
   `update_check_interval_hours` (default 24, 0 disables), `update_snooze_days`, `update_poll_sec`.
   The check is a read-only `git fetch` and fail-open (no network → no nag).
   - The SessionStart hook lives in `bin/hooks/update_notice.py`; wire it once in
     `.claude/settings.json` under `hooks.SessionStart` (matcher `startup|resume`). It NO-OPs for the
-    daemon's headless `-p` passes (they set `BAZAAR_DAEMON_PASS=1`).
+    daemon's headless `-p` passes (they set `SELLY_DAEMON_PASS=1`).
 - **TCC**: runtime must be outside `~/Documents`/`Desktop`/`Downloads` (§3).
 - **Single Telegram consumer**: don't run the daemon and a manual poll / `/sell` session at the
   same time — they fight over the `getUpdates` offset + browser.
@@ -231,7 +231,7 @@ What the future installer should do for each manual/gotcha step:
   a checkpoint. Treat unattended FB automation as the riskiest part (feasibility §2.2).
 - **nvm PATH**: the agent plist's `PATH` hardcodes the current nvm node version dir — update it if
   you change Node versions.
-- **Dev ≠ runtime**: edits in the dev source don't take effect until `rsync`'d to `~/bazaar-skills`
+- **Dev ≠ runtime**: edits in the dev source don't take effect until `rsync`'d to `~/selly-agent`
   and the daemon is reinstalled.
 - **No secrets in git**: `.gitignore` excludes `settings.local.json`, `.browser-profile/`, `logs/`,
   `data/{channel_state,threads,negotiations,escalations,listing_session}` and photos.

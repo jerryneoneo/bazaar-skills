@@ -1,5 +1,5 @@
 # =============================================================================================
-# SECRETS — never commit. Bazaar Skills is git-clone'able; a leak here exposes a seller's floor /
+# SECRETS — never commit. SELLY Skills is git-clone'able; a leak here exposes a seller's floor /
 # budget / address / bot token. If you add a new per-deployment or secret file, add it HERE first.
 # (NOTE: git .gitignore does NOT support inline comments — keep every pattern on its own line.)
 # =============================================================================================

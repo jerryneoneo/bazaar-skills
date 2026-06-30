@@ -18,17 +18,17 @@ plus the deterministic scripts are enough. Don't re-read every skill on every pa
 
 ## Cost discipline — fast path (daemon passes)
 A cheap non-LLM probe (`bin/buyer_peek.py`) already confirmed there's new activity before this
-pass launched, and seeded `$BAZAAR_BUYER_PEEK_TEXT` with the `[marketplace] snippet` that changed.
+pass launched, and seeded `$SELLY_BUYER_PEEK_TEXT` with the `[marketplace] snippet` that changed.
 - Go **straight to that marketplace** and open only the thread(s) with messages past their cursor.
 - Prefer a **targeted thread read** over a full-page `browser_snapshot` of the inbox — snapshots are
   the single biggest token cost per pass. Snapshot only when you can't otherwise locate the thread.
-- If `$BAZAAR_BUYER_PEEK_FORCED=1`, this is the periodic safety-net sweep (the probe found nothing
+- If `$SELLY_BUYER_PEEK_FORCED=1`, this is the periodic safety-net sweep (the probe found nothing
   but we check anyway): do a light scan of enabled inboxes, reply to anything genuinely past cursor.
 
 ## One pass of the loop
 1. For each enabled marketplace (`id, sel in seller_config.marketplaces.items() if sel.enabled`;
    apply the array→object read-shim in `skills/marketplaces.md`) — **prioritising the marketplace
-   named in `$BAZAAR_BUYER_PEEK_TEXT`**: `navigate(<id> inbox)`, then locate the active thread
+   named in `$SELLY_BUYER_PEEK_TEXT`**: `navigate(<id> inbox)`, then locate the active thread
    (targeted read preferred; `read_inbox()` only if needed). Thread ids are namespaced `<id>:<thread>`.
 2. For each thread with activity:
    a. Load `data/threads/<thread_id>.json` (create a fresh record if new: fields
@@ -61,7 +61,7 @@ cursor — no double-replies. Safe to stop and restart anytime.
 - Logged-out / checkpoint / captcha on a marketplace → **stop that market's pass and tell the
   seller to re-auth**, keep the other market running. Do not retry rapidly.
 
-## Modes (`config.approvals.steps`, see `skills/bazaar-config.md`)
+## Modes (`config.approvals.steps`, see `skills/selly-config.md`)
 - `buyer_replies` → `auto` sends answers to questions/shipping/availability; `confirm`/`escalate`
   surfaces them first.
 - `offers` → `auto` negotiates below/at-list offers via the floor gate; `confirm`/`escalate`

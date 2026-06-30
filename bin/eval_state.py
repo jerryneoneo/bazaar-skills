@@ -3,7 +3,7 @@
 
 Mirrors scan_state.py's shape: the daemon asks "is a self-eval due?" and stamps it after running.
 The nightly run always does the $0 deterministic pass; when `config.eval_judge_nightly` is set
-(default on) the same run also invokes the billed LLM judge (`/bazaar-eval` always runs it). Setting
+(default on) the same run also invokes the billed LLM judge (`/selly-eval` always runs it). Setting
 `config.eval_interval_hours` to 0 disables the nightly eval entirely.
 
     config.json          -> eval_interval_hours   (cadence; default 24, 0 = disabled)

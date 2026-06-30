@@ -117,12 +117,12 @@ def test_prune_doc():
 
 
 def _cli(args, data_dir):
-    env = {**os.environ, "BAZAAR_DATA_DIR": data_dir}
+    env = {**os.environ, "SELLY_DATA_DIR": data_dir}
     return subprocess.run(CLI + args, capture_output=True, text=True, env=env)
 
 
 def test_cli_record_get_invalidate_roundtrip():
-    print("CLI: record -> get(hit) -> invalidate -> get(miss), isolated via BAZAAR_DATA_DIR:")
+    print("CLI: record -> get(hit) -> invalidate -> get(miss), isolated via SELLY_DATA_DIR:")
     with tempfile.TemporaryDirectory() as d:
         rec = _cli(["record", "--market", "carousell", "--flow", "listing", "--step", "title_field",
                     "--strategy", "css", "--query", "input[name='title']", "--action-kind", "type",

@@ -1,6 +1,6 @@
 # Marketplace registry — region & category aware platform catalog
 
-The catalog of marketplaces Bazaar can list to lives in **`data/marketplaces.json`** (static,
+The catalog of marketplaces SELLY can list to lives in **`data/marketplaces.json`** (static,
 source-controlled reference data — the analogue of the shipping zone table). It is read at
 **onboarding** (filter offered platforms by the seller's region), **publish** (filter target
 platforms by the item's category), and for **region→domain resolution** (which regional site to
@@ -144,7 +144,7 @@ top-level `logins` map):
 **Read-shim (back-compat — apply on every load):** if `seller_config.marketplaces` is an *array*,
 treat each string `x` as
 `{ x: { enabled: true, auth: (seller_config.logins[x] or "unknown"), connector: registry[x].connector.type } }`.
-Existing deployments keep running untouched until the seller next runs onboarding or `/bazaar`,
+Existing deployments keep running untouched until the seller next runs onboarding or `/selly`,
 which writes the new object shape. Iterate selections as
 `for id, sel in marketplaces.items() if sel.enabled` everywhere (`sell-run.md`, `sell-watch.md`,
 `listing.md`).
@@ -153,4 +153,4 @@ which writes the new object shape. Iterate selections as
 
 - The registry is reference data only — it carries no seller secrets and no per-item floor/address.
 - `connector.auth = chrome_session` means "the seller's real logged-in Chrome handles auth" — no
-  marketplace password is ever stored by Bazaar.
+  marketplace password is ever stored by SELLY.

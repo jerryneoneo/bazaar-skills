@@ -1,4 +1,4 @@
-# Voice — global rules for every message Bazaar sends
+# Voice — global rules for every message SELLY sends
 
 These rules apply to **all outbound messages**, to **both audiences**: buyer/seller replies
 in the marketplace inboxes (composed in `skills/reply-pipeline.md` §4 and

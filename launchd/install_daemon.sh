@@ -8,7 +8,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LA="$HOME/Library/LaunchAgents"
 # Fix D: the independent watchdog joins the managed set so install/status/uninstall handle it too.
-PLISTS=(com.bazaarskills.chrome com.bazaarskills.agent com.bazaarskills.watchdog)
+PLISTS=(com.selly.chrome com.selly.agent com.selly.watchdog)
 
 case "${1:-status}" in
   install)

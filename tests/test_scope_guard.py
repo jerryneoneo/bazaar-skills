@@ -3,9 +3,9 @@
 
 Runnable with plain python:  python3 tests/test_scope_guard.py
 
-Invariant: when $BAZAAR_RESOURCE is set (a concurrent per-marketplace worker), a browser_navigate
+Invariant: when $SELLY_RESOURCE is set (a concurrent per-marketplace worker), a browser_navigate
 to ANOTHER marketplace's host is DENIED; the worker's own host (any region) and non-marketplace
-hosts are allowed; unscoped passes (no $BAZAAR_RESOURCE) are never affected. Fail-open on errors.
+hosts are allowed; unscoped passes (no $SELLY_RESOURCE) are never affected. Fail-open on errors.
 """
 
 import json
@@ -29,9 +29,9 @@ def check(name, condition):
 
 def _run(resource, url, tool="mcp__playwright__browser_navigate"):
     env = dict(os.environ)
-    env.pop("BAZAAR_RESOURCE", None)
+    env.pop("SELLY_RESOURCE", None)
     if resource is not None:
-        env["BAZAAR_RESOURCE"] = resource
+        env["SELLY_RESOURCE"] = resource
     event = json.dumps({"tool_name": tool, "tool_input": {"url": url}})
     out = subprocess.run([sys.executable, str(HOOK)], input=event,
                          capture_output=True, text=True, env=env)
@@ -40,7 +40,7 @@ def _run(resource, url, tool="mcp__playwright__browser_navigate"):
 
 
 def test_unscoped_never_blocks():
-    print("unscoped pass (no $BAZAAR_RESOURCE) is never blocked:")
+    print("unscoped pass (no $SELLY_RESOURCE) is never blocked:")
     rc, denied, _ = _run(None, "https://www.facebook.com/marketplace/inbox")
     check("rc 0", rc == 0)
     check("not denied", not denied)
@@ -78,7 +78,7 @@ def test_non_navigate_tool_allowed():
 
 def test_malformed_input_fails_open():
     print("fail-open on bad input:")
-    env = {**os.environ, "BAZAAR_RESOURCE": "carousell"}
+    env = {**os.environ, "SELLY_RESOURCE": "carousell"}
     out = subprocess.run([sys.executable, str(HOOK)], input="not json",
                          capture_output=True, text=True, env=env)
     check("garbage stdin → allow (rc 0, no deny)", out.returncode == 0 and "deny" not in out.stdout)

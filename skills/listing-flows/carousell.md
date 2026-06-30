@@ -62,7 +62,7 @@ where `url` is each listing's permalink (`/p/<slug>-<id>/`) — the dedupe key S
 managed items' `listing_urls`. Read-only; never edits or re-lists here.
 Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). `--dry-run` → log only.
 
-## Read buyer inbox recipe (called by `.claude/commands/sell-watch.md` / `bazaar-run.md` §2)
+## Read buyer inbox recipe (called by `.claude/commands/sell-watch.md` / `selly-run.md` §2)
 The **buyer-message** read path (distinct from "Read my listings"). Documented for parity with
 `fb.md`: Carousell works today via the simple `/inbox/` URL the `bin/buyer_peek.py` probe watches,
 but pinning the recipe keeps the buyer pass from silently failing if the DOM shifts.
@@ -123,5 +123,5 @@ Logged-out/checkpoint → stop + escalate re-auth (no tight retry), same as the 
 - Logged-out / checkpoint / verification → **stop and escalate** ("re-auth your Carousell"),
   no tight-loop retries.
 - Publish gating follows `config.approvals.steps.publish` (auto → `click("list-now")`; confirm →
-  `confirm()` the rendered preview first). See `skills/bazaar-config.md`.
+  `confirm()` the rendered preview first). See `skills/selly-config.md`.
 - `--dry-run`: log each verb instead of executing.

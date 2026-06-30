@@ -1,13 +1,13 @@
 # Liaison pipeline — per-seller-message decide → compose → send (buyer side)
 
-The buyer-side mirror of `skills/reply-pipeline.md`. Used by the buy side of `/bazaar-run` (and the
+The buyer-side mirror of `skills/reply-pipeline.md`. Used by the buy side of `/selly-run` (and the
 `/buy-run` alias) for each pursued thread, and by `skills/channel/notifications.md` after the user
 answers an escalation. Unlike the seller pipeline (buyers initiate there), **the buyer initiates
 here** — so a thread is first OPENED with an offer, then driven by the seller's replies. Process
 **one seller message at a time, in order.**
 
 > **Load config first.** Read `data/config.json` for `approvals` (`buy_offer`, `buy_accept`,
-> `above_budget` — see `skills/bazaar-config.md`), `reply_delay_sec`, `max_actions_per_hour`,
+> `above_budget` — see `skills/selly-config.md`), `reply_delay_sec`, `max_actions_per_hour`,
 > `quiet_hours`, `handover_disclosure` (posted at handover, see `skills/buying/handover.md`); and
 > `data/buyer_config.json` for `payment_methods` +
 > `delivery_area` (needed for the handover branch). `buy_offer`/`buy_accept`: `auto` acts, `confirm`
@@ -150,7 +150,7 @@ hand-edit `data/buyer_threads/<id>.json`** — the deterministic `commit` is the
 ## 8. Proactive follow-up (when a seller went quiet)
 When OUR last message to a seller goes unanswered, `bin/followup_state.py` schedules up to 2 gentle
 nudges (gentle escalation, ~1d then ~3d), then marks the seller not interested (~3d later). OFF unless
-`followup_enabled` (config) is on; driven by the buy pass only when `$BAZAAR_FOLLOWUP=1` (see the
+`followup_enabled` (config) is on; driven by the buy pass only when `$SELLY_FOLLOWUP=1` (see the
 FOLLOW-UP MODE block in the buy prompt). A nudge reuses the EXACT §6 bracket (`journal_send.py intent
 --side buy` → `pacing_gate.py reserve --block` → `type`+`send()` → `journal_send.py mark-sent` →
 `journal_send.py commit --side buy`), then `python3

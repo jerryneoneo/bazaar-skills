@@ -315,7 +315,7 @@ def _drain_outbox(channel, env, dry_run):
 def _launch_buyer(market, env, peek, holder, dry_run, hint=None, peek_thread=None):
     """Acquire market:<id> then Popen a scoped buyer pass. Returns the Popen, or None (dry-run/race).
     `hint` overrides the peek-derived snippet (used by the notification-path trigger, which already
-    carries the buyer's message text). `peek_thread` (Fix C) seeds $BAZAAR_BUYER_PEEK_THREAD — a
+    carries the buyer's message text). `peek_thread` (Fix C) seeds $SELLY_BUYER_PEEK_THREAD — a
     PRIORITY hint to handle that one thread first; the pass still tours the rest within its budget."""
     acq = lease.acquire(_data(), f"market:{market}", holder, "buyer", LEASE_TTL_SEC)
     if not acq["acquired"]:
@@ -330,9 +330,9 @@ def _launch_buyer(market, env, peek, holder, dry_run, hint=None, peek_thread=Non
     else:
         snippet = ((peek.get("markets") or {}).get(market) or {}).get("snippet", "")
         text = f"[{market}] {snippet}".strip()
-    worker_env = {**env, "BAZAAR_BUYER_PEEK_TEXT": text}
+    worker_env = {**env, "SELLY_BUYER_PEEK_TEXT": text}
     if peek_thread:
-        worker_env["BAZAAR_BUYER_PEEK_THREAD"] = peek_thread
+        worker_env["SELLY_BUYER_PEEK_THREAD"] = peek_thread
     # start_new_session=True → the worker leads its own process group, so _kill_tree can signal the
     # whole tree (wrapper + claude grandchild) on preempt. Without it, preempt would orphan claude.
     try:
@@ -639,14 +639,14 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
             if bpk.get("pending"):
                 logging.info("buy pass (exclusive) → %s", bpk.get("latest_text", "")[:60])
                 ad.run_pass("buy", channel, env, ns.dry_run, extra_env={
-                    "BAZAAR_BUY_PEEK_WANT": bpk.get("want_id") or "",
-                    "BAZAAR_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
+                    "SELLY_BUY_PEEK_WANT": bpk.get("want_id") or "",
+                    "SELLY_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
                 })
             last_buy = time.monotonic()
 
         # STALE-CHAT FOLLOW-UPS (exclusive, like maint/buy): nudge quiet counterparts then mark them
         # not interested. Drops are $0 deterministic (the notice rides the outbox _drain_outbox flushes
-        # at loop top); nudges reuse an exclusive buyer/buy pass via BAZAAR_FOLLOWUP=1. Gated on
+        # at loop top); nudges reuse an exclusive buyer/buy pass via SELLY_FOLLOWUP=1. Gated on
         # `not workers` so a nudge pass never contends with a live market worker for the same tab.
         if not paused and not workers and time.monotonic() - last_followup >= cfg["followup_poll_sec"]:
             ad.run_followup_reconcile(env)
@@ -658,10 +658,10 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 ad.reconcile_orphans(env, ns.dry_run)
                 if "sell" in sides:
                     logging.info("followup nudges due (sell) → buyer pass (exclusive)")
-                    ad.run_pass("buyer", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                    ad.run_pass("buyer", channel, env, ns.dry_run, extra_env={"SELLY_FOLLOWUP": "1"})
                 if "buy" in sides:
                     logging.info("followup nudges due (buy) → buy pass (exclusive)")
-                    ad.run_pass("buy", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                    ad.run_pass("buy", channel, env, ns.dry_run, extra_env={"SELLY_FOLLOWUP": "1"})
             last_followup = time.monotonic()
 
         # eval gated on `not paused` too (like the buyer/maint/buy passes above) so /pause is a
@@ -672,7 +672,7 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 ad.run_eval(env, ns.dry_run, cfg.get("eval_judge_nightly", True))
             last_eval = time.monotonic()
 
-        # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up if a newer Bazaar is available.
+        # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up if a newer SELLY is available.
         # ENQUEUE here (the _drain_outbox at loop top is the single writer). Read-only, so it does
         # NOT require an exclusive (no-workers) window. Never auto-applies.
         if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:

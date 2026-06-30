@@ -25,7 +25,7 @@ Output (stdout, JSON). enqueue -> {"enqueued": true, "id": <str>};
 peek -> {"pending": [<records>], "count": N}; ack -> {"acked": true|false};
 fail -> {"failed": true|false, "attempts": N}. Errors -> stderr. Exit: 0 ok · 2 bad input · 3 runtime.
 
-(tests relocate the whole data dir via BAZAAR_DATA_DIR; there is no per-invocation path override, so
+(tests relocate the whole data dir via SELLY_DATA_DIR; there is no per-invocation path override, so
  every process competes on the same lock file.)
 """
 
@@ -56,8 +56,8 @@ OPEN_STATUSES = (STATUS_PENDING, STATUS_SENT)  # work still in flight (not yet c
 
 
 def data_dir() -> Path:
-    """The data directory — relocatable via BAZAAR_DATA_DIR (tests isolate on it)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data directory — relocatable via SELLY_DATA_DIR (tests isolate on it)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

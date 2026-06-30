@@ -8,7 +8,7 @@ Runnable with plain python (no pytest needed):
 Focus: the invariants that make pause trustworthy — a missing/garbage file reads as NOT paused
 (never strands the agent), pause() stamps `since` only on the false->true edge (idempotent),
 resume() preserves the corrections queue, mark_applied is exactly-once, and writes are atomic.
-State is isolated per test via BAZAAR_DATA_DIR (the same seam pacing_gate uses).
+State is isolated per test via SELLY_DATA_DIR (the same seam pacing_gate uses).
 """
 
 import json
@@ -35,7 +35,7 @@ def check(name, condition):
 
 def _isolate(tmp):
     """Point control.py at a scratch data dir for the duration of a test."""
-    os.environ["BAZAAR_DATA_DIR"] = tmp
+    os.environ["SELLY_DATA_DIR"] = tmp
 
 
 def test_default_when_absent():
@@ -125,9 +125,9 @@ def test_tolerant_on_garbage():
 
 
 def test_cli_roundtrip():
-    print("CLI pause/status/is-paused/resume (isolated via BAZAAR_DATA_DIR):")
+    print("CLI pause/status/is-paused/resume (isolated via SELLY_DATA_DIR):")
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         base = [sys.executable, str(ROOT / "bin" / "control.py")]
         pa = subprocess.run(base + ["pause", "--source", "claude-code"],
                             capture_output=True, text=True, env=env)
@@ -151,7 +151,7 @@ def test_cli_roundtrip():
 def test_mark_applied_cli():
     print("mark-applied CLI exists (the corrections recipe shells to it; it was missing before):")
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "BAZAAR_DATA_DIR": tmp}
+        env = {**os.environ, "SELLY_DATA_DIR": tmp}
         base = [sys.executable, str(ROOT / "bin" / "control.py")]
         co = subprocess.run(base + ["correct", "--text", "list kettle at 9 not 8", "--source", "telegram"],
                             capture_output=True, text=True, env=env)

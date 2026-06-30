@@ -2,7 +2,7 @@
 description: Sweep all listings, marketplaces, and setup for anything not attended to, then propose the work
 ---
 
-# /bazaar-catchup — sweep everything, report what's waiting, propose the work
+# /selly-catchup — sweep everything, report what's waiting, propose the work
 
 Thin entry point into the status-sweep flow. Does a deep, mostly read-only sweep across three
 surfaces and sends one grouped digest of everything not yet attended to, then offers to act on each
@@ -15,7 +15,7 @@ group:
   and sold/removed drift (the `distribution.md` SCAN read), plus chats you started solo (the
   `inbox-detect.md` SWEEP read). Both collect-only: they detect, they do not act.
 
-→ Execute **`skills/bazaar-catchup.md`** starting at **HEALTH** with `scope:"both"`. Apply
+→ Execute **`skills/selly-catchup.md`** starting at **HEALTH** with `scope:"both"`. Apply
 `skills/voice.md` to every message (no em-dashes; ack before the slow sweep).
 
 Prerequisites:
@@ -34,6 +34,6 @@ Notes:
 - Turn-based and resumable: one market (or one question) per pass, persisted in
   `data/catchup_session.json`. Never interrupts an in-flight listing / distribution / buy / inbox flow.
 - Honors `--dry-run` (everything is read; the report is logged not sent; no handoff runs).
-- On-demand only. The daemon already auto-sweeps one due market per pass (`/bazaar-run` §2b);
-  `/bazaar-catchup` forces a full sweep of **all** enabled inboxes and listings now. Wrap with
-  `/loop /bazaar-catchup` if you want a periodic digest.
+- On-demand only. The daemon already auto-sweeps one due market per pass (`/selly-run` §2b);
+  `/selly-catchup` forces a full sweep of **all** enabled inboxes and listings now. Wrap with
+  `/loop /selly-catchup` if you want a periodic digest.

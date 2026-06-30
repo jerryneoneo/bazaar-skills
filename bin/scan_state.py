@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""scan_state.py — the cadence gate for autonomous detection of non-Bazaar listings.
+"""scan_state.py — the cadence gate for autonomous detection of non-SELLY listings.
 
-The distribution SCAN (find listings the seller made OUTSIDE Bazaar and offer to
+The distribution SCAN (find listings the seller made OUTSIDE SELLY and offer to
 cross-list them) is expensive — it navigates each marketplace's "your listings" page
 and paginates. It must NOT run every loop pass. This owns the one deterministic answer
 to "which enabled marketplace is due for a re-scan right now?" so the main loop
-(`.claude/commands/bazaar-run.md`) can start at most one SCAN per pass, on a cadence.
+(`.claude/commands/selly-run.md`) can start at most one SCAN per pass, on a cadence.
 
 Pure / deterministic core (`due_market`); a thin CLI reads the real files:
 

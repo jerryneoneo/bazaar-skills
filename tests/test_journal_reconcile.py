@@ -43,7 +43,7 @@ def check(name, condition):
 
 
 def _env(data_dir):
-    return {**os.environ, "BAZAAR_DATA_DIR": str(data_dir)}
+    return {**os.environ, "SELLY_DATA_DIR": str(data_dir)}
 
 
 def _run(env=None, extra=None):
@@ -480,7 +480,7 @@ def test_second_reconcile_of_healed_intent_skips_no_double_notify():
         # first one's ack landed — call _reconcile_one directly with the stale (already-acked) intent.
         intent = {"id": intent_id, "thread_id": "fb:olaf-1", "in_msg_id": "12:20 PM|hi",
                   "text": "Recovered reply", "side": "sell", "market": "fb"}
-        env_overlay = {"BAZAAR_DATA_DIR": str(d)}
+        env_overlay = {"SELLY_DATA_DIR": str(d)}
         old_env = {k: os.environ.get(k) for k in env_overlay}
         os.environ.update(env_overlay)
         try:

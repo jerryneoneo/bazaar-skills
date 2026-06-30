@@ -10,7 +10,7 @@ stuck at status:"live". These tests assert the removal ALWAYS lands on the durab
 record (and that the engine never reads or writes any session file).
 
 Pure transition (apply_removal) is tested inline; a CLI check exercises the real script
-against a temp items dir via $BAZAAR_ITEMS_DIR.
+against a temp items dir via $SELLY_ITEMS_DIR.
 """
 
 import json
@@ -94,7 +94,7 @@ def test_optional_reason():
 
 
 def _run_cli(item_id, items_dir, extra=None):
-    env = {**os.environ, "BAZAAR_ITEMS_DIR": str(items_dir)}
+    env = {**os.environ, "SELLY_ITEMS_DIR": str(items_dir)}
     args = [sys.executable, str(ROOT / "bin" / "delist_item.py"), item_id] + (extra or [])
     return subprocess.run(args, capture_output=True, text=True, env=env)
 

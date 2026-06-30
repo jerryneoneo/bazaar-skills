@@ -286,7 +286,7 @@ def _run_verify(tmp, *, token, getme=None, getme_raises=False, chat_id=None):
     def fake_api(method, params, tok):
         if getme_raises:
             raise telegram.ShimError("Bot API getMe HTTP 401")
-        return getme or {"username": "my_bazaar_bot", "id": 1, "is_bot": True}
+        return getme or {"username": "my_selly_bot", "id": 1, "is_bot": True}
 
     telegram.api = fake_api
     buf = io.StringIO()
@@ -312,7 +312,7 @@ def test_verify():
         check("valid token, no chat exits 1", rc == 1)
         check("token_valid true", out["token_valid"] is True)
         check("chat_bound false", out["chat_bound"] is False)
-        check("bot_username surfaced", out["bot_username"] == "my_bazaar_bot")
+        check("bot_username surfaced", out["bot_username"] == "my_selly_bot")
 
         # Valid token AND a captured chat_id -> fully ready (exit 0).
         rc, out = _run_verify(tmp, token=secret, chat_id=188452196)

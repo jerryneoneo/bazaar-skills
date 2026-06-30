@@ -42,7 +42,7 @@ def _run(args, env=None):
 
 
 def _env(data_dir):
-    return {**os.environ, "BAZAAR_DATA_DIR": str(data_dir)}
+    return {**os.environ, "SELLY_DATA_DIR": str(data_dir)}
 
 
 # ── pure helpers ────────────────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ def test_serialize_roundtrip():
     check("empty list serializes to empty string", co.serialize([]) == "")
 
 
-# ── CLI (isolated data dir via BAZAAR_DATA_DIR) ───────────────────────────────────────────
+# ── CLI (isolated data dir via SELLY_DATA_DIR) ───────────────────────────────────────────
 
 def test_cli_enqueue_peek_ack_flow():
     print("CLI enqueue -> peek -> ack flow:")

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# bazaar-uninstall — remove Bazaar's harness footprint (gstack-style). Stops the always-on daemon
+# selly-uninstall — remove SELLY's harness footprint (gstack-style). Stops the always-on daemon
 # and removes the global slash-command launchers from every harness. By default it also clears the
-# ~/.bazaar pointer/config.
+# ~/.selly pointer/config.
 #
 # It NEVER deletes your runtime dir or your data/ (listings, floors, budgets, secrets) — those are
 # yours. It prints the path so you can `rm -rf` it yourself if you truly want everything gone.
 #
-#   bazaar-uninstall                remove launchers + daemon + ~/.bazaar (asks first)
-#   bazaar-uninstall --keep-state   keep ~/.bazaar (config/pointer)
-#   bazaar-uninstall --force        don't ask for confirmation
+#   selly-uninstall                remove launchers + daemon + ~/.selly (asks first)
+#   selly-uninstall --keep-state   keep ~/.selly (config/pointer)
+#   selly-uninstall --force        don't ask for confirmation
 set -euo pipefail
 
 KEEP_STATE=0 ; FORCE=0
@@ -21,16 +21,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-say()  { printf '\033[1;36mBazaar:\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mBazaar:\033[0m %s\n' "$*" >&2; }
+say()  { printf '\033[1;36mSELLY:\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mSELLY:\033[0m %s\n' "$*" >&2; }
 
-HOME_FILE="$HOME/.bazaar/home"
+HOME_FILE="$HOME/.selly/home"
 RUNTIME="$([ -f "$HOME_FILE" ] && cat "$HOME_FILE" || true)"
 [ -z "$RUNTIME" ] && RUNTIME="$(cd "$(dirname "$0")/.." && pwd)"  # fallback: this checkout
 
 if [ "$FORCE" != 1 ]; then
-  printf '\033[1;36mBazaar:\033[0m Remove launchers + stop the daemon%s? [y/N]: ' \
-    "$([ "$KEEP_STATE" = 1 ] && echo "" || echo " + clear ~/.bazaar")"
+  printf '\033[1;36mSELLY:\033[0m Remove launchers + stop the daemon%s? [y/N]: ' \
+    "$([ "$KEEP_STATE" = 1 ] && echo "" || echo " + clear ~/.selly")"
   read -r ans || true
   case "${ans:-}" in y|Y|yes) ;; *) warn "Aborted."; exit 0 ;; esac
 fi
@@ -47,11 +47,11 @@ if [ -f "$RUNTIME/bin/install.py" ]; then
   python3 "$RUNTIME/bin/install.py" rm-launchers --all || warn "launcher removal reported an issue (continuing)."
 fi
 
-# 3. Clear ~/.bazaar unless asked to keep it.
+# 3. Clear ~/.selly unless asked to keep it.
 if [ "$KEEP_STATE" != 1 ]; then
-  rm -rf "$HOME/.bazaar" && say "Cleared ~/.bazaar."
+  rm -rf "$HOME/.selly" && say "Cleared ~/.selly."
 else
-  say "Kept ~/.bazaar (config/pointer)."
+  say "Kept ~/.selly (config/pointer)."
 fi
 
 say "Done. Your runtime dir + data are untouched at: $RUNTIME"

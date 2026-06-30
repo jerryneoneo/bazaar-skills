@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.bazaarskills.chrome</string>
+  <string>com.selly.chrome</string>
 
   <!-- TEMPLATE: launchd/install_daemon.sh substitutes __RUNTIME__ (this checkout) at install. -->
   <key>ProgramArguments</key>

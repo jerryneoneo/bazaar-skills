@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.bazaarskills.watchdog</string>
+  <string>com.selly.watchdog</string>
 
   <!-- Fix D: an INDEPENDENT watchdog (separate from the agent it guards, so it survives a wedged
        agent). It runs read-only every StartInterval and restarts the agent ONLY when launchd thinks

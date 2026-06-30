@@ -5,12 +5,12 @@ when `data/seller_config.json` does not yet exist (not onboarded).
 
 Uses only the `channel.md` verbs — runs identically on any adapter.
 
-The capabilities block below (the `CAPABILITIES` body) is the single source of "what Bazaar does";
-`/bazaar` reuses it for the menu header, so keep it adapter- and marketplace-neutral.
+The capabilities block below (the `CAPABILITIES` body) is the single source of "what SELLY does";
+`/selly` reuses it for the menu header, so keep it adapter- and marketplace-neutral.
 
 ```
-# CAPABILITIES (reused by /bazaar)
-say  "👋 I'm Bazaar, Carousell's agent skills for informal marketplaces, your P2P marketplace
+# CAPABILITIES (reused by /selly)
+say  "👋 I'm SELLY, Carousell's agent skills for informal marketplaces, your P2P marketplace
       assistant — I help you sell AND buy.
 
       Here's what I do:

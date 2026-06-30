@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""preflight.py — read-only dependency checks for the Bazaar installer.
+"""preflight.py — read-only dependency checks for the SELLY installer.
 
 Automates SETUP.md §2 (and the §11 friction inventory's preflight row). Emits structured JSON so
-bazaar-install.md can present each check and its fix hint. NEVER changes anything (no installs,
+selly-install.md can present each check and its fix hint. NEVER changes anything (no installs,
 no writes) — it only inspects.
 
 Run:
@@ -88,9 +88,9 @@ def run_checks(harness_name: str | None = None) -> dict:
 def main(argv) -> int:
     p = argparse.ArgumentParser(prog="preflight.py")
     p.add_argument("--quiet", action="store_true", help="JSON only; exit 1 on any failure")
-    p.add_argument("--harness", default="", help="claude-code | codex (default: $BAZAAR_HARNESS or autodetect)")
+    p.add_argument("--harness", default="", help="claude-code | codex (default: $SELLY_HARNESS or autodetect)")
     ns = p.parse_args(argv[1:])
-    harness_name = ns.harness or os.environ.get("BAZAAR_HARNESS") or None
+    harness_name = ns.harness or os.environ.get("SELLY_HARNESS") or None
     try:
         result = run_checks(harness_name)
     except UnsupportedPlatform as exc:

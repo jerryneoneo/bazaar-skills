@@ -3,7 +3,7 @@
 
     python3 tests/test_onboarding_notice.py
 
-Runs the hook as a real subprocess against an isolated BAZAAR_DATA_DIR. Verifies: it offers
+Runs the hook as a real subprocess against an isolated SELLY_DATA_DIR. Verifies: it offers
 onboarding when data/seller_config.json is absent, stays silent once it exists, and is a no-op
 inside the daemon's headless passes.
 """
@@ -28,11 +28,11 @@ def check(name, cond):
 
 
 def _run_hook(data_dir, *, daemon=False):
-    env = {**os.environ, "BAZAAR_DATA_DIR": str(data_dir)}
+    env = {**os.environ, "SELLY_DATA_DIR": str(data_dir)}
     if daemon:
-        env["BAZAAR_DAEMON_PASS"] = "1"
+        env["SELLY_DAEMON_PASS"] = "1"
     else:
-        env.pop("BAZAAR_DAEMON_PASS", None)
+        env.pop("SELLY_DAEMON_PASS", None)
     return subprocess.run([sys.executable, str(HOOK)],
                           input='{"hook_event_name":"SessionStart","source":"startup"}',
                           capture_output=True, text=True, env=env, timeout=30)
@@ -50,8 +50,8 @@ def test_offers_onboarding_when_not_configured():
         ctx = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
         check("hookEventName is SessionStart",
               payload.get("hookSpecificOutput", {}).get("hookEventName") == "SessionStart")
-        check("note points at bazaar-install runbook", ".claude/commands/bazaar-install.md" in ctx)
-        check("note offers /bazaar-install", "/bazaar-install" in ctx)
+        check("note points at selly-install runbook", ".claude/commands/selly-install.md" in ctx)
+        check("note offers /selly-install", "/selly-install" in ctx)
 
 
 def test_silent_when_onboarded():

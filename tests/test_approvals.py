@@ -5,7 +5,7 @@
 
 Validates the data/config.json approvals block, the "Harry guard" (above_list_bids never auto),
 and install.py's harness-permission autonomy presets (layer 2). The business-approval presets +
-migration shim live as prose in skills/bazaar-config.md; here we test the shipped config + the
+migration shim live as prose in skills/selly-config.md; here we test the shipped config + the
 real install.py constants.
 """
 
@@ -69,7 +69,7 @@ def test_autonomy_presets():
 
 
 def test_migration_shim_reference():
-    """A faithful re-implementation of the documented shim (bazaar-config.md) — guards the contract."""
+    """A faithful re-implementation of the documented shim (selly-config.md) — guards the contract."""
     print("migration shim (autonomy_mode -> steps) reference:")
 
     def shim(cfg):

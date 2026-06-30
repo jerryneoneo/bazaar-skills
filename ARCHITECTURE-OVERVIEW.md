@@ -1,12 +1,12 @@
 # Architecture Overview
 
-A public overview of how Bazaar Skills is built and where it's going. For the day-to-day docs see
+A public overview of how SELLY Skills is built and where it's going. For the day-to-day docs see
 [README.md](README.md), [SETUP.md](SETUP.md), and [DAEMON.md](DAEMON.md); for what's planned see
 [ROADMAP.md](ROADMAP.md).
 
 ## What it is
 
-Bazaar Skills is a **local, single-tenant agent that both sells and buys** for you on informal P2P
+SELLY Skills is a **local, single-tenant agent that both sells and buys** for you on informal P2P
 marketplaces. It runs on your own machine, drives **your real, logged-in Chrome** (over the Chrome
 DevTools Protocol via Playwright MCP), and you talk to it over one chat channel. One unified loop
 sweeps both sides each pass: on the **sell** side it lists items and negotiates with buyers; on the

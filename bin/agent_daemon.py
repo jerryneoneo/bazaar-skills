@@ -43,7 +43,7 @@ CONFIG_PATH = SELLER_DIR / "data" / "config.json"
 SELLER_CONFIG_PATH = SELLER_DIR / "data" / "seller_config.json"
 
 # The launchd LaunchAgent label for this daemon (Fix D: relaunch_self kickstarts it on a code change).
-AGENT_LABEL = "com.bazaarskills.agent"
+AGENT_LABEL = "com.selly.agent"
 # Fix D — per-iteration stall guard. Each main-loop iteration is timed; an iteration that runs longer
 # than this many seconds logs a WARN so a hung iteration is VISIBLE (the ~7-min supervisor stall from a
 # hung worker would have surfaced here). It is purely observability — we never kill the process
@@ -229,7 +229,7 @@ def load_config() -> dict:
         # Does the nightly run also invoke the billed LLM judge? Default on ("on for everyone");
         # set false for a $0 nightly (deterministic checks only). The deterministic layer always runs.
         "eval_judge_nightly": cfg.get("eval_judge_nightly", True),
-        # Upstream update check: how often to CHECK for a newer Bazaar (the actual network throttle
+        # Upstream update check: how often to CHECK for a newer SELLY (the actual network throttle
         # is config.update_check_interval_hours, owned by update_check.py; 0 there disables it).
         "update_poll_sec": cfg.get("update_poll_sec", 3600),
         # Stale-chat follow-ups: how often to CHECK whether any thread is due for a nudge or a
@@ -242,11 +242,11 @@ def load_config() -> dict:
         "outbox_sweep_poll_sec": cfg.get("outbox_sweep_poll_sec", 120),
         # Phase 3: >1 opts into the concurrent supervisor (parallel sell-inbox workers across
         # marketplaces). Default 1 keeps the single-flight loop below — byte-identical behavior.
-        # BAZAAR_MAX_WORKERS env overrides the file: an ops kill-switch to force single-flight
+        # SELLY_MAX_WORKERS env overrides the file: an ops kill-switch to force single-flight
         # (=1) without editing config, and the seam tests use to pin the path. Coerce defensively:
         # a fat-fingered string/None must never crash the dispatch (falls to 1).
         "max_concurrent_workers": _int_or(
-            os.environ.get("BAZAAR_MAX_WORKERS") or cfg.get("max_concurrent_workers", 1), 1),
+            os.environ.get("SELLY_MAX_WORKERS") or cfg.get("max_concurrent_workers", 1), 1),
     }
 
 
@@ -411,7 +411,7 @@ def _listing_health_session_active() -> bool:
 
 
 def _catchup_path() -> Path:
-    """The /catchup sweep session file. Relocatable via BAZAAR_DATA_DIR (so tests isolate it; in
+    """The /catchup sweep session file. Relocatable via SELLY_DATA_DIR (so tests isolate it; in
     production thread_outbox.data_dir() resolves to SELLER_DIR/data, same file the skill writes)."""
     return thread_outbox.data_dir() / "catchup_session.json"
 
@@ -532,8 +532,8 @@ UPDATE_NOTICE_SNOOZE_DAYS = 30
 
 
 def check_and_notify_update(channel: dict, env: dict, dry_run: bool, *, via_outbox: bool) -> None:
-    """Throttled, read-only upstream-update check -> ONE channel heads-up if a newer Bazaar exists.
-    NEVER auto-applies (account safety); the seller runs /bazaar-upgrade. via_outbox: the supervisor
+    """Throttled, read-only upstream-update check -> ONE channel heads-up if a newer SELLY exists.
+    NEVER auto-applies (account safety); the seller runs /selly-upgrade. via_outbox: the supervisor
     ENQUEUEs (its single writer drains the outbox); the single-flight loop sends directly (it has no
     outbox drain). Fail-open throughout — a broken check must never disturb the loop."""
     try:
@@ -545,8 +545,8 @@ def check_and_notify_update(channel: dict, env: dict, dry_run: bool, *, via_outb
     if not info.get("should_prompt"):
         return
     summary = info.get("summary") or f"v{info.get('current', '?')} -> v{info.get('latest', '?')}"
-    text = (f"🆙 Bazaar update available: {summary}. "
-            f"Run /bazaar-upgrade when convenient (I won't auto-update).")
+    text = (f"🆙 SELLY update available: {summary}. "
+            f"Run /selly-upgrade when convenient (I won't auto-update).")
     if dry_run:
         logging.info("[dry-run] would notify update: %s", summary)
         return
@@ -616,7 +616,7 @@ def ensure_token(env: dict) -> dict:
     if env.get("TELEGRAM_BOT_TOKEN"):
         return env
     try:
-        harness = get_harness(os.environ.get("BAZAAR_HARNESS") or None)
+        harness = get_harness(os.environ.get("SELLY_HARNESS") or None)
     except UnknownHarness:
         return env
     for base in TOKEN_DIRS:
@@ -678,7 +678,7 @@ def _log_wake_mode() -> None:
                      "push-capable markets (FB/IG) wake on notifications, others poll")
     else:
         logging.info("\U0001f6e1️ wake mode: STANDARD polling — Full Disk Access not granted "
-                     "(grant it for Instant: /bazaar -> speed). All markets use the cheap poll path")
+                     "(grant it for Instant: /selly -> speed). All markets use the cheap poll path")
 
 
 def _register_bot_commands(env: dict) -> None:
@@ -1574,7 +1574,7 @@ def escalate_cap_hit(channel: dict, env: dict, resource: str, dry_run: bool,
         return
     if via_outbox:
         try:
-            # In-process enqueue — channel_outbox.data_dir() reads BAZAAR_DATA_DIR, so it lands in the
+            # In-process enqueue — channel_outbox.data_dir() reads SELLY_DATA_DIR, so it lands in the
             # same outbox the supervisor's _drain_outbox flushes.
             import channel_outbox
             from datetime import datetime, timezone
@@ -1611,9 +1611,9 @@ def run_buyer_with_continuation(resource: str, channel: dict, env: dict, dry_run
     unscoped too. Returns the LAST pass's exit code."""
     base_env = dict(extra_env or {})
     if peek_thread:
-        base_env["BAZAAR_BUYER_PEEK_THREAD"] = peek_thread
+        base_env["SELLY_BUYER_PEEK_THREAD"] = peek_thread
     attempts = 0
-    rc = run_pass("buyer", channel, env, dry_run, extra_env={**base_env, "BAZAAR_RESOURCE": resource}
+    rc = run_pass("buyer", channel, env, dry_run, extra_env={**base_env, "SELLY_RESOURCE": resource}
                   if resource else base_env)
     while True:
         action = buyer_continuation_action(rc, attempts, CONTINUATION_RETRY_CAP)
@@ -1629,7 +1629,7 @@ def run_buyer_with_continuation(resource: str, channel: dict, env: dict, dry_run
                      attempts, resource or "all markets")
         reconcile_orphans(env, dry_run)  # heal any crash orphan before re-touring (best-effort, no resend)
         rc = run_pass("buyer", channel, env, dry_run,
-                      extra_env={**base_env, "BAZAAR_RESOURCE": resource} if resource else base_env)
+                      extra_env={**base_env, "SELLY_RESOURCE": resource} if resource else base_env)
 
 
 def _acquire_instance_lock() -> dict:
@@ -1829,7 +1829,7 @@ def main(argv) -> int:
                     reconcile_orphans(env, ns.dry_run)  # heal crash orphans first (best-effort, no resend)
                     run_buyer_with_continuation(
                         "", channel, env, ns.dry_run,
-                        extra_env={"BAZAAR_BUYER_PEEK_TEXT": nt.get("latest_text", "")},
+                        extra_env={"SELLY_BUYER_PEEK_TEXT": nt.get("latest_text", "")},
                         peek_thread=buyer_peek_thread(env))
                     # Deliberately do NOT touch last_buyer / last_buyer_pass here. Those drive the
                     # AGGREGATE poll gate + strand-floor for ALL markets; resetting them on a per-market
@@ -1868,8 +1868,8 @@ def main(argv) -> int:
                     run_buyer_with_continuation(
                         "", channel, env, ns.dry_run,
                         extra_env={
-                            "BAZAAR_BUYER_PEEK_TEXT": hint,
-                            "BAZAAR_BUYER_PEEK_FORCED": "1" if not bp.get("pending") else "",
+                            "SELLY_BUYER_PEEK_TEXT": hint,
+                            "SELLY_BUYER_PEEK_FORCED": "1" if not bp.get("pending") else "",
                         },
                         peek_thread=peek_thread_from(bp))
                     last_buyer_pass = time.monotonic()
@@ -1892,7 +1892,7 @@ def main(argv) -> int:
                     logging.info("outbox sweep → re-drive buyer pass [%s]", market)
                     run_buyer_with_continuation(
                         market, channel, env, ns.dry_run,
-                        extra_env={"BAZAAR_BUYER_PEEK_TEXT": "re-driving a reply that never sent"})
+                        extra_env={"SELLY_BUYER_PEEK_TEXT": "re-driving a reply that never sent"})
                 drain_channel_outbox(channel, env, ns.dry_run)  # deliver any sweep escalation
                 last_sweep = time.monotonic()
 
@@ -1941,8 +1941,8 @@ def main(argv) -> int:
                     logging.info("buy pass → %s", reason)
                     reconcile_orphans(env, ns.dry_run)  # heal crash orphans first (best-effort, no resend)
                     run_pass("buy", channel, env, ns.dry_run, extra_env={
-                        "BAZAAR_BUY_PEEK_WANT": bpk.get("want_id") or "",
-                        "BAZAAR_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
+                        "SELLY_BUY_PEEK_WANT": bpk.get("want_id") or "",
+                        "SELLY_BUY_PEEK_TEXT": bpk.get("latest_text", ""),
                     })
                     empty_buys = 0
                 else:
@@ -1952,7 +1952,7 @@ def main(argv) -> int:
 
             # STALE-CHAT FOLLOW-UPS: nudge counterparts who went quiet, then mark them not interested.
             # Detection is a cheap non-LLM probe; a DROP is $0 deterministic (mark + ONE channel notice);
-            # a NUDGE reuses the buyer/buy pass via BAZAAR_FOLLOWUP=1 (same compose+send+journal bracket).
+            # a NUDGE reuses the buyer/buy pass via SELLY_FOLLOWUP=1 (same compose+send+journal bracket).
             # Reconcile first so a counterpart who just replied is dropped before we decide.
             if not paused and time.monotonic() - last_followup >= cfg["followup_poll_sec"]:
                 run_followup_reconcile(env)
@@ -1964,10 +1964,10 @@ def main(argv) -> int:
                     reconcile_orphans(env, ns.dry_run)  # heal crash orphans before any send
                     if "sell" in sides:
                         logging.info("followup nudges due (sell) → buyer pass")
-                        run_pass("buyer", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                        run_pass("buyer", channel, env, ns.dry_run, extra_env={"SELLY_FOLLOWUP": "1"})
                     if "buy" in sides:
                         logging.info("followup nudges due (buy) → buy pass")
-                        run_pass("buy", channel, env, ns.dry_run, extra_env={"BAZAAR_FOLLOWUP": "1"})
+                        run_pass("buy", channel, env, ns.dry_run, extra_env={"SELLY_FOLLOWUP": "1"})
                 last_followup = time.monotonic()
 
             # NIGHTLY SELF-EVAL: on a slow throttle, check the cadence gate and run the eval if due. The
@@ -1982,7 +1982,7 @@ def main(argv) -> int:
                     run_eval(env, ns.dry_run, use_judge)
                 last_eval = time.monotonic()
 
-            # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up over the channel if a newer Bazaar
+            # UPSTREAM UPDATE CHECK (read-only, throttled): heads-up over the channel if a newer SELLY
             # is available. Single-flight loop sends directly (no outbox drain here). Never auto-applies.
             if not paused and time.monotonic() - last_update >= cfg["update_poll_sec"]:
                 check_and_notify_update(channel, env, ns.dry_run, via_outbox=False)

@@ -84,7 +84,7 @@ def test_buyer_total_invariant():
 
 
 def test_cli_and_validation():
-    print("CLI (hermetic fixture data dir via BAZAAR_DATA_DIR) + input validation:")
+    print("CLI (hermetic fixture data dir via SELLY_DATA_DIR) + input validation:")
     with tempfile.TemporaryDirectory() as tmp:
         data = Path(tmp)
         (data / "items").mkdir()
@@ -102,7 +102,7 @@ def test_cli_and_validation():
             "item_id": "sample-ikea-desk", "list_price": 90,
             "size_bucket": "bulky", "currency": "SGD",
         }))
-        env = {**os.environ, "BAZAAR_DATA_DIR": str(data)}
+        env = {**os.environ, "SELLY_DATA_DIR": str(data)}
 
         proc = subprocess.run(
             [sys.executable, str(ROOT / "bin" / "shipping.py"),

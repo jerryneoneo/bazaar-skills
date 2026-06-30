@@ -18,7 +18,7 @@ two stay in lockstep.
 Usage:
     python3 tab_registry.py resolve --market <id> [--region <r>] [--side sell|buy] [--config <path>]
     python3 tab_registry.py list   [--side sell|buy] [--config <path>]
-    (tests relocate the data dir via BAZAAR_DATA_DIR for config isolation.)
+    (tests relocate the data dir via SELLY_DATA_DIR for config isolation.)
 
 Output (stdout, JSON). `resolve`:
     {"market": "carousell", "host": "www.carousell.sg",
@@ -51,8 +51,8 @@ HTTPS_PREFIX = "https://"
 
 
 def data_dir() -> Path:
-    """The data directory — relocatable via BAZAAR_DATA_DIR (used by tests for config isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data directory — relocatable via SELLY_DATA_DIR (used by tests for config isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

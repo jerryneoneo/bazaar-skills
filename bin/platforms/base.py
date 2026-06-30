@@ -1,7 +1,7 @@
 """Platform interface — the OS-abstraction boundary for the installer.
 
 Concrete platforms (macos.py, later windows.py) implement this. Callers (preflight.py,
-install.py, bazaar-install.md) depend only on this interface, never on launchd/TCC directly.
+install.py, selly-install.md) depend only on this interface, never on launchd/TCC directly.
 """
 
 from __future__ import annotations

@@ -54,7 +54,7 @@ SIDE_DIRS = {"sell": "threads", "buy": "buyer_threads"}
 # path / data resolution
 # ---------------------------------------------------------------------------
 def data_dir() -> Path:
-    """Shared with thread_outbox so tests isolate the whole tree via BAZAAR_DATA_DIR."""
+    """Shared with thread_outbox so tests isolate the whole tree via SELLY_DATA_DIR."""
     return thread_outbox.data_dir()
 
 

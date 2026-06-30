@@ -32,7 +32,7 @@ Output (stdout, JSON). enqueue -> {"enqueued": true, "id": <str>};
 peek -> {"pending": [<records, FIFO append order>], "count": N}; ack -> {"acked": true|false}.
 Errors -> {"error": "..."} to stderr. Exit codes: 0 ok · 2 bad input · 3 data missing/invalid.
 
-(tests relocate the whole data dir via the BAZAAR_DATA_DIR env var; there is no per-invocation
+(tests relocate the whole data dir via the SELLY_DATA_DIR env var; there is no per-invocation
  path override, so every process competes on the same lock file.)
 """
 
@@ -54,9 +54,9 @@ MAX_SEND_ATTEMPTS = 3        # after this many failed sends a notice is dead-let
 
 
 def data_dir():
-    """The data directory — relocatable via BAZAAR_DATA_DIR (used by tests for isolation).
+    """The data directory — relocatable via SELLY_DATA_DIR (used by tests for isolation).
     There is no per-invocation override, so all production processes share one lock file."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else DEFAULT_DATA_DIR
 
 

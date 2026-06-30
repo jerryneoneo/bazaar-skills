@@ -80,7 +80,7 @@ def test_runtime_dir_tcc_guard():
     if sys.platform != "darwin":
         check("skipped (not macOS)", True)
         return
-    safe = run(["runtime-dir", "--dest", str(Path.home() / "bazaar-skills")])
+    safe = run(["runtime-dir", "--dest", str(Path.home() / "selly-agent")])
     check("safe dir not blocked", json.loads(safe.stdout)["tcc_blocked"] is False)
     blocked = run(["runtime-dir", "--dest", str(Path.home() / "Documents" / "x")])
     check("Documents path flagged blocked", json.loads(blocked.stdout)["tcc_blocked"] is True)

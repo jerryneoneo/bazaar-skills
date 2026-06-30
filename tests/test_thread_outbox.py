@@ -41,7 +41,7 @@ def _run(args, env=None):
 
 
 def _env(data_dir):
-    return {**os.environ, "BAZAAR_DATA_DIR": str(data_dir)}
+    return {**os.environ, "SELLY_DATA_DIR": str(data_dir)}
 
 
 # ── pure helpers ────────────────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ def test_parse_records_tolerant():
     check("empty text -> empty list", to.parse_records("") == [])
 
 
-# ── CLI (isolated data dir via BAZAAR_DATA_DIR) ───────────────────────────────────────────
+# ── CLI (isolated data dir via SELLY_DATA_DIR) ───────────────────────────────────────────
 
 def test_enqueue_appends_pending_keyed_by_thread():
     print("enqueue appends a pending record with all fields keyed by thread_id:")
@@ -241,7 +241,7 @@ def test_mark_sent_flips_status_and_stamps():
 def test_mark_escalated_sets_durable_flag():
     print("mark_escalated stamps a durable exactly-once flag (record stays pending + visible):")
     with tempfile.TemporaryDirectory() as d:
-        os.environ["BAZAAR_DATA_DIR"] = d
+        os.environ["SELLY_DATA_DIR"] = d
         try:
             rid = to.enqueue("fb:t", "fb", "x", "i", NOW_UTC, side="sell")["id"]
             res = to.mark_escalated(rid)
@@ -253,7 +253,7 @@ def test_mark_escalated_sets_durable_flag():
             check("mark_escalated of unknown id is a no-op",
                   to.mark_escalated("nope").get("escalated") is False)
         finally:
-            os.environ.pop("BAZAAR_DATA_DIR", None)
+            os.environ.pop("SELLY_DATA_DIR", None)
 
 
 def test_peek_status_filter():

@@ -14,7 +14,7 @@ backstop), so a listing is never stranded by a worker that did not finish.
 
 > Talks to the seller via `channel.md` verbs; drives marketplaces via `browser-actions.md`;
 > money via `bin/floor_gate.py` / `bin/negotiate.py`; fee preview via `bin/shipping.py`.
-> Requires onboarding done. **Approvals** (`config.approvals.steps`, see `skills/bazaar-config.md`):
+> Requires onboarding done. **Approvals** (`config.approvals.steps`, see `skills/selly-config.md`):
 > each gated step below reads its key — `price_floor`, `listing_description`, `listing_platforms`,
 > `publish` — where `auto` proceeds, `confirm` gates on `confirm()`. With the default `balanced`
 > preset these are auto except `price_floor` (publishes without a confirm; pauses on a real anomaly).
@@ -55,7 +55,7 @@ apply their reply per that step (never re-ask which item — the photos are alre
 If photos arrive with no active session AND the caption is not
 buy-intent, START. A photo whose caption asks to ACQUIRE the item ("get this", "want", "looking
 for", "find me", "under $X", "max", "budget", "bid", or a marketplace link to buy) is a BUY, not a
-listing — do NOT START here; the control-channel intent gate (bazaar-run.md §1) routes it to
+listing — do NOT START here; the control-channel intent gate (selly-run.md §1) routes it to
 search.md. A photo with no caption, a sell-intent caption ("selling", "for sale"), or a bare item
 description routes here: START. Otherwise ignore (not a listing). START resolves intent FIRST — a
 clear sell caption goes straight to research; a bare/description-only photo asks sell-or-buy
@@ -198,7 +198,7 @@ if additional_info given (not 'skip'):
 write data/items/<item_id>.json (buyer-safe: title,category,category_tag,condition,list_price,
      currency, description[honest, ship-P2P, delivery quoted, NO meetup], photos, size_bucket,
      fulfillment:"ship_only", listing_urls:{}, status:"draft",
-     managed:true, source:"bazaar", distribution_offered_at:null)  # NO floor/address
+     managed:true, source:"selly", distribution_offered_at:null)  # NO floor/address
 # ELIGIBLE platforms (skills/marketplaces.md, Consumption 2): region was filtered at onboarding;
 # here filter the seller's ENABLED platforms by this item's category_tag.
 registry = load data/marketplaces.json
@@ -261,7 +261,7 @@ if items.distribution_offered_at is unset:
 ```
 > The post-publish hand-off only DISTRIBUTEs the **just-listed** item (cross-list + recommend). It does
 > **not** scan for the seller's other (manually-created) listings — that detection is owned by the
-> autonomous cadence in `bazaar-run.md` §2b (`bin/scan_state.py`), and is also reachable on demand via
+> autonomous cadence in `selly-run.md` §2b (`bin/scan_state.py`), and is also reachable on demand via
 > `/sell-detect`. With `approvals.steps.distribution = auto`, obvious cross-lists happen silently; with
 > `confirm` (the `balanced` default), the seller is asked first.
 

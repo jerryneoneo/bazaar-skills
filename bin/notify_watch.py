@@ -30,8 +30,8 @@ SELLER_DIR = Path(__file__).resolve().parent.parent
 
 
 def _state_path() -> Path:
-    """Per-market last-seen rec_id cursor. Relocatable via BAZAAR_DATA_DIR (test isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """Per-market last-seen rec_id cursor. Relocatable via SELLY_DATA_DIR (test isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     base = Path(env) if env else (SELLER_DIR / "data")
     return base / "notify_watch_state.json"
 
@@ -105,7 +105,7 @@ def watch(enabled: list[str] | None = None, now_iso: str | None = None, update: 
 
 def _enabled_markets() -> list[str]:
     try:
-        base = Path(os.environ["BAZAAR_DATA_DIR"]) if os.environ.get("BAZAAR_DATA_DIR") \
+        base = Path(os.environ["SELLY_DATA_DIR"]) if os.environ.get("SELLY_DATA_DIR") \
             else (SELLER_DIR / "data")
         cfg = json.loads((base / "seller_config.json").read_text())
         mk = cfg.get("marketplaces", {})

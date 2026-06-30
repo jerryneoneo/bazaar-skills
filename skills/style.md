@@ -6,7 +6,7 @@ side, the **firmness** of the deterministic negotiation knobs (resolved in `bin/
 the base tone ("friendly, concise, human") and the disclosure scope (Rule 3), which it never overrides.
 
 Stable rulebook (folded into the cached prefix). The actual preferences are **volatile** and read at
-runtime, exactly like `bazaar-config.md` (stable) vs `config.json` (volatile).
+runtime, exactly like `selly-config.md` (stable) vs `config.json` (volatile).
 
 ## Load the profile
 
@@ -57,9 +57,9 @@ These outrank the persona, always:
 ## Learning (opt-in)
 
 `learning` controls whether the agent captures style suggestions over time. When the user steers tone
-during a `/pause` ("be more terse", "give lowballers a harder time"), or `/bazaar-eval` flags a
+during a `/pause` ("be more terse", "give lowballers a harder time"), or `/selly-eval` flags a
 tone/voice issue, that becomes a **proposal** in `data/style_proposals.jsonl` via
 `python3 bin/style.py propose ...` — it never rewrites the profile silently. The user reviews and
-applies proposals from `/bazaar -> style`. Modes: `off` (capture nothing), `suggest` (default; capture,
+applies proposals from `/selly -> style`. Modes: `off` (capture nothing), `suggest` (default; capture,
 ask before applying), `auto` (high-confidence proposals may be applied and logged). See
-`skills/channel/corrections.md` §2d and `.claude/commands/bazaar.md`.
+`skills/channel/corrections.md` §2d and `.claude/commands/selly.md`.

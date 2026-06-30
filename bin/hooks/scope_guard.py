@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """scope_guard.py — PreToolUse hook: a per-marketplace worker can't navigate to ANOTHER marketplace.
 
-Phase-3 concurrency runs one buyer worker per marketplace, each scoped via $BAZAAR_RESOURCE and
+Phase-3 concurrency runs one buyer worker per marketplace, each scoped via $SELLY_RESOURCE and
 told (by its prompt) to drive only its own tab. This is the DETERMINISTIC backstop, independent of
-LLM compliance: when $BAZAAR_RESOURCE is set, a `browser_navigate` whose target host belongs to a
+LLM compliance: when $SELLY_RESOURCE is set, a `browser_navigate` whose target host belongs to a
 DIFFERENT marketplace is DENIED — so a worker can never act on another account's tab (the
 conservative same-account invariant, hard-enforced at the harness level).
 
 Allowed when scoped: the worker's OWN marketplace host (any region) and any non-marketplace host
 (we don't over-block — the market:<id> lease + the atomic per-market pacing cap remain the primary
 guards; this hook targets the one dangerous case: cross-marketplace navigation). Unscoped passes
-(no $BAZAAR_RESOURCE — the channel/legacy single-flight loop) are never affected.
+(no $SELLY_RESOURCE — the channel/legacy single-flight loop) are never affected.
 
 Reads the PreToolUse event JSON on stdin; emits a deny decision on stdout, or nothing (exit 0 =
 allow). Fail-OPEN: any error allows the tool — a hook must never wedge the agent.
@@ -68,7 +68,7 @@ def _deny(reason):
 
 
 def main():
-    resource = (os.environ.get("BAZAAR_RESOURCE") or "").strip()
+    resource = (os.environ.get("SELLY_RESOURCE") or "").strip()
     if not resource:
         return 0  # unscoped pass → no opinion
     try:
@@ -86,7 +86,7 @@ def main():
     except (ValueError, OSError, json.JSONDecodeError):
         return 0  # registry unreadable / bad URL → fail open
     if owner and owner != resource:
-        _deny(f"Bazaar worker scoped to '{resource}' — refusing to navigate to the '{owner}' "
+        _deny(f"SELLY worker scoped to '{resource}' — refusing to navigate to the '{owner}' "
               f"marketplace. Each marketplace is driven by its own worker (account-safety guard).")
     return 0
 

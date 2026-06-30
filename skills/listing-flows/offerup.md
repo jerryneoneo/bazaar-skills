@@ -19,7 +19,7 @@ Inputs: the item record `data/items/<item_id>.json` (buyer-safe) + its photo pat
 6. `type("description", item.description)` — honest, ship-P2P / delivery-quoted wording. **No meetup.**
 7. `type("price", item.list_price)`
 8. **Delivery:** enable **"Ship to buyer" / nationwide shipping** (buyer pays); do **not** select
-   local-pickup-only. (OfferUp is local-first; we force shipping so every deal flows through Bazaar's
+   local-pickup-only. (OfferUp is local-first; we force shipping so every deal flows through SELLY's
    P2P quote from `shipping.py`. If the account can't enable shipping for this category → **escalate**,
    don't fall back to local meetup.)
 9. `read` the preview → return it for the caller's final `confirm`. On confirm: `click("post")`.
@@ -43,5 +43,5 @@ Logged-out/checkpoint → stop this market + escalate re-auth (no tight retry). 
   tight-loop retries.
 - **Ship-only invariant:** never enable local-pickup-only or arrange an in-person meet — redirect to
   shipping. If shipping is unavailable for the category, escalate.
-- Publish gating follows `config.approvals.steps.publish` (see `skills/bazaar-config.md`).
+- Publish gating follows `config.approvals.steps.publish` (see `skills/selly-config.md`).
 - `--dry-run`: log each verb instead of executing.

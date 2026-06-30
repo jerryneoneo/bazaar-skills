@@ -27,7 +27,7 @@ Usage:
     followup_state.py reconcile  [--now ISO]   # prune entries for answered/gone threads
 
 Exit codes: 0 ok · 2 bad input · 3 config/data missing or invalid. Never reads a secret.
-Data dir relocatable via BAZAAR_DATA_DIR (tests + isolation), matching the rest of bin/.
+Data dir relocatable via SELLY_DATA_DIR (tests + isolation), matching the rest of bin/.
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ NOTE_PREFIX = "followup#"  # outbound nudges are committed with note="followup#<
 
 
 def data_dir() -> Path:
-    """The data dir - relocatable via BAZAAR_DATA_DIR (used by tests for isolation)."""
-    env = os.environ.get("BAZAAR_DATA_DIR")
+    """The data dir - relocatable via SELLY_DATA_DIR (used by tests for isolation)."""
+    env = os.environ.get("SELLY_DATA_DIR")
     return Path(env) if env else Path(__file__).resolve().parent.parent / "data"
 
 
