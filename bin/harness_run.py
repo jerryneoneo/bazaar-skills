@@ -242,9 +242,11 @@ This is a BACKGROUND pass — do NOT poll the control channel or buyer inboxes f
 notifications for work you finish this pass — a `say` is a one-way push (telegram.py send) that needs
 no polling, so 'quiet background pass' must NOT mean 'silently drop the success notice'. Do ONE step
 of bazaar-run.md §2b, then stop:
-0. If data/listing_session.json OR data/catchup_session.json is active → do nothing (never interrupt
-   an active listing or an in-flight catch-up sweep — the catchup invariant is single-active-session);
-   end.
+0. If data/listing_session.json is active, OR data/catchup_session.json is active AND recently updated
+   (a live, advancing sweep) → do nothing (never interrupt an active listing or an in-flight catch-up
+   sweep — the catchup invariant is single-active-session); end. A catchup session that is active but
+   STALE is a crash orphan: the daemon's deterministic reconciler clears it before this pass runs, so
+   an active sweep reaching you here is genuinely live — stand down.
 1. Else if data/distribution_session.json is active → CONTINUE it per skills/channel/distribution.md:
    cross-list the session's current_item_id to its target market (ONE item this pass; honor
    max_actions_per_hour pacing + quiet_hours). Record a listing URL ONLY after bin/verify_listing_url.py

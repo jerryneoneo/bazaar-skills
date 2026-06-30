@@ -70,6 +70,7 @@ TOKEN_DIRS = [SELLER_DIR, SELLER_DIR.parent]
 import harness_run  # noqa: E402  CAP_HIT_SIGNAL single source of truth
 import lease  # noqa: E402  per-market lease — the outbox sweeper skips a market a live worker owns
 import thread_outbox  # noqa: E402  the send-intent log the outbox sweeper drains stranded sends from
+import atomic_io  # noqa: E402  crash-safe JSON write (tmp + os.replace) for the catchup-orphan reconcile
 CAP_HIT_SIGNAL = harness_run.CAP_HIT_SIGNAL
 REDRIVE_SIGNAL = harness_run.REDRIVE_SIGNAL  # a gated pass ended owning a never-fired send
 CONTINUATION_RETRY_CAP = 2
@@ -95,6 +96,16 @@ OUTBOX_ESCALATE_AFTER_SEC = 1800  # 30 min stranded before we ever surface it (r
 # seconds — a 120s cap would kill it mid-run.
 EVAL_TIMEOUT_SEC = 120
 EVAL_JUDGE_TIMEOUT_SEC = 900
+
+# Catchup orphan TTL. A /catchup sweep that stays `active:true` longer than this WITHOUT a fresh
+# `updated_at` is a crash orphan (the classic case: a daemon source-reload kills the pass mid-sweep,
+# leaving active:true forever). Left alone it freezes the whole maint lane — every maint pass stands
+# down on "a sweep is in flight". The reconciler finalizes-and-clears such a session so the lane
+# unblocks. 3600 = 6× the default maint_poll_sec (600): comfortably longer than any single legit
+# one-market sweep step (which re-stamps updated_at every pass), so a slow-but-live sweep is never
+# falsely reaped; far short of "stuck all afternoon". Same fail-safe-on-stale family as
+# journal_reconcile.GRACE_SEC. Overridable via config.catchup_ttl_sec.
+CATCHUP_TTL_SEC = 3600
 
 _stop = False
 
@@ -195,6 +206,9 @@ def load_config() -> dict:
         # buyer-inbox knobs. Both are gated by cheap non-LLM probes so idle cost stays ~zero.
         "buy_poll_sec": cfg.get("buy_poll_sec", 600),
         "maint_poll_sec": cfg.get("maint_poll_sec", 600),
+        # How stale an active /catchup sweep may get before it's treated as a crash orphan and cleared
+        # (so a reload-killed sweep can't freeze the maint lane). See CATCHUP_TTL_SEC.
+        "catchup_ttl_sec": cfg.get("catchup_ttl_sec", CATCHUP_TTL_SEC),
         "force_buy_pass_every": cfg.get("force_buy_pass_every", 6),
         # Nightly self-eval: how often to CHECK whether one is due (the actual cadence is
         # config.eval_interval_hours, owned by eval_state.py; 0 there disables it).
@@ -380,6 +394,71 @@ def _listing_health_session_active() -> bool:
         return bool(json.loads(
             (SELLER_DIR / "data" / "listing_health_session.json").read_text()).get("active"))
     except (OSError, ValueError):
+        return False
+
+
+def _catchup_path() -> Path:
+    """The /catchup sweep session file. Relocatable via BAZAAR_DATA_DIR (so tests isolate it; in
+    production thread_outbox.data_dir() resolves to SELLER_DIR/data, same file the skill writes)."""
+    return thread_outbox.data_dir() / "catchup_session.json"
+
+
+def _catchup_active() -> bool:
+    """True when a /catchup sweep is mid-flight. Fail-open to False (mirror _distribution_active)."""
+    try:
+        return bool(json.loads(_catchup_path().read_text()).get("active"))
+    except (OSError, ValueError):
+        return False
+
+
+def _catchup_session_age_sec(now: datetime | None = None) -> float | None:
+    """Seconds since the catchup session's `updated_at`, or None when it can't be timed.
+
+    A None result is deliberate and meaningful: a crash orphan can carry an absent/garbage timestamp,
+    and the reconciler treats None as STALE so it can never hide behind a bad stamp (same rule as
+    journal_reconcile, which folds an un-timeable orphan rather than skip it)."""
+    try:
+        stamp = json.loads(_catchup_path().read_text()).get("updated_at")
+        ts = thread_outbox.parse_iso(stamp)  # raises ValueError on a malformed (non-empty) stamp
+    except (OSError, ValueError):
+        return None
+    if ts is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return (now - ts).total_seconds()
+
+
+def reconcile_catchup_orphan(env: dict, dry_run: bool, ttl_sec: float = CATCHUP_TTL_SEC) -> bool:
+    """Finalize-and-clear a STALE active catchup sweep so it can never freeze the maint lane forever.
+
+    Stale = `active:true` AND (un-timeable age OR older than ttl_sec) — the daemon-reload-mid-sweep
+    orphan. We flip active:false with a closed_reason, PRESERVING the digest/markets so nothing the
+    sweep gathered is lost (the next /catchup re-surfaces anything still open). A FRESH sweep (within
+    the TTL) is left untouched — the channel pass is still driving it; clearing it would interrupt a
+    live sweep. `env` is unused (kept for call-site symmetry with reconcile_orphans). Best-effort +
+    fail-open: any error is logged and swallowed, never raised into the loop. Returns True iff it
+    cleared a session."""
+    if not _catchup_active():
+        return False
+    age = _catchup_session_age_sec()
+    if age is not None and age <= ttl_sec:
+        return False  # a live, recently-advanced sweep — do not interrupt it
+    age_str = "unknown" if age is None else f"{int(age)}s"
+    if dry_run:
+        logging.info("[dry-run] would reconcile a stale catchup sweep (age=%s)", age_str)
+        return False
+    try:
+        path = _catchup_path()
+        state = json.loads(path.read_text())
+        state["active"] = False
+        state["closed_reason"] = (
+            "catchup orphan reconciled: sweep stalled active past TTL (likely killed mid-sweep by a "
+            "daemon reload); finalized with the digest gathered so far")
+        atomic_io.write_json(path, state)
+        logging.info("reconciled a stale catchup sweep (age=%s) — maint lane unblocked", age_str)
+        return True
+    except (OSError, ValueError) as exc:
+        logging.warning("catchup reconcile error (non-fatal): %s", exc)
         return False
 
 
@@ -1174,6 +1253,10 @@ def main(argv) -> int:
         _swept = harness_run.sweep_stale_pass_logs()
         if _swept:
             logging.info("swept %s stale per-pass log(s) leaked by forced kills", len(_swept))
+        # Heal a catch-up sweep orphaned by the reload that respawned us (reload-mid-sweep): clear the
+        # stranded active:true on boot so the maint lane never stays frozen across a restart.
+        if reconcile_catchup_orphan(env, ns.dry_run):
+            logging.info("reconciled a stale catch-up sweep orphaned by a prior crash/reload")
         if channel["adapter"] == "telegram":
             _register_bot_commands(env)  # populate the "/" autocomplete menu (idempotent, non-fatal)
         last_buyer = time.monotonic() - cfg["buyer_poll_sec"]  # make a buyer pass due immediately
@@ -1315,6 +1398,11 @@ def main(argv) -> int:
             # pass, or start a cadence-due my-listings SCAN and/or inbox SWEEP. Gated by cheap non-LLM
             # probes so the LLM only runs when there's work (never interrupts an active listing wizard).
             if not paused and time.monotonic() - last_maint >= cfg["maint_poll_sec"]:
+                # Heal a stale/abandoned catchup sweep FIRST: a reload-killed sweep stranded active:true
+                # would otherwise make every maint pass stand down forever. A FRESH sweep is left to the
+                # channel pass and still defers maint below (cat_active) — we never interrupt a live one.
+                reconcile_catchup_orphan(env, ns.dry_run, cfg.get("catchup_ttl_sec", CATCHUP_TTL_SEC))
+                cat_active = _catchup_active()
                 dist_active = _distribution_active()
                 idet_active = _inbox_detect_active()
                 lh_active = _listing_health_session_active()
@@ -1323,17 +1411,21 @@ def main(argv) -> int:
                 # Stale-listing suggestions are the LOWEST-priority maint step: only start a new episode
                 # when no higher-priority detect/drain work is pending, so it never preempts a live wizard
                 # or an in-flight batch (one item per pass; rate-limited by listing_health_interval_hours).
-                if not (dist_active or idet_active or lh_active or scan_due or sweep_due):
+                if not (dist_active or idet_active or lh_active or scan_due or sweep_due or cat_active):
                     lh_due_item = _listing_health_due(env)
                     if lh_due_item:
                         run_listing_health_start(env, lh_due_item, ns.dry_run)
                         lh_active = not ns.dry_run  # dry-run writes no session, so it stays inactive
-                if dist_active or idet_active or lh_active or scan_due or sweep_due:
+                # A fresh catchup sweep defers ALL maint work this tick (the maint prompt would stand down
+                # anyway — skipping deterministically saves the wasted pass and keeps single-active-session).
+                if (dist_active or idet_active or lh_active or scan_due or sweep_due) and not cat_active:
                     reason = ("drain distribution batch" if dist_active else
                               "drain inbox-takeover batch" if idet_active else
                               "suggest stale-listing fixes" if lh_active else "detect due")
                     logging.info("maint pass → %s", reason)
                     run_pass("maint", channel, env, ns.dry_run)
+                elif cat_active:
+                    logging.info("maint deferred — catch-up sweep in flight (fresh)")
                 last_maint = time.monotonic()
 
             # BUY SIDE (§3): pursue active wants — search/shortlist a `searching` want, or liaise a

@@ -186,6 +186,28 @@ def test_ack_sent_one_shot_claim():
         check("new pause episode re-arms the claim", control.claim_pause_ack() is True)
 
 
+def test_resume_stays_pure_no_marketplace_logic():
+    print("resume() is a DUMB pause record: it flips only pause fields and never touches catch-up/"
+          "marketplace state (the catchup orphan heal lives in the daemon, not here):")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolate(tmp)
+        # A stale catch-up sweep sits beside the control file; resume() must not read or rewrite it.
+        catchup = Path(tmp) / "catchup_session.json"
+        catchup.write_text('{"active": true, "phase": "sweep"}')
+        control.pause(source="telegram")
+        control.add_correction("relist at 90", source="telegram")
+        new_state = control.resume(source="cli")
+        check("only pause fields flip (paused/since/ack_sent)",
+              new_state["paused"] is False and new_state["since"] is None
+              and new_state["ack_sent"] is False)
+        check("corrections preserved (resume pass drains them)",
+              len(new_state["corrections"]) == 1)
+        check("no catch-up/marketplace key leaks into control state",
+              not any(k in new_state for k in ("catchup", "active", "phase", "markets_pending")))
+        check("the catch-up session file is left untouched by resume()",
+              catchup.read_text() == '{"active": true, "phase": "sweep"}')
+
+
 def test_claim_pause_ack_tolerant_on_garbage():
     print("ack_sent is cosmetic-only: a garbage file reads NOT paused and claim returns False"
           " (can never strand the agent):")
@@ -202,6 +224,7 @@ if __name__ == "__main__":
     test_pause_resume_roundtrip()
     test_pause_idempotent_since_edge()
     test_resume_preserves_corrections()
+    test_resume_stays_pure_no_marketplace_logic()
     test_add_correction_unique_ids_and_target()
     test_mark_applied_idempotent()
     test_tolerant_on_garbage()
