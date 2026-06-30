@@ -358,6 +358,35 @@ bin/followup_state.py mark-nudge --thread <thread_id> --side buy`. If pacing ret
 NOT send and do NOT mark (it retries next interval). One nudge per thread per pass; never nudge a
 thread whose tail is inbound."""
 
+RESEARCH_PROMPT = """You are the Bazaar RESEARCH worker, running headless and DETACHED. You have NO
+browser and NO channel: you cannot message the seller or touch any marketplace. Your ONLY output is a
+single result file, written with the one Bash command you are allowed. Be fast and quiet.
+
+GOAL: identify the item in a listing's photos and find its used market price, so the main agent can
+present it to the seller instantly.
+
+STEPS:
+1. Read `data/listing_session.json`. Take `batch_id` and `fields.photos` (the downloaded photo paths).
+   If it is missing/unreadable or has no photos, exit without writing anything (nothing to do).
+2. Read the seller's region from `data/seller_config.json` (e.g. region/currency) for the price query.
+3. Read EACH photo path (the Read tool shows you the image). Identify the item:
+     - title (concise, what a buyer would search), category, condition (be honest),
+     - attributes (brand/model/size/colour as visible),
+     - category_tag — EXACTLY ONE of the fixed taxonomy in skills/marketplaces.md (drives the publish
+       filter); pick the closest,
+     - size_bucket — the delivery size from the item type: book/clothing=small, monitor/lamp=medium,
+       large appliance=large, desk/sofa=bulky; default medium when unsure.
+4. WebSearch `"<title> used price <region>"` for comps -> comp_low / comp_med / comp_high (integers in
+   the seller's currency). If you run a second query (e.g. a "<title> sold price <region>" lookup for
+   a tighter range), issue BOTH in ONE turn (parallel), never back-to-back.
+5. Write the result with EXACTLY this command (your only allowed Bash):
+     python3 bin/research_result.py --batch <batch_id> --result '<json>'
+   where <json> is a JSON object:
+     {"title","category","category_tag","condition","attributes","size_bucket",
+      "comp_low","comp_med","comp_high","currency"}
+   Then STOP. Do not message anyone (you have no way to). Do not retry after a successful write."""
+
+
 # Skills folded into the cached prefix per mode (byte-stable, no volatile data) — fail-open.
 # `skills/style.md` is the stable voice/persona rulebook (the volatile prefs live in data/style.json,
 # read at compose time); it rides the prefix anywhere a message is composed — buyer/buy replies,
@@ -371,6 +400,9 @@ CORE_SKILLS = {
     # maint now composes free-form stale-listing suggestions (not just a fixed completion notice), so
     # style.md (voice, NO em-dashes) + the listing-health skill ride the prefix too.
     "maint": ("skills/channel/notifications.md", "skills/channel/listing-health.md", "skills/style.md"),
+    # research is a quiet background worker: it only needs the marketplaces taxonomy (for category_tag).
+    # No channel/voice skills — it never messages.
+    "research": ("skills/marketplaces.md",),
 }
 
 # NOTE: the old PAUSE_LINE (a per-pass "Paused — holding here" narration) was REMOVED — it was the
@@ -478,6 +510,17 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("maint"),
             prompt_cache_1h=True,
         )
+    if mode == "research":
+        # Detached BACKGROUND worker: identify the item from the listing's photos + find comps, then
+        # write data/research_results/<batch_id>.json. Browser-free and channel-free by construction —
+        # the ONLY Bash it can run is the result writer, so it cannot message the seller or drive the
+        # live marketplace (it can only deposit findings). strict_mcp drops the browser MCP entirely.
+        # Sonnet (vision quality matters for identification); bounded turns; reads photos via Read.
+        return PassSpec(
+            prompt=RESEARCH_PROMPT, model="sonnet", max_turns=8,
+            allowed_tools=("WebSearch", "WebFetch", "Read", "Bash(python3 bin/research_result.py:*)"),
+            permission_mode="acceptEdits", strict_mcp=True, mcp_servers={},
+            system_prompt_append=_core_skills_block("research"))
     if mode == "intent":
         prompt = (
             'You are a friendly marketplace seller assistant. The seller just messaged you:\n'
@@ -715,7 +758,7 @@ def _utcnow() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-PASS_MODES = ("channel", "seller", "buyer", "buy", "maint")
+PASS_MODES = ("channel", "seller", "buyer", "buy", "maint", "research")
 
 
 def main(argv: list[str]) -> int:

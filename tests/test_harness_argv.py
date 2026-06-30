@@ -431,6 +431,22 @@ def test_eval_argv():
     check("judge prompt carried", any("JUDGE THESE RECORDS" in str(p) for p in a))
 
 
+def test_research_argv():
+    print("research pass (detached BACKGROUND worker — browser-free + channel-free):")
+    spec = harness_run.build_spec("research")
+    a = claude_argv("research").argv
+    check("model sonnet (vision quality)", _flag_value(a, "--model") == "sonnet")
+    check("bounded turns", _flag_value(a, "--max-turns") == "8")
+    check("strict MCP (no browser MCP)", "--strict-mcp-config" in a)
+    check("NO playwright/browser tools at all", not any("mcp__playwright" in str(p) for p in a))
+    check("NO general bash (cannot call telegram/other tools)",
+          "Bash(python3:*)" not in spec.allowed_tools)
+    check("ONLY the result-writer bash is allowed",
+          "Bash(python3 bin/research_result.py:*)" in spec.allowed_tools)
+    check("can read photos + search comps", "Read" in spec.allowed_tools and "WebSearch" in spec.allowed_tools)
+    check("research is a dispatchable pass mode", "research" in harness_run.PASS_MODES)
+
+
 def test_codex_stub():
     print("codex stub drops Claude-only flags:")
     inv = get_harness("codex").pass_argv(
@@ -485,6 +501,7 @@ if __name__ == "__main__":
     test_maint_model_env_override()
     test_intent_argv()
     test_eval_argv()
+    test_research_argv()
     test_resource_scoping()
     test_daemon_pass_env_marker()
     test_no_secret_in_argv()

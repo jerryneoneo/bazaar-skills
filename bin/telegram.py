@@ -175,8 +175,14 @@ def _normalize(update, authorized_chat):
         return None, None
     if "photo" in msg:
         largest = max(msg["photo"], key=lambda p: p.get("file_size", 0))
+        payload = {"file_id": largest["file_id"]}
+        # media_group_id groups photos sent as ONE gallery selection (a batching HINT only — the
+        # daemon's settle window and the research worker's vision clustering are authoritative).
+        # Photos taken/sent one-by-one carry no shared id, so absence is normal, not an error.
+        if msg.get("media_group_id"):
+            payload["media_group_id"] = msg["media_group_id"]
         return {"event_id": update["update_id"], "kind": "photo", "text": msg.get("caption", ""),
-                "payload": {"file_id": largest["file_id"]}, "ts": msg.get("date")}, chat
+                "payload": payload, "ts": msg.get("date")}, chat
     text = msg.get("text", "")
     kind = "command" if text.startswith("/") else "text"
     return {"event_id": update["update_id"], "kind": kind, "text": text,
@@ -235,6 +241,47 @@ def cmd_typing(ns):
     return 0
 
 
+def peek_summary(updates, chat_id):
+    """PURE: summarize a non-consuming getUpdates batch without touching state. Returns
+    {pending, latest_text, photos, nonphoto, latest_ts}. The photo/non-photo split + latest_ts
+    let the daemon run a settle window over a photo burst (wait until photos stop arriving) and
+    bail the instant a non-photo event (text/command like /pause) shows up."""
+    pending = 0
+    photos = 0
+    nonphoto = 0
+    latest_text = ""
+    latest_ts = 0
+    photo_file_ids = []
+    latest_action = None
+    for upd in updates:
+        event, _chat = _normalize(upd, chat_id)
+        if event is not None:
+            pending += 1
+            if event["kind"] == "photo":
+                photos += 1
+                fid = (event.get("payload") or {}).get("file_id")
+                if fid:
+                    photo_file_ids.append(fid)  # so the daemon can pre-download WITHOUT consuming
+            else:
+                nonphoto += 1
+            if event["kind"] == "action":
+                p = event.get("payload") or {}
+                latest_action = {"ref": p.get("ref"), "choice": p.get("choice")}  # newest button tap
+            if event.get("ts"):
+                latest_ts = max(latest_ts, event["ts"])
+            text = event.get("text") or ("[sent photos]" if event["kind"] == "photo" else "")
+            if text:
+                latest_text = text          # newest textful message → seeds the intent line
+        elif not chat_id:
+            # An uncaptured first contact — count it, and treat as non-photo so the daemon does
+            # not settle on an unknown sender.
+            pending += 1
+            nonphoto += 1
+    return {"pending": pending, "latest_text": latest_text, "photos": photos,
+            "nonphoto": nonphoto, "latest_ts": latest_ts, "photo_file_ids": photo_file_ids,
+            "latest_action": latest_action}
+
+
 def cmd_peek(ns):
     """Non-consuming check: are there updates waiting? Does NOT advance the offset or ack
     callbacks — the daemon uses this to decide whether to invoke the (consuming) processing
@@ -244,19 +291,7 @@ def cmd_peek(ns):
     updates = api("getUpdates", {"offset": state.get("update_offset", 0),
                                  "timeout": ns.timeout,
                                  "allowed_updates": ["message", "callback_query"]}, token)
-    pending = 0
-    latest_text = ""
-    for upd in updates:
-        # Count only updates from the authorized chat (or any, if not captured yet).
-        event, _chat = _normalize(upd, state.get("chat_id"))
-        if event is not None:
-            pending += 1
-            text = event.get("text") or ("[sent photos]" if event["kind"] == "photo" else "")
-            if text:
-                latest_text = text          # newest textful message → seeds the intent line
-        elif not state.get("chat_id"):
-            pending += 1
-    print(json.dumps({"pending": pending, "latest_text": latest_text}))  # state NOT saved
+    print(json.dumps(peek_summary(updates, state.get("chat_id"))))  # state NOT saved
     return 0
 
 

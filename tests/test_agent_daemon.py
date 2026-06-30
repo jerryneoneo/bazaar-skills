@@ -104,6 +104,138 @@ def test_channel_peek_parses_success():
     with_run(lambda *a, **k: FakeProc(0, '{"pending": 1, "latest_text": "hi"}'), body)
 
 
+def test_settle_step_pure():
+    print("settle_step: pure photo-burst decisions:")
+    check("non-photo pending → interrupt",
+          agent_daemon.settle_step(2, 1, 10, 2, 5, 0, 8, 60)[0] == "interrupt")
+    action, count, change = agent_daemon.settle_step(1, 0, 3, -1, 0, 0, 8, 60)
+    check("first count seen → wait + reset", action == "wait" and count == 1 and change == 3)
+    action, count, change = agent_daemon.settle_step(3, 0, 9, 1, 3, 0, 8, 60)
+    check("count grew → wait + reset timer", action == "wait" and count == 3 and change == 9)
+    check("stable past the gap → settled",
+          agent_daemon.settle_step(3, 0, 20, 3, 9, 0, 8, 60)[0] == "settled")
+    check("stable within the gap → wait",
+          agent_daemon.settle_step(3, 0, 12, 3, 9, 0, 8, 60)[0] == "wait")
+    check("cap elapsed → settled",
+          agent_daemon.settle_step(3, 0, 61, 3, 60, 0, 8, 60)[0] == "settled")
+
+
+def _with_settle_stubs(peek_seq, body):
+    """Run body() with channel_peek/typing/heartbeat/pause stubbed for settle_photo_burst tests."""
+    seq = iter(peek_seq)
+    last = peek_seq[-1] if peek_seq else {"photos": 0, "nonphoto": 0}
+    saved = (agent_daemon.channel_peek, agent_daemon._send_typing,
+             agent_daemon._touch_heartbeat, agent_daemon.control.is_paused)
+    agent_daemon.channel_peek = lambda *a, **k: next(seq, last)
+    agent_daemon._send_typing = lambda *a, **k: None
+    agent_daemon._touch_heartbeat = lambda *a, **k: None
+    agent_daemon.control.is_paused = lambda: False
+    try:
+        body()
+    finally:
+        (agent_daemon.channel_peek, agent_daemon._send_typing,
+         agent_daemon._touch_heartbeat, agent_daemon.control.is_paused) = saved
+
+
+def test_settle_photo_burst_coalesces():
+    print("settle_photo_burst: a one-by-one burst (1→2→3) coalesces into one batch:")
+    clock = {"t": 0.0}
+    peeks = [{"photos": 1, "nonphoto": 0}, {"photos": 2, "nonphoto": 0},
+             {"photos": 3, "nonphoto": 0}] + [{"photos": 3, "nonphoto": 0}] * 20
+    def body():
+        n = agent_daemon.settle_photo_burst(
+            {"adapter": "telegram"}, {}, 8, 60,
+            now_fn=lambda: clock["t"], sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s))
+        check("settles on the full batch of 3", n == 3)
+    _with_settle_stubs(peeks, body)
+
+
+def test_settle_photo_burst_interrupts_on_command():
+    print("settle_photo_burst: a non-photo event ends the wait immediately (-1):")
+    clock = {"t": 0.0}
+    peeks = [{"photos": 1, "nonphoto": 0}, {"photos": 1, "nonphoto": 1}]
+    def body():
+        n = agent_daemon.settle_photo_burst(
+            {"adapter": "telegram"}, {}, 8, 60,
+            now_fn=lambda: clock["t"], sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s))
+        check("interrupted → -1", n == -1)
+    _with_settle_stubs(peeks, body)
+
+
+def test_settle_config_keys_present():
+    print("load_config exposes the photo settle window knobs:")
+    cfg = agent_daemon.load_config()
+    check("gap present + numeric", isinstance(cfg.get("photo_settle_gap_sec"), (int, float)))
+    check("cap present + numeric", isinstance(cfg.get("photo_settle_cap_sec"), (int, float)))
+
+
+def test_has_caption_pure():
+    print("_has_caption: a bare photo burst (placeholder/empty) is caption-less:")
+    check("photo placeholder → no caption", agent_daemon._has_caption({"latest_text": "[sent photos]"}) is False)
+    check("empty → no caption", agent_daemon._has_caption({"latest_text": ""}) is False)
+    check("real caption → has caption", agent_daemon._has_caption({"latest_text": "selling my couch"}) is True)
+
+
+def test_listing_ack_plan_pure():
+    print("listing_ack_plan: instant deterministic acks per listing state (no LLM latency):")
+    # Bare photo burst → daemon asks sell/buy ITSELF, instantly.
+    bare = agent_daemon.listing_ack_plan(False, "", 3, 0, has_caption=False)
+    check("bare burst → ask_intent with buttons",
+          bare["action"] == "ask_intent" and "sell=Sell it" in bare["options"])
+    # Captioned burst → instant 'taking a look', then the pass classifies.
+    cap = agent_daemon.listing_ack_plan(False, "", 2, 0, has_caption=True)
+    check("captioned burst → run + a look ack", cap["action"] == "run" and cap["text"])
+    # Seller answered sell/buy (an action = nonphoto) at awaiting_intent → instant GENERIC ack (no
+    # item name; the background worker supplies the item + price next).
+    ans = agent_daemon.listing_ack_plan(True, "awaiting_intent", 0, 1, has_caption=False)
+    check("sell/buy answer → run + generic research ack",
+          ans["action"] == "run" and "research" in ans["text"].lower())
+    # Just the un-answered photos sitting at awaiting_intent → run (the cheap pass stashes them).
+    stash = agent_daemon.listing_ack_plan(True, "awaiting_intent", 2, 0, has_caption=False)
+    check("photos-only at awaiting_intent → run, no premature ack",
+          stash["action"] == "run" and stash["text"] == "")
+    # Seller answered the combined price/floor/info ask → instant 'reviewing', then publish.
+    rev = agent_daemon.listing_ack_plan(True, "awaiting_listing_inputs", 0, 1, has_caption=False)
+    check("combined answer → run + reviewing ack",
+          rev["action"] == "run" and "reviewing" in rev["text"].lower())
+
+
+def test_research_decide_pure():
+    print("research_decide: background-research orchestration decisions (pure):")
+    d = agent_daemon.research_decide
+    # No research-phase session → clean up any stale state/results.
+    check("inactive → cleanup", d(False, "", "b1", True, False, False, "b1", 0, 90) == "cleanup")
+    check("past research phase → cleanup",
+          d(True, "awaiting_listing_inputs", "b1", True, False, False, "b1", 0, 90) == "cleanup")
+    # In research phase but photos not stashed yet → nothing to do.
+    check("no photos yet → none", d(True, "awaiting_intent", "b1", False, False, False, "", 0, 90) == "none")
+    # Photos ready, no result, no worker for this batch → spawn (even at awaiting_intent, so research
+    # overlaps the sell/buy decision).
+    check("photos + new batch → spawn",
+          d(True, "awaiting_intent", "b1", True, False, False, "", 0, 90) == "spawn")
+    # Worker running within the timeout → wait.
+    check("running within timeout → wait",
+          d(True, "researching", "b1", True, False, False, "b1", 10, 90) == "wait")
+    # Worker exceeded the timeout, still no result → fail (→ inline backstop).
+    check("timed out → fail", d(True, "researching", "b1", True, False, False, "b1", 120, 90) == "fail")
+    # Result ready at researching → present.
+    check("result at researching → present",
+          d(True, "researching", "b1", True, True, False, "b1", 5, 90) == "present")
+    # Result ready but seller still choosing sell/buy → hold it until they pick sell.
+    check("result at awaiting_intent → hold",
+          d(True, "awaiting_intent", "b1", True, True, False, "b1", 5, 90) == "hold")
+    # A failure marker at researching also drives a present (the pass then inlines).
+    check("failed marker at researching → present",
+          d(True, "researching", "b1", True, False, True, "b1", 5, 90) == "present")
+
+
+def test_present_research_result_failopen():
+    print("_present_research_result: returns False (no write) when there is no usable result:")
+    # A batch with no result file → reads nothing → returns False, defers to a pass. Safe: no IO.
+    check("missing result → False (no present)",
+          agent_daemon._present_research_result({"adapter": "console"}, {}, "no-such-batch-xyz") is False)
+
+
 def test_buyer_force_due_count_net():
     print("buyer_force_due: count-based net fires at/after force_every empty peeks:")
     check("below threshold → not due", agent_daemon.buyer_force_due(1, 2, 0.0, 0.0)[0] is False)
@@ -979,6 +1111,14 @@ if __name__ == "__main__":
     test_buy_peek_success_and_failopen()
     test_channel_peek_console_skips_subprocess()
     test_channel_peek_parses_success()
+    test_settle_step_pure()
+    test_settle_photo_burst_coalesces()
+    test_settle_photo_burst_interrupts_on_command()
+    test_settle_config_keys_present()
+    test_has_caption_pure()
+    test_listing_ack_plan_pure()
+    test_research_decide_pure()
+    test_present_research_result_failopen()
     test_buyer_force_due_count_net()
     test_buyer_force_due_time_floor()
     test_buyer_recheck_failopen_conservative()
@@ -1007,6 +1147,14 @@ if __name__ == "__main__":
     test_listing_health_due_parses_and_failopen()
     test_listing_health_start_dry_run_spawns_nothing()
     test_followup_poll_sec_in_config()
+    test_catchup_active_parses_and_failopen()
+    test_catchup_session_age()
+    test_reconcile_catchup_orphan_clears_stale()
+    test_reconcile_catchup_orphan_clears_untimeable()
+    test_reconcile_catchup_orphan_spares_fresh()
+    test_reconcile_catchup_orphan_inactive_is_noop()
+    test_reconcile_catchup_orphan_dry_run_noop()
+    test_catchup_ttl_in_config()
     print()
     if _fail:
         print(f"FAILED ({len(_fail)}): {', '.join(_fail)}")

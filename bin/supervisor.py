@@ -498,9 +498,21 @@ def run(cfg, channel, env, ns, max_workers, peek_timeout) -> int:
                 if workers:
                     logging.info("channel work → preempting %s buyer worker(s)", len(workers))
                     _preempt_all(workers)
-                if not ad._listing_active():
-                    ad.send_intent(channel, env, peek.get("latest_text", ""), ns.dry_run)
-                ad.run_pass("seller", channel, env, ns.dry_run)
+                # Deterministic, INSTANT handling (settle + sell/buy ask + sell-tap transition) so the
+                # seller never waits on a ~2-min channel pass for an ack/transition. 'defer' = fully
+                # handled here (no LLM pass needed). Shared with the single-flight loop.
+                if ad.channel_instant_ack(channel, env, peek, cfg, ns.dry_run) != "defer":
+                    ad.run_pass("seller", channel, env, ns.dry_run)
+
+        # BACKGROUND RESEARCH (Phase B): drive the detached worker. When its result lands, present it
+        # DETERMINISTICALLY (no LLM pass). Only a worker TIMEOUT (inline research) or auto-price needs
+        # a pass — then preempt market workers first (the seller is waiting).
+        if not paused and ad.research_orchestrate(channel, env, ns.dry_run, cfg) == "present":
+            if workers:
+                logging.info("research fallback → preempting %s worker(s) to present", len(workers))
+                _preempt_all(workers)
+            logging.info("research fallback → inline present pass")
+            ad.run_pass("seller", channel, env, ns.dry_run)
 
         # NOTIFICATION-PATH trigger (checked every iteration, ~0 tokens): launch a scoped buyer
         # worker for any notification-path market (trigger_resolver) with new OS-notification mail,

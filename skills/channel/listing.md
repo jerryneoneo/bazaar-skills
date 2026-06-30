@@ -73,36 +73,65 @@ clear sell caption goes straight to research; a bare/description-only photo asks
 # INTENT — ask sell-or-buy ONLY when unclear (per the gate). A clear sell caption, or buy side
 # unavailable, skips the ask.
 if the routing caption clearly states SELL, OR the buy side is unavailable:
-    session.intent = "sell" ; fall through to RESEARCH in THIS pass.
+    session.intent = "sell" ; session.step = "researching" ; fall through to RESEARCH in THIS pass.
+    # (RESEARCH writes the session at `researching` with fields.photos + batch_id, so the daemon
+    #  spawns the background worker; this pass returns while it runs and presents when it lands.)
 else (NEUTRAL — no caption / description-only):
+    # FALLBACK ask (console / no-daemon): with the daemon, this branch is NOT reached — the daemon
+    # asks sell-or-buy INSTANTLY (deterministic, no LLM latency) and opens the awaiting_intent
+    # session itself, so a bare burst routes to `awaiting_intent` below, not here. This ask covers
+    # the console adapter (no daemon) so the flow still works there.
     write listing_session { step:"awaiting_intent", intent:null, batch_id, fields.photos }
     ask "Quick one: want me to SELL this for you, or BUY one like it?"
         (options="sell=Sell it,buy=Buy one")
     return
 
-### awaiting_intent → (the seller picks sell or buy)
-# The session holds the photos already. Apply the choice; never re-ask which item.
-if BUY:  session.active=false (close listing_session) ; start skills/buying/search.md with
-         fields.photos as the want's seed/visual context (a photo-seeded search). return.
-if SELL: session.intent="sell" ; step="researching" ; fall through to RESEARCH this pass.
-# anything else (not a clear sell/buy) → re-ask the one sell/buy question; stay in awaiting_intent.
+### awaiting_intent → (waiting for the seller's sell-or-buy choice)
+# The daemon OPENED this session (deterministic instant ask) and usually PRE-DOWNLOADED the photos
+# into fields.photos already (so the background research worker can start immediately). Handle both
+# what's pending and the choice:
+if the inbound is PHOTOS and NO sell/buy choice yet (no "sell"/"buy" answer):
+    # pass that just drains the pending burst — the daemon already asked sell-or-buy, so do NOT
+    # re-ask and do NOT research yet. If fields.photos is ALREADY set (daemon pre-downloaded), just
+    # consume the pending updates and return; only download here if fields.photos is still empty
+    # (console / no-daemon fallback).
+    if fields.photos is empty: [download] each pending photo → data/photos/<batch_id>/NN.jpg ; fields.photos = [paths]
+    write listing_session ; return                      # stay on awaiting_intent
+if the choice is BUY (button "buy" / "buy"-intent text):
+    session.active=false (close listing_session) ; start skills/buying/search.md with fields.photos
+    as the want's seed/visual context (a photo-seeded search). return.
+if the choice is SELL (button "sell" / "sell"-intent text):
+    if fields.photos is empty: [download] the pending photos → fields.photos   # answer arrived w/ photos
+    session.intent="sell" ; step="researching" ; fall through to RESEARCH this pass.
+# anything else (not photos, not a clear sell/buy) → re-ask the one sell/buy question; stay put.
 
-### RESEARCH (step=researching) — identify + price, narrated so the seller sees movement
-# Instant narration FIRST (the receipt ack already landed; this promises the work you then do).
-say "🔎 On it, identifying the item and pricing it against the market now. (I ship only, no meetups.)"
-# BACKGROUND-WORKER SEAM (fail-closed): if data/research_results/<batch_id>.json exists, the
-# background research worker finished — READ title/category/category_tag/condition/attributes/
-# size_bucket + comp_low/med/high from it and SKIP the inline vision+comps below. Otherwise (no
-# worker, or it has not finished) do the SAME work inline now — the listing is never stranded.
-[vision] identify from fields.photos → title, category, condition, attributes, category_tag (one of
-         the fixed taxonomy in skills/marketplaces.md; drives the publish filter), and size_bucket —
-         auto-determine the delivery size (small|medium|large|bulky) from the item type (book/
-         clothing=small, monitor/lamp=medium, large appliance=large, desk/sofa=bulky; default medium
-         when unsure). Store in fields.size_bucket.
-[WebSearch] "<title> used price <region>" → comp_low/med/high   (fast; skip slow browser comps here).
-         If you run more than one comp query (e.g. add a "<title> sold price <region>" lookup for a
-         tighter range), issue them as PARALLEL calls in ONE turn — never back-to-back. Comps depend
-         on the title from [vision] above, so [vision] runs first; the comp queries then fan out.
+### RESEARCH (step=researching) — present the BACKGROUND worker's findings (fail-closed to inline)
+# A detached, browser-free worker (the daemon spawned it the moment the photos were stashed)
+# identifies the item + finds comps WHILE the seller chooses/answers, and writes
+# data/research_results/<batch_id>.json. So this step usually just PRESENTS a ready result; it does
+# NOT block. The daemon re-fires this pass the instant the result (or a timeout failure) lands, so a
+# proactive present needs no new seller message. The seller already saw an instant "identifying" ack.
+ensure fields.photos is set (download the pending burst if it arrived with this event); keep batch_id.
+# 1) RESULT READY → use it.
+if data/research_results/<batch_id>.json exists:
+    read it → fields.title, category, category_tag, condition, attributes, size_bucket,
+              comp_low/med/high, currency.   # then PRESENT below.
+# 2) WORKER FAILED/TIMED OUT (data/research_results/<batch_id>.failed exists) OR background research
+#    is disabled (config.research_worker_enabled = false) → do it INLINE now (fail-closed; never
+#    strand a listing on a worker that did not finish):
+elif <batch_id>.failed exists OR config.research_worker_enabled is false:
+    [vision] identify from fields.photos → title, category, category_tag (one of the fixed taxonomy
+             in skills/marketplaces.md; drives the publish filter), condition, attributes, size_bucket
+             (book/clothing=small, monitor/lamp=medium, large appliance=large, desk/sofa=bulky;
+             default medium). Store in fields.*.
+    [WebSearch] "<title> used price <region>" → comp_low/med/high   (parallel queries in ONE turn if
+             more than one; comps depend on the title, so vision runs first).  # then PRESENT below.
+# 3) WORKER STILL RUNNING → say NOTHING (the instant "identifying" ack already set expectations).
+#    Keep step=researching and RETURN; the daemon presents the moment the result lands.
+else:
+    write listing_session (step=researching) ; return
+
+# PRESENT (shared by 1 and 2):
 say "🔎 Looks like a <title> (<condition>). Similar ones sell ~<low> to <high> <currency>.
      I'll get it ready for <your enabled marketplaces>."
      # <your enabled marketplaces> = the seller's ENABLED platforms named from
