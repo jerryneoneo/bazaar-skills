@@ -49,6 +49,13 @@ AGENT_LABEL = "com.selly.agent"
 # hung worker would have surfaced here). It is purely observability — we never kill the process
 # mid-iteration (run_pass has its own 900s tree-kill deadline; the watchdog handles a wedged loop).
 LOOP_ITER_BUDGET = 120
+# How long a run lock may be held before we treat a still-alive holder as a HUNG orphan and force it.
+# run_pass has a 900s tree-kill deadline, so a lock older than that + slack cannot be a legit live pass.
+RUN_LOCK_TTL_SEC = 960
+# Debounce source-change reloads: only bounce once the source fingerprint has been STABLE for this many
+# seconds after a change, so a burst of edits (e.g. a concurrent editing session touching bin/*.py) causes
+# ONE reload after things settle instead of a reload storm that orphans in-flight passes.
+SOURCE_RELOAD_DEBOUNCE_SEC = 15
 
 sys.path.insert(0, str(BIN))
 from harnesses import UnknownHarness, get_harness  # noqa: E402  (local bin/harnesses package)
@@ -141,6 +148,24 @@ def _source_fingerprint() -> int:
     return newest
 
 
+def _reload_due(baseline_fp: int, last_fp: int, cur_fp: int, stable_since: float | None,
+                now: float, debounce_sec: float) -> tuple[bool, int, float | None]:
+    """Pure debounce decision for a source-change reload. Given the startup `baseline_fp`, the previously
+    observed `last_fp`, the current reading `cur_fp`, and when the fingerprint last SETTLED after diverging
+    from the baseline (`stable_since`), return (reload_now, new_last_fp, new_stable_since).
+
+    reload_now is True only when the source differs from the startup baseline AND has stayed unchanged for
+    `debounce_sec`. A fresh change (or a change still in flight) resets the stability clock, so an edit
+    burst yields ONE reload after it settles rather than a reload per keystroke. A fingerprint that returns
+    to the baseline (edit reverted mid-window) clears the clock and cancels the reload."""
+    if cur_fp != last_fp:                       # the source changed since we last looked
+        last_fp = cur_fp
+        stable_since = now if cur_fp != baseline_fp else None
+    reload_now = (last_fp != baseline_fp and stable_since is not None
+                  and now - stable_since >= debounce_sec)
+    return reload_now, last_fp, stable_since
+
+
 def relaunch_self() -> None:
     """Fix D: best-effort single, atomic restart of THIS LaunchAgent on a source change.
 
@@ -191,7 +216,7 @@ def setup_logging() -> None:
 
 def load_config() -> dict:
     cfg = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
-    return {
+    built = {
         "buyer_poll_sec": cfg.get("buyer_poll_sec", cfg.get("watch_poll_sec", 300)),
         "peek_timeout": cfg.get("channel_poll_sec", 25),
         # Photo-burst settle window: photos sent one-by-one land as separate updates. Wait until none
@@ -248,6 +273,13 @@ def load_config() -> dict:
         "max_concurrent_workers": _int_or(
             os.environ.get("SELLY_MAX_WORKERS") or cfg.get("max_concurrent_workers", 1), 1),
     }
+    # FAST (UNSAFE) demo mode mirrors pacing_gate: when config.pacing_mode == "fast", collapse the
+    # photo-burst settle window so a listing starts almost immediately (the pacing_gate reply jitter is
+    # zeroed separately, per send). Any value but exactly "fast" keeps the safe settle — fail-safe.
+    built["pacing_mode"] = "normal"
+    if str(cfg.get("pacing_mode", "normal")).strip().lower() == "fast":
+        built.update(photo_settle_gap_sec=1, photo_settle_cap_sec=4, pacing_mode="fast")
+    return built
 
 
 def _int_or(value, default):
@@ -314,6 +346,17 @@ def _distribution_active() -> bool:
     """True when a cross-listing batch is mid-flow (its queue still has items to drain). Fail-open."""
     try:
         return bool(json.loads((SELLER_DIR / "data" / "distribution_session.json").read_text()).get("active"))
+    except (OSError, ValueError):
+        return False
+
+
+def _distribution_awaiting_decision() -> bool:
+    """True when a DISTRIBUTE flow is parked on a yes/no cross-list decision (step=awaiting_distribute).
+    A button tap here is answering that offer, NOT starting a fresh listing, so the instant-ack path must
+    route it to the distribution resume instead of emitting a generic 'list your item' intent. Fail-open."""
+    try:
+        d = json.loads((SELLER_DIR / "data" / "distribution_session.json").read_text())
+        return bool(d.get("active")) and d.get("step") == "awaiting_distribute"
     except (OSError, ValueError):
         return False
 
@@ -729,6 +772,42 @@ def buyer_recheck(env: dict) -> dict:
         return {"unhandled": 1, "latest_text": "", "markets": {}}
 
 
+INTENT_STATE = SELLER_DIR / "data" / "intent_state.json"  # last event we pre-acked (dedupe across ticks)
+
+
+def _intent_signature(peek: dict) -> str:
+    """A stable identity for the pending event a pre-ack intent line would answer: latest timestamp +
+    button ref/choice + a text prefix. Two consecutive peeks of the SAME un-consumed event share a
+    signature, which is how we avoid re-sending an intent line every tick while the event is pending."""
+    act = peek.get("latest_action") or {}
+    return "|".join(str(x) for x in (
+        peek.get("latest_ts") or "", act.get("ref") or "", act.get("choice") or "",
+        (peek.get("latest_text") or "")[:40]))
+
+
+def _same_intent_event(sig: str, last_sig: str | None) -> bool:
+    """Pure: True when `sig` names the same (non-empty) event we last pre-acked, so skip a duplicate."""
+    return bool(sig.strip("|")) and sig == last_sig
+
+
+def _intent_already_sent(peek: dict) -> bool:
+    """True when we already sent an intent line for this exact pending event (persisted dedupe). Fail-open
+    to False (send) so a read error never SILENCES a legitimate first ack."""
+    try:
+        last = json.loads(INTENT_STATE.read_text()).get("last_sig")
+    except (OSError, ValueError):
+        last = None
+    return _same_intent_event(_intent_signature(peek), last)
+
+
+def _mark_intent_sent(peek: dict) -> None:
+    """Record the event we just pre-acked so the next tick's identical peek is deduped. Fail-open."""
+    try:
+        INTENT_STATE.write_text(json.dumps({"last_sig": _intent_signature(peek), "ts": time.time()}))
+    except OSError as exc:
+        logging.warning("intent dedupe write failed: %s", exc)
+
+
 def send_intent(channel: dict, env: dict, text: str, dry_run: bool) -> None:
     """Fast, contextual 'what I'll do next' line via a MCP-less haiku pass (no API key).
     Telegram-only (the intent-line plumbing sends via telegram.py); other adapters skip it and
@@ -935,13 +1014,29 @@ def channel_instant_ack(channel: dict, env: dict, peek: dict, cfg: dict, dry_run
             _drain_pending(env)
         return "run"
 
+    # 2b) DISTRIBUTION decision (Cross-list / Not now answering awaiting_distribute) → recognize it so a
+    #     tap on a post-publish cross-list offer is NOT mislabeled as a fresh "list your item" (the wrong,
+    #     loop-prone intent the seller saw). The seller pass resumes distribution.md to apply the decision;
+    #     here we just give the correct instant ack.
+    if (not active) and act.get("choice") in ("yes", "setup", "no") and _distribution_awaiting_decision():
+        _channel_say(channel, env,
+                     "👍 Okay, I'll leave it as is." if act["choice"] == "no"
+                     else "👍 On it, sorting out the cross-list now.", dry_run=dry_run)
+        return "run"
+
     # 3) Everything else (captioned burst, price/floor reply, non-listing message) → instant pre-ack,
     #    then the seller pass does the considered work.
     plan = listing_ack_plan(active, step, photos, nonphoto, _has_caption(peek))
     if plan["text"]:
         _channel_say(channel, env, plan["text"], dry_run=dry_run)
-    elif not active:
+    elif not active and _seller_pass_can_run() and not _intent_already_sent(peek):
+        # Non-listing fresh message → ONE pre-ack, sent only when a seller pass will actually run to back
+        # it (gate) and only once per distinct event (dedupe). Together these kill the intent-line loop: a
+        # still-pending / re-peeked event can no longer re-fire an intent every tick. The pass still runs
+        # regardless (we return "run"); the gate/dedupe govern only the pre-ack line, not the work.
         send_intent(channel, env, peek.get("latest_text", ""), dry_run)  # non-listing fresh message
+        if not dry_run:
+            _mark_intent_sent(peek)
     return "run"
 
 
@@ -1433,6 +1528,91 @@ def drain_channel_outbox(channel: dict, env: dict, dry_run: bool) -> None:
                 pass
 
 
+def _read_runlock() -> dict:
+    """Parse the run-lock body → {daemon_pid, pgid, ts}. Handles the new JSON body AND a legacy bare-int
+    body (a pre-fix lock, or a lock left across an upgrade) by treating the int as the daemon pid. Returns
+    {} when the file is absent, empty, or unreadable — the caller treats {} as 'safe to take'."""
+    try:
+        raw = RUN_LOCK.read_text().strip()
+    except OSError:
+        return {}
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+        if isinstance(body, dict):
+            return body
+    except ValueError:
+        pass
+    try:
+        return {"daemon_pid": int(raw), "pgid": None, "ts": 0}
+    except ValueError:
+        return {}
+
+
+def _pgid_alive(pgid: object) -> bool:
+    """True if a process GROUP with leader `pgid` still has members. os.killpg(pgid, 0) is the probe:
+    ProcessLookupError → gone; PermissionError → alive (owned elsewhere). Non-int/garbage → dead."""
+    if not isinstance(pgid, int) or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _runlock_verdict(body: dict, my_pid: int, now: float) -> str:
+    """Pure decision for an existing run lock: 'skip' (a live holder legitimately owns it) or 'reclaim'
+    (stale / our own leaked lock / a hung orphan past the TTL). This is the fix for the deadlock where a
+    bare exists()-check treated a lock left by a DEAD pid as held forever, so every pass was skipped.
+
+    - A live pass GROUP (pgid alive) owns the lock — UNLESS it has blown the run_pass 900s deadline
+      (age > RUN_LOCK_TTL_SEC), which means a hung/orphaned tree → reclaim (and kill it).
+    - Else a DIFFERENT live daemon holding it (shouldn't happen under INSTANCE_LOCK) → skip.
+    - Else (dead holder, our own pid — run_pass is sequential so no pass of ours runs now — or garbage)
+      → reclaim."""
+    if not body:
+        return "reclaim"
+    ts = body.get("ts") or 0
+    aged = (now - ts) > RUN_LOCK_TTL_SEC if ts else True
+    if _pgid_alive(body.get("pgid")):
+        return "reclaim" if aged else "skip"
+    dpid = body.get("daemon_pid")
+    if isinstance(dpid, int) and dpid != my_pid and instance_lock.is_pid_alive(dpid):
+        return "skip"
+    return "reclaim"
+
+
+def _reclaim_run_lock(body: dict) -> None:
+    """Remove a stale run lock. If the recorded pass GROUP is somehow still alive (a hung orphan aged past
+    the TTL, or an orphan left by a hard-killed prior instance), kill the WHOLE tree FIRST so it can't keep
+    acting on the live account after we hand the lock to a new pass (the 'never two passes' invariant)."""
+    pgid = body.get("pgid")
+    if _pgid_alive(pgid):
+        logging.warning("run lock: killing orphaned pass group pgid=%s before reclaim", pgid)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)  # type: ignore[arg-type]  (pgid is a live int here)
+            except OSError:
+                break
+            time.sleep(1)
+    RUN_LOCK.unlink(missing_ok=True)
+
+
+def _seller_pass_can_run() -> bool:
+    """True if a seller pass would actually acquire the run lock this tick (free, or held by a stale/
+    reclaimable holder). A pre-ack intent line PROMISES a pass will act; when a LIVE pass already holds
+    the lock, that running pass owns the reply, so we suppress the redundant (and loop-prone) intent."""
+    if not RUN_LOCK.exists():
+        return True
+    return _runlock_verdict(_read_runlock(), os.getpid(), time.time()) == "reclaim"
+
+
 def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
              extra_env: dict | None = None) -> int:
     """Invoke the LLM pass (run_pass.sh seller|buyer) under the single-flight lock.
@@ -1450,11 +1630,21 @@ def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
                      mode, pulse, list((extra_env or {}).keys()))
         return 0
     if RUN_LOCK.exists():
-        logging.info("run lock held — skipping %s pass this tick", mode)
-        return 0
+        # PID/PGID-AWARE (fixes the deadlock): a bare exists()-check treated a lock left by a DEAD pid
+        # (an orphan from a reload-storm overlap) as held forever, so every pass was skipped and the
+        # channel event never got consumed → the intent-line loop. Reclaim a stale/orphaned lock instead.
+        body = _read_runlock()
+        if _runlock_verdict(body, os.getpid(), time.time()) == "skip":
+            logging.info("run lock held by a live pass — skipping %s pass this tick", mode)
+            return 0
+        logging.warning("reclaiming stale run lock (daemon_pid=%s pgid=%s) — %s pass proceeds",
+                        body.get("daemon_pid"), body.get("pgid"), mode)
+        _reclaim_run_lock(body)
     # Check-then-write is not atomic, but it is never raced: a single daemon instance is guaranteed
-    # by INSTANCE_LOCK (fcntl), and run_pass is only ever called sequentially from that one loop.
-    RUN_LOCK.write_text(str(os.getpid()))
+    # by INSTANCE_LOCK (fcntl), and run_pass is only ever called sequentially from that one loop. The
+    # body records the daemon pid + a ts now, and the pass GROUP (pgid) right after Popen below, so a
+    # future stale-lock reclaim can verify liveness and kill an orphaned tree.
+    RUN_LOCK.write_text(json.dumps({"daemon_pid": os.getpid(), "pgid": None, "ts": time.time()}))
     try:
         logging.info("running %s pass…", mode)
         # start_new_session=True → the pass leads its own process group, so proc_tree.confirm_dead
@@ -1464,6 +1654,12 @@ def run_pass(mode: str, channel: dict, env: dict, dry_run: bool,
         # bug, now fixed here too). Every forced exit confirms the tree dead BEFORE the finally unlink.
         proc = subprocess.Popen([str(BIN / "run_pass.sh"), mode], env=pass_env, cwd=str(SELLER_DIR),
                                 start_new_session=True)
+        # Record the pass process GROUP (== proc.pid with start_new_session) so a stale-lock reclaim by a
+        # future/overlapping instance can confirm this tree is dead — and kill it if it is orphaned-alive.
+        try:
+            RUN_LOCK.write_text(json.dumps({"daemon_pid": os.getpid(), "pgid": proc.pid, "ts": time.time()}))
+        except OSError as exc:
+            logging.warning("run lock pgid write failed: %s", exc)
         deadline = time.monotonic() + 900
         while proc.poll() is None:
             _touch_heartbeat()  # keep the heartbeat fresh during a long pass (proves the loop lives)
@@ -1680,7 +1876,11 @@ def main(argv) -> int:
     _instance_lock = _lock["fd"]  # noqa: F841 — held for the process lifetime (OS frees on exit)
     if _lock["reclaimed"]:
         logging.info("reclaimed a stale instance lock (previous holder pid was dead) — starting fresh")
-    RUN_LOCK.unlink(missing_ok=True)  # clear any stale lock from a hard crash
+    if RUN_LOCK.exists():
+        # A fresh daemon owns everything now, so clear any lock left by a prior/overlapping instance —
+        # but if that instance's pass tree is still orphaned-alive, kill it FIRST so it can't keep acting
+        # on the live account alongside our passes (fixes the reload-overlap that wedged the lock).
+        _reclaim_run_lock(_read_runlock())
 
     # Bug D3: once WE hold the lock, guarantee a clean-exit clear of the lock body so a recycled
     # PID can never fool the watchdog into a silent stay-down. The finally covers every exit path
@@ -1734,12 +1934,20 @@ def main(argv) -> int:
         # A correction already pending makes the apply pass due immediately, not a retry-interval out.
         last_corrections = time.monotonic() - channel_control.CORRECTIONS_RETRY_SEC
         src_fp = _source_fingerprint()  # exit cleanly when our own code changes → launchd respawns fresh
+        _last_fp = src_fp               # most recent fingerprint reading (drives the reload debounce)
+        _fp_stable_since: float | None = None  # when the source last SETTLED after diverging from src_fp
         while not _stop:
             iter_start = time.monotonic()  # Fix D: time each iteration so a wedged one is VISIBLE (WARN)
             # A code change to the daemon's own sources only takes effect on restart (no hot-reload), so
             # bounce here at a between-pass boundary (no pass runs at loop top — run_pass is synchronous).
-            if _source_fingerprint() != src_fp:
-                logging.info("daemon source changed → exiting to reload (launchd will respawn on fresh code)")
+            # DEBOUNCED: reload only once the source has STAYED changed-and-stable for a short window, so a
+            # burst of edits (e.g. a concurrent editing session touching bin/*.py) triggers ONE reload after
+            # it settles instead of a reload storm that orphans in-flight passes (the root of this incident).
+            _reload, _last_fp, _fp_stable_since = _reload_due(
+                src_fp, _last_fp, _source_fingerprint(), _fp_stable_since, iter_start,
+                SOURCE_RELOAD_DEBOUNCE_SEC)
+            if _reload:
+                logging.info("daemon source changed and settled → exiting to reload (launchd respawns fresh)")
                 relaunch_self()  # clean single atomic restart on fresh code (no unload+load double-spawn)
                 break
             _touch_heartbeat()  # one tick per loop iteration; healthcheck WARNs if this goes stale
