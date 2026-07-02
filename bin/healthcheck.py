@@ -97,8 +97,12 @@ def marketplace_checks(data_dir: Path) -> list[dict]:
         return [_check("marketplace-logins", WARN, "seller_config.json unreadable")]
     if not isinstance(markets, dict):
         return []
+    # Only browser-connector markets have a Chrome login to confirm. MCP / api_key connectors
+    # (e.g. carousell-ai) authenticate with an API key, not a signed-in Chrome session, so they
+    # must never be flagged as "not logged in" here. Missing connector defaults to browser (back-compat).
     enabled = {mid: m for mid, m in markets.items()
-               if isinstance(m, dict) and m.get("enabled")}
+               if isinstance(m, dict) and m.get("enabled")
+               and m.get("connector", "browser") == "browser"}
     if not enabled:
         return [_check("marketplace-logins", WARN, "no marketplaces enabled",
                        "enable one via /selly -> marketplaces")]

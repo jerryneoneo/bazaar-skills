@@ -96,6 +96,12 @@ SUPPORTED_RUNTIME = {"claude-code"}
 # Non-browser tools every pass needs: deterministic money/shipping scripts + web research + reads.
 BASE_TOOLS = ("Bash(python3:*)", "WebSearch", "WebFetch", "Read", "Glob", "Grep")
 
+# carousell.ai (bazaar) MCP tools — the seller/channel + maint passes publish and manage listings on
+# the first-party rail through these, the same way the browser recipes drive the playwright MCP.
+# Registered in .mcp.json as `local-bazaar`; enabled via settings.local.json enabledMcpjsonServers.
+BAZAAR_MCP_TOOLS = ("mcp__local-bazaar__create_listing", "mcp__local-bazaar__create_seller",
+                    "mcp__local-bazaar__update_listing", "mcp__local-bazaar__get_listing")
+
 # Browser tool surface is PER MODE — the buyer pass ships a smaller set than the seller pass, since
 # every tool schema is re-sent each turn (cost). Suffixes map to mcp__playwright__browser_<suffix>.
 SELLER_BROWSER = ("navigate", "navigate_back", "click", "type", "fill_form", "select_option",
@@ -464,7 +470,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
                 prompt = f"{CHANNEL_PROMPT}\n\n{tail}"
         return PassSpec(
             prompt=prompt, model=model, max_turns=max_turns,
-            allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER),
+            allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER) + BAZAAR_MCP_TOOLS,
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("channel"),
             prompt_cache_1h=True,
         )
@@ -506,7 +512,7 @@ def build_spec(mode: str, msg: str = "", resource: str = "") -> PassSpec:
         maint_model = os.environ.get("SELLY_MAINT_MODEL", "sonnet") or None
         return PassSpec(
             prompt=_scope_prefix(resource) + MAINT_PROMPT, model=maint_model, max_turns=None,
-            allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER),
+            allowed_tools=BASE_TOOLS + _browser_tools(SELLER_BROWSER) + BAZAAR_MCP_TOOLS,
             permission_mode="acceptEdits", system_prompt_append=_core_skills_block("maint"),
             prompt_cache_1h=True,
         )

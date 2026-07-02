@@ -8,6 +8,10 @@
         "--cdp-endpoint",
         "http://127.0.0.1:9222"
       ]
+    },
+    "local-bazaar": {
+      "type": "http",
+      "url": "http://localhost:9282/mcp"
     }
   }
 }

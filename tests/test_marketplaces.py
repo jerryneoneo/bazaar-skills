@@ -106,6 +106,25 @@ def test_classify_furniture_us():
           any(d["id"] == "poshmark" and d["reason"] == "category" for d in sets["dropped_enabled"]))
 
 
+def test_carousell_ai_mcp_entry():
+    print("carousell-ai (MCP connector) registry entry:")
+    reg = load_registry()
+    check("carousell-ai present", "carousell-ai" in reg)
+    m = reg.get("carousell-ai", {})
+    check("carousell-ai is active", m.get("status") == "active")
+    check("carousell-ai connector is mcp", m.get("connector", {}).get("type") == "mcp")
+    check("carousell-ai flow file present",
+          bool(m.get("listing_flow")) and (ROOT / m["listing_flow"]).exists())
+    # regions ["*"] → offered in every region (it's a first-party rail, not geo-scoped).
+    check("carousell-ai offered in SG", distribution.region_match(m, "SG"))
+    check("carousell-ai offered in US", distribution.region_match(m, "US"))
+    check("carousell-ai accepts any category", distribution.category_match(m, "furniture"))
+    # eligible when the seller enables it — a cross-list candidate alongside the browser markets.
+    sets = distribution.classify(reg, {"carousell-ai": {"enabled": True}}, "SG", "furniture", {})
+    check("carousell-ai is a cross-list candidate when enabled",
+          "carousell-ai" in sets["cross_list_candidates"])
+
+
 if __name__ == "__main__":
     print("marketplace registry tests\n")
     test_registry_schema()
@@ -115,6 +134,7 @@ if __name__ == "__main__":
     test_category_gate()
     test_array_shim()
     test_classify_furniture_us()
+    test_carousell_ai_mcp_entry()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): {', '.join(_failures)}")
