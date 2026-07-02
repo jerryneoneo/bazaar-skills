@@ -76,6 +76,17 @@ def test_marketplace_logins():
         c = healthcheck.marketplace_checks(data)[0]
         check("all confirmed -> ok", c["level"] == healthcheck.OK)
 
+    with tempfile.TemporaryDirectory() as tmp:
+        # An MCP / api_key connector (carousell-ai) has no Chrome login, so the browser-login
+        # check must ignore it — never flag it as "not logged in".
+        data = _seller_config(tmp, {"marketplaces": {
+            "fb": {"enabled": True, "auth": "confirmed"},
+            "carousell-ai": {"enabled": True, "auth": "api_key", "connector": "mcp"},
+        }})
+        c = healthcheck.marketplace_checks(data)[0]
+        check("mcp connector not flagged as not-logged-in", c["level"] == healthcheck.OK)
+        check("mcp market excluded from login detail", "carousell-ai" not in c["detail"])
+
 
 def test_login_liveness():
     print("login-liveness advisory probe (additive, fail-open):")

@@ -34,6 +34,17 @@
       "status": "active"
     },
     {
+      "id": "carousell-ai",
+      "display_name": "Carousell.ai",
+      "regions": ["*"],
+      "categories": ["*"],
+      "fulfillment": ["ship_only"],
+      "listing_flow": "skills/listing-flows/carousell-ai.md",
+      "listing_url": { "host": "localhost", "path": "/listing/" },
+      "connector": { "type": "mcp", "auth": "api_key" },
+      "status": "active"
+    },
+    {
       "id": "ebay",
       "display_name": "eBay",
       "regions": ["US", "UK", "AU", "DE", "CA", "*"],

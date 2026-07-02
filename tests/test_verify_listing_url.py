@@ -68,6 +68,18 @@ def test_region_gate():
           ok("craigslist", "https://sfbay.craigslist.org/sfc/ele/d/x/1.html", "US"))
 
 
+def test_carousell_ai_localhost():
+    print("carousell-ai (MCP connector) localhost URL — host+path gate still applies:")
+    good = "http://localhost:3001/listing/9f8c-abcd"
+    check("localhost /listing/ passes (no region)", ok("carousell-ai", good))
+    # region is passed by listing.md's loop; carousell-ai has no domains map, so the region gate
+    # falls back to the "localhost" suffix match and still passes.
+    check("localhost /listing/ passes with region", ok("carousell-ai", good, "SG"))
+    check("wrong path fails", not ok("carousell-ai", "http://localhost:3001/p/9f8c"))
+    check("empty id/url fails", not ok("carousell-ai", ""))
+    check("wrong host fails", not ok("carousell-ai", "http://evil.example/listing/1"))
+
+
 def test_cli_exit_codes():
     print("CLI exit codes:")
     good = v.main(["verify_listing_url.py", "--market", "fb",
@@ -85,6 +97,7 @@ if __name__ == "__main__":
     test_real_permalinks_pass()
     test_fabricated_urls_fail()
     test_region_gate()
+    test_carousell_ai_localhost()
     test_cli_exit_codes()
     print()
     if _failures:
